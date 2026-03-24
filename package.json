@@ -1,15 +1,27 @@
 {
     "name": "obsidian-sync-mcp",
     "version": "0.1.0",
-    "description": "MCP server for accessing your Obsidian vault via CouchDB LiveSync",
+    "description": "Remote MCP server that gives Claude access to your Obsidian vault via Self-hosted LiveSync and CouchDB",
     "type": "module",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/es617/obsidian-sync-mcp.git"
+    },
+    "keywords": ["mcp", "obsidian", "livesync", "couchdb", "claude", "ai"],
+    "engines": {
+        "node": ">=22"
+    },
     "bin": {
         "obsidian-sync-mcp": "./dist/main.js"
     },
+    "files": [
+        "dist/",
+        "README.md",
+        "LICENSE"
+    ],
     "scripts": {
-        "build:lib": "tsup lib/livesync-commonlib/src/index.ts --format esm --dts --outDir dist/lib --external pouchdb-core --external pouchdb-adapter-http --external pouchdb-mapreduce --external pouchdb-replication --external pouchdb-find --external transform-pouch --external pouchdb-merge --external pouchdb-utils --external pouchdb-errors --external octagonal-wheels --external diff-match-patch --external xxhash-wasm --external fflate --external minimatch",
-        "build:server": "tsup src/main.ts --format esm --outDir dist --external ./dist/lib",
-        "build": "npm run build:lib && npm run build:server",
+        "build": "tsup",
         "start": "node dist/main.js",
         "dev": "tsx src/main.ts"
     },

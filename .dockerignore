@@ -1,0 +1,12 @@
+node_modules/
+lib/
+src/
+.git/
+.github/
+*.md
+*.ts
+tsconfig.json
+tsup.config.ts
+docker-compose.yml
+deploy/
+.env

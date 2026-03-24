@@ -1,0 +1,131 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
+      - run: npm pack --dry-run
+      - run: npm pack
+      - uses: actions/upload-artifact@v5
+        with:
+          name: package
+          path: "*.tgz"
+
+  # Smoke test: start server in local mode, verify it responds
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
+      - name: Start server and test
+        run: |
+          mkdir -p /tmp/test-vault
+          echo "# Test Note" > /tmp/test-vault/test.md
+          VAULT_PATH=/tmp/test-vault VAULT_NAME=TestVault node dist/main.js &
+          sleep 3
+          # MCP initialize handshake
+          RESP=$(curl -s -X POST http://localhost:8787/mcp \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1.0"}}}')
+          echo "$RESP"
+          echo "$RESP" | grep -q "obsidian-sync-mcp" || (echo "FAIL: server did not respond" && exit 1)
+          echo "PASS"
+          kill %1
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: package
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${{ github.ref_name }}" == *rc* ]]; then
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --generate-notes \
+              --prerelease \
+              *.tgz
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --generate-notes \
+              *.tgz
+          fi
+
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, 'rc')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --provenance --access public
+
+  publish-docker:
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, 'rc')
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
