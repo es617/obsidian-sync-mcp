@@ -2,7 +2,7 @@
  * Password-gated OAuth provider for MCP.
  *
  * Implements a self-contained OAuth 2.1 flow:
- * - Claude connects → gets 401 with metadata pointer
+ * - Claude connects -> gets 401 with metadata pointer
  * - Claude discovers /.well-known/oauth-protected-resource
  * - Claude registers via /oauth/register (DCR)
  * - Claude redirects user to /oauth/authorize
@@ -30,6 +30,7 @@ interface TokenRecord {
     refreshToken: string;
     clientId: string;
     expiresAt: number;
+    refreshExpiresAt: number;
 }
 
 interface RegisteredClient {
@@ -40,12 +41,25 @@ interface RegisteredClient {
 }
 
 const TOKEN_EXPIRY_MS = 3600 * 1000; // 1 hour
+const DEFAULT_REFRESH_DAYS = 14;
+const REFRESH_EXPIRY_MS = parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAULT_REFRESH_DAYS)) * 24 * 3600 * 1000;
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 30 * 1000; // 30 seconds
 
 export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) {
     const pendingAuths = new Map<string, PendingAuth>();
-    const tokens = new Map<string, TokenRecord>(); // accessToken -> record
-    const refreshTokens = new Map<string, TokenRecord>(); // refreshToken -> record
+    const tokens = new Map<string, TokenRecord>();
+    const refreshTokens = new Map<string, TokenRecord>();
     const clients = new Map<string, RegisteredClient>();
+
+    // Rate limiting state
+    let failedAttempts = 0;
+    let lockedUntil = 0;
+
+    // HTTPS warning
+    if (!baseUrl.startsWith("https://") && !baseUrl.includes("localhost")) {
+        console.warn("WARNING: BASE_URL is not HTTPS. OAuth tokens will be sent in cleartext. Use a tunnel (cloudflared, tailscale, ngrok) to provide TLS.");
+    }
 
     // --- Discovery endpoints ---
 
@@ -114,27 +128,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
             code,
         });
 
-        // Render password page
-        const html = `<!DOCTYPE html>
-<html><head><title>Obsidian Sync MCP - Authorize</title>
-<style>
-  body { font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 0 20px; }
-  h1 { font-size: 1.3em; }
-  input[type=password] { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; font-size: 1em; }
-  button { padding: 10px 20px; font-size: 1em; cursor: pointer; }
-  .error { color: red; }
-</style></head>
-<body>
-  <h1>Obsidian Sync MCP</h1>
-  <p>Enter the server password to authorize access to your vault.</p>
-  <form method="POST" action="/oauth/approve">
-    <input type="hidden" name="code" value="${code}">
-    <input type="password" name="password" placeholder="Password" autofocus required>
-    <br><button type="submit">Authorize</button>
-  </form>
-</body></html>`;
-
-        return c.html(html);
+        return c.html(renderPasswordPage(code));
     });
 
     // --- Approval handler ---
@@ -149,35 +143,44 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
             return c.html("<p>Invalid or expired authorization request.</p>", 400);
         }
 
-        if (submittedPassword !== password) {
-            // Re-render with error
-            const html = `<!DOCTYPE html>
-<html><head><title>Obsidian Sync MCP - Authorize</title>
-<style>
-  body { font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 0 20px; }
-  h1 { font-size: 1.3em; }
-  input[type=password] { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; font-size: 1em; }
-  button { padding: 10px 20px; font-size: 1em; cursor: pointer; }
-  .error { color: red; }
-</style></head>
-<body>
-  <h1>Obsidian Sync MCP</h1>
-  <p class="error">Wrong password. Try again.</p>
-  <form method="POST" action="/oauth/approve">
-    <input type="hidden" name="code" value="${code}">
-    <input type="password" name="password" placeholder="Password" autofocus required>
-    <br><button type="submit">Authorize</button>
-  </form>
-</body></html>`;
-            return c.html(html, 401);
+        // Rate limiting
+        if (Date.now() < lockedUntil) {
+            const waitSec = Math.ceil((lockedUntil - Date.now()) / 1000);
+            console.warn(`Auth: locked out, ${waitSec}s remaining`);
+            return c.html(renderPasswordPage(code, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
         }
 
-        // Password correct — redirect back with auth code
+        if (submittedPassword !== password) {
+            failedAttempts++;
+            console.warn(`Auth: failed attempt ${failedAttempts}/${MAX_FAILED_ATTEMPTS}`);
+
+            if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+                lockedUntil = Date.now() + LOCKOUT_MS;
+                failedAttempts = 0;
+                console.warn(`Auth: locked out for ${LOCKOUT_MS / 1000}s`);
+                return c.html(renderPasswordPage(code, `Too many attempts. Try again in ${LOCKOUT_MS / 1000} seconds.`), 429);
+            }
+
+            return c.html(renderPasswordPage(code, "Wrong password."), 401);
+        }
+
+        // Password correct — reset rate limiter
+        failedAttempts = 0;
+        console.log("Auth: password accepted, issuing authorization code.");
+
         const url = new URL(pending.redirectUri);
         url.searchParams.set("code", code);
         if (pending.state) url.searchParams.set("state", pending.state);
+        const redirectUrl = url.toString();
 
-        return c.redirect(url.toString());
+        // Show a brief success page so the browser triggers the password save prompt
+        // before redirecting to the OAuth callback
+        return c.html(`<!DOCTYPE html>
+<html><head><title>Authorized</title></head>
+<body>
+<p>Authorized. Redirecting...</p>
+<script>setTimeout(()=>window.location.href=${JSON.stringify(redirectUrl)},1000)</script>
+</body></html>`);
     });
 
     // --- Token endpoint ---
@@ -214,6 +217,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
                 refreshToken,
                 clientId: pending.clientId,
                 expiresAt: Date.now() + TOKEN_EXPIRY_MS,
+                refreshExpiresAt: Date.now() + REFRESH_EXPIRY_MS,
             };
             tokens.set(accessToken, record);
             refreshTokens.set(refreshToken, record);
@@ -233,11 +237,17 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
                 return c.json({ error: "invalid_grant" }, 400);
             }
 
-            // Revoke old tokens
+            // Check refresh token expiry
+            if (Date.now() > old.refreshExpiresAt) {
+                tokens.delete(old.accessToken);
+                refreshTokens.delete(refreshToken);
+                console.log("Auth: refresh token expired, user must re-authenticate.");
+                return c.json({ error: "invalid_grant", error_description: "Refresh token expired" }, 400);
+            }
+
             tokens.delete(old.accessToken);
             refreshTokens.delete(refreshToken);
 
-            // Issue new tokens
             const accessToken = randomBytes(32).toString("hex");
             const newRefreshToken = randomBytes(32).toString("hex");
             const record: TokenRecord = {
@@ -245,6 +255,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
                 refreshToken: newRefreshToken,
                 clientId: old.clientId,
                 expiresAt: Date.now() + TOKEN_EXPIRY_MS,
+                refreshExpiresAt: old.refreshExpiresAt, // keep original expiry
             };
             tokens.set(accessToken, record);
             refreshTokens.set(newRefreshToken, record);
@@ -260,7 +271,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
         return c.json({ error: "unsupported_grant_type" }, 400);
     });
 
-    // Return a middleware function that validates Bearer tokens
+    // Return a function that validates Bearer tokens
     return function validateToken(authHeader: string | undefined): boolean {
         if (!authHeader?.startsWith("Bearer ")) return false;
         const token = authHeader.slice(7);
@@ -272,4 +283,26 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
         }
         return true;
     };
+}
+
+function renderPasswordPage(code: string, error?: string): string {
+    return `<!DOCTYPE html>
+<html><head><title>Obsidian Sync MCP - Authorize</title>
+<style>
+  body { font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 0 20px; }
+  h1 { font-size: 1.3em; }
+  input[type=password] { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; font-size: 1em; }
+  button { padding: 10px 20px; font-size: 1em; cursor: pointer; }
+  .error { color: red; }
+</style></head>
+<body>
+  <h1>Obsidian Sync MCP</h1>
+  ${error ? `<p class="error">${error}</p>` : "<p>Enter the server password to authorize access to your vault.</p>"}
+  <form method="POST" action="/oauth/approve" autocomplete="on">
+    <input type="hidden" name="code" value="${code}">
+    <input type="text" name="username" value="obsidian-sync-mcp" autocomplete="username" style="display:none">
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+    <br><button type="submit">Authorize</button>
+  </form>
+</body></html>`;
 }

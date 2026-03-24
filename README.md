@@ -178,6 +178,7 @@ The agent handles multi-step flows. "Summarize my last 5 daily notes" means list
 | `PORT` | Both | `8787` | HTTP port |
 | `BASE_URL` | Both | `http://localhost:PORT` | Public URL (for OAuth callbacks) |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for OAuth approval page. When set, all MCP requests require authentication. |
+| `MCP_REFRESH_DAYS` | Optional | `14` | Days before the session expires and the user must re-enter the password. |
 
 Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is set, the server exits with an error.
 
