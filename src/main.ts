@@ -22,6 +22,8 @@ interface VaultBackend {
     readNote(path: string): Promise<string | null>;
     writeNote(path: string, content: string): Promise<boolean>;
     deleteNote(path: string): Promise<boolean>;
+    moveNote(from: string, to: string): Promise<boolean>;
+    getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null>;
     listNotes(folder?: string): Promise<string[]>;
     searchVault(query: string): Promise<Array<{ path: string; snippet: string }>>;
 }
@@ -167,6 +169,60 @@ server.addTool({
     execute: async ({ path }) => {
         const ok = await vault.deleteNote(path);
         return ok ? `Deleted: ${path}` : `Failed to delete: ${path}`;
+    },
+});
+
+server.addTool({
+    name: "move_note",
+    description:
+        "Move or rename a note. Use this to rename a note within the same folder, move it to a different folder, or both at once. Creates destination folders automatically.",
+    parameters: z.object({
+        from: z.string().describe("Current path, e.g. 'daily/old-name.md'"),
+        to: z.string().describe("New path, e.g. 'projects/new-name.md'"),
+    }),
+    execute: async ({ from, to }) => {
+        const ok = await vault.moveNote(from, to);
+        if (!ok) {
+            return `Failed to move: ${from} → ${to}`;
+        }
+        const deepLink = makeDeepLink(VAULT_NAME, to);
+        return `Moved: ${from} → ${to}\n[Open in Obsidian](${deepLink})`;
+    },
+});
+
+server.addTool({
+    name: "get_note_metadata",
+    description:
+        "Get metadata about a note without reading its full content. Returns frontmatter properties, tags (both frontmatter and inline #tags), internal links ([[wikilinks]] and markdown links), file size, and timestamps.",
+    parameters: z.object({
+        path: z.string().describe("Vault-relative path to the note, e.g. 'projects/my-project.md'"),
+    }),
+    execute: async ({ path }) => {
+        const meta = await vault.getMetadata(path);
+        if (!meta) {
+            return `Note not found: ${path}`;
+        }
+        const deepLink = makeDeepLink(VAULT_NAME, path);
+        const lines = [
+            `**${path}**`,
+            `Size: ${meta.size} bytes`,
+            `Created: ${new Date(meta.ctime).toISOString()}`,
+            `Modified: ${new Date(meta.mtime).toISOString()}`,
+        ];
+        if (Object.keys(meta.frontmatter).length > 0) {
+            lines.push(`\nFrontmatter:`);
+            for (const [k, v] of Object.entries(meta.frontmatter)) {
+                lines.push(`  ${k}: ${v}`);
+            }
+        }
+        if (meta.tags.length > 0) {
+            lines.push(`\nTags: ${meta.tags.map((t) => `#${t}`).join(", ")}`);
+        }
+        if (meta.links.length > 0) {
+            lines.push(`\nLinks: ${meta.links.join(", ")}`);
+        }
+        lines.push(`\n[Open in Obsidian](${deepLink})`);
+        return lines.join("\n");
     },
 });
 

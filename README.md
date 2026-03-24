@@ -228,10 +228,12 @@ Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is 
 | Tool | Description |
 |---|---|
 | `read_note` | Read a note's markdown content by path |
-| `write_note` | Create or overwrite a note |
+| `write_note` | Create or overwrite a note (preserves creation time on updates) |
 | `list_notes` | List all `.md` files, optionally filtered by folder |
-| `search_vault` | Full-text search across all notes |
+| `search_vault` | Full-text search across all notes (capped at 50 results) |
 | `delete_note` | Delete a note |
+| `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
+| `get_note_metadata` | Get frontmatter, tags, links, size, and timestamps without reading the full content |
 
 Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) (`obsidian://open?vault=...&file=...`) that works on Mac and iOS.
 

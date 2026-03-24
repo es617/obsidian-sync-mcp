@@ -1,6 +1,7 @@
-import { readFile, writeFile, unlink, mkdir } from "fs/promises";
+import { readFile, writeFile, unlink, mkdir, stat } from "fs/promises";
 import { join, dirname, resolve } from "path";
 import { glob } from "fs/promises";
+import { parseFrontmatterAndLinks } from "./parse.js";
 
 export class LocalVault {
     private root: string;
@@ -48,6 +49,33 @@ export class LocalVault {
             return true;
         } catch {
             return false;
+        }
+    }
+
+    async moveNote(from: string, to: string): Promise<boolean> {
+        const content = await this.readNote(from);
+        if (content === null) return false;
+        const wrote = await this.writeNote(to, content);
+        if (!wrote) return false;
+        return await this.deleteNote(from);
+    }
+
+    async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
+        const fullPath = this.safePath(path);
+        try {
+            const [content, s] = await Promise.all([
+                readFile(fullPath, "utf-8"),
+                stat(fullPath),
+            ]);
+            return {
+                path,
+                size: s.size,
+                ctime: s.birthtimeMs,
+                mtime: s.mtimeMs,
+                ...parseFrontmatterAndLinks(content),
+            };
+        } catch {
+            return null;
         }
     }
 

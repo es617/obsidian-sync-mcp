@@ -68,6 +68,54 @@ describe("readNote / writeNote", () => {
     });
 });
 
+describe("moveNote", () => {
+    it("moves a note to a new path", async () => {
+        await vault.writeNote("move/src.md", "content");
+        assert.equal(await vault.moveNote("move/src.md", "move/dest.md"), true);
+        assert.equal(await vault.readNote("move/src.md"), null);
+        assert.equal(await vault.readNote("move/dest.md"), "content");
+    });
+
+    it("moves across folders", async () => {
+        await vault.writeNote("folder-a/note.md", "hello");
+        assert.equal(await vault.moveNote("folder-a/note.md", "folder-b/note.md"), true);
+        assert.equal(await vault.readNote("folder-b/note.md"), "hello");
+    });
+
+    it("returns false if source doesn't exist", async () => {
+        assert.equal(await vault.moveNote("nope.md", "dest.md"), false);
+    });
+});
+
+describe("getMetadata", () => {
+    it("returns metadata for a note with frontmatter and tags", async () => {
+        await vault.writeNote("meta/test.md", `---
+title: Test
+tags: [foo, bar]
+---
+
+# Hello #inline-tag
+
+See [[Other Note]]
+`);
+        const meta = await vault.getMetadata("meta/test.md");
+        assert.ok(meta);
+        assert.equal(meta!.path, "meta/test.md");
+        assert.ok(meta!.size > 0);
+        assert.ok(meta!.ctime > 0);
+        assert.ok(meta!.mtime > 0);
+        assert.equal(meta!.frontmatter.title, "Test");
+        assert.ok(meta!.tags.includes("foo"));
+        assert.ok(meta!.tags.includes("bar"));
+        assert.ok(meta!.tags.includes("inline-tag"));
+        assert.ok(meta!.links.includes("Other Note"));
+    });
+
+    it("returns null for non-existent note", async () => {
+        assert.equal(await vault.getMetadata("nope.md"), null);
+    });
+});
+
 describe("deleteNote", () => {
     it("deletes an existing note", async () => {
         await vault.writeNote("del.md", "x");

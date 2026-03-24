@@ -7,6 +7,7 @@ import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src
 import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { ReadyEntry, MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
+import { parseFrontmatterAndLinks } from "./parse.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -53,9 +54,16 @@ export class Vault {
     }
 
     async writeNote(path: string, content: string): Promise<boolean> {
+        // Preserve ctime if note already exists
+        let ctime = Date.now();
+        const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (existing && "ctime" in existing) {
+            ctime = existing.ctime;
+        }
+
         const blob = createTextBlob(content);
         return await this.manipulator.put(path, blob, {
-            ctime: Date.now(),
+            ctime,
             mtime: Date.now(),
             size: new TextEncoder().encode(content).byteLength,
         });
@@ -63,6 +71,27 @@ export class Vault {
 
     async deleteNote(path: string): Promise<boolean> {
         return await this.manipulator.delete(path);
+    }
+
+    async moveNote(from: string, to: string): Promise<boolean> {
+        const content = await this.readNote(from);
+        if (content === null) return false;
+        const wrote = await this.writeNote(to, content);
+        if (!wrote) return false;
+        return await this.deleteNote(from);
+    }
+
+    async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
+        const entry = await this.manipulator.get(path as FilePathWithPrefix);
+        if (!entry) return null;
+        const content = "data" in entry && Array.isArray(entry.data) ? entry.data.join("") : "";
+        return {
+            path,
+            size: entry.size,
+            ctime: entry.ctime,
+            mtime: entry.mtime,
+            ...parseFrontmatterAndLinks(content),
+        };
     }
 
     async listNotes(folder?: string): Promise<string[]> {
