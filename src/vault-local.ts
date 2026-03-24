@@ -1,4 +1,4 @@
-import { readFile, writeFile, unlink, mkdir, stat, realpath } from "fs/promises";
+import { readFile, writeFile, unlink, mkdir, stat, realpath, rename } from "fs/promises";
 import { dirname, resolve, sep } from "path";
 import { realpathSync } from "fs";
 import { glob } from "fs/promises";
@@ -65,11 +65,23 @@ export class LocalVault {
     }
 
     async moveNote(from: string, to: string): Promise<boolean> {
-        const content = await this.readNote(from);
-        if (content === null) return false;
-        const wrote = await this.writeNote(to, content);
-        if (!wrote) return false;
-        return await this.deleteNote(from);
+        const fromPath = await this.safePath(from);
+        const toPath = await this.safePath(to);
+        try {
+            await mkdir(dirname(toPath), { recursive: true });
+            await rename(fromPath, toPath);
+            return true;
+        } catch (e: any) {
+            if (e.code === "EXDEV") {
+                // Cross-device: fall back to copy-delete
+                const content = await this.readNote(from);
+                if (content === null) return false;
+                const wrote = await this.writeNote(to, content);
+                if (!wrote) return false;
+                return await this.deleteNote(from);
+            }
+            return false;
+        }
     }
 
     async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {

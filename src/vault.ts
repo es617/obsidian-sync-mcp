@@ -65,7 +65,14 @@ export class Vault {
         );
     }
 
+    private validatePath(path: string): void {
+        if (!path || path.includes("\0") || path.length > 1000) {
+            throw new Error("Invalid path");
+        }
+    }
+
     async readNote(path: string): Promise<string | null> {
+        this.validatePath(path);
         const entry = await this.manipulator.get(path as FilePathWithPrefix);
         if (!entry) return null;
         if ("data" in entry && Array.isArray(entry.data)) {
@@ -75,6 +82,7 @@ export class Vault {
     }
 
     async writeNote(path: string, content: string): Promise<boolean> {
+        this.validatePath(path);
         // Preserve ctime if note already exists
         let ctime = Date.now();
         const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
@@ -91,10 +99,13 @@ export class Vault {
     }
 
     async deleteNote(path: string): Promise<boolean> {
+        this.validatePath(path);
         return await this.manipulator.delete(path);
     }
 
     async moveNote(from: string, to: string): Promise<boolean> {
+        this.validatePath(from);
+        this.validatePath(to);
         const content = await this.readNote(from);
         if (content === null) return false;
         const wrote = await this.writeNote(to, content);
@@ -103,6 +114,7 @@ export class Vault {
     }
 
     async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
+        this.validatePath(path);
         const entry = await this.manipulator.get(path as FilePathWithPrefix);
         if (!entry) return null;
         const content = "data" in entry && Array.isArray(entry.data) ? entry.data.join("") : "";

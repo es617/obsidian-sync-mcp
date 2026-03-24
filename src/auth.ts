@@ -391,6 +391,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
 function renderPasswordPage(code: string, csrf: string, error?: string): string {
     return `<!DOCTYPE html>
 <html><head><title>Obsidian Sync MCP - Authorize</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'">
 <style>
   body { font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 0 20px; }
   h1 { font-size: 1.3em; }
