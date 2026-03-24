@@ -1,5 +1,5 @@
 import { readFile, writeFile, unlink, mkdir, stat } from "fs/promises";
-import { join, dirname, resolve } from "path";
+import { join, dirname, resolve, sep } from "path";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 
@@ -12,7 +12,7 @@ export class LocalVault {
 
     private safePath(path: string): string {
         const full = resolve(this.root, path);
-        if (!full.startsWith(this.root + "/")) {
+        if (!full.startsWith(this.root + sep)) {
             throw new Error("Path traversal blocked");
         }
         return full;
@@ -80,7 +80,7 @@ export class LocalVault {
     }
 
     async listNotes(folder?: string): Promise<string[]> {
-        if (folder && !folder.endsWith("/")) folder += "/";
+        if (folder && !folder.endsWith("/") && !folder.endsWith("\\")) folder += "/";
         const searchDir = folder ? join(this.root, folder) : this.root;
         const paths: string[] = [];
         try {
