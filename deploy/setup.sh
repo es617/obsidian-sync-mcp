@@ -26,8 +26,8 @@ MCP_AUTH_TOKEN=$(openssl rand -hex 16)
 echo "Generated credentials."
 echo ""
 
-# Launch app from the deploy directory
-cd "$(dirname "$0")"
+# Launch app from repo root (fly.toml is there)
+cd "$(dirname "$0")/.."
 fly launch --no-deploy --copy-config
 
 # Set secrets

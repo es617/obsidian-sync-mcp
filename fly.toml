@@ -1,7 +1,6 @@
 # Fly.io configuration for obsidian-sync-mcp
 #
 # Deploy:
-#   cd deploy
 #   fly launch
 #   fly secrets set COUCHDB_PASSWORD=<password> MCP_AUTH_TOKEN=<password> VAULT_NAME=MyVault
 

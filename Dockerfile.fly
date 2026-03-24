@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R couchdb:couchdb /opt/couchdb
 
 # CouchDB config
-COPY couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
+COPY deploy/couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
 
 # MCP server (from published image)
 WORKDIR /app
@@ -30,8 +30,8 @@ COPY --from=mcp /app/node_modules/ node_modules/
 COPY --from=mcp /app/dist/ dist/
 
 # Startup
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY entrypoint.sh /app/entrypoint.sh
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY deploy/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8787
