@@ -1,7 +1,9 @@
 import { FastMCP } from "fastmcp";
 import { z } from "zod";
+import { join } from "path";
 import { makeDeepLink } from "./deeplink.js";
 import { mountPasswordAuth } from "./auth.js";
+import { SearchIndex } from "./search.js";
 
 // --- Configuration from environment ---
 const VAULT_PATH = process.env.VAULT_PATH; // Local mode: path to vault directory
@@ -51,6 +53,24 @@ if (VAULT_PATH) {
 
 await vault.init();
 console.log("Vault ready.");
+
+// --- Search index ---
+const indexPath = VAULT_PATH
+    ? join(VAULT_PATH, ".obsidian-mcp", "search-index.json")
+    : "/tmp/obsidian-mcp-search-index.json";
+const searchIndex = new SearchIndex(indexPath);
+
+const loaded = await searchIndex.loadFromDisk();
+if (!loaded) {
+    console.log("Building search index...");
+    const start = performance.now();
+    const notes = await vault.listNotes();
+    for (const path of notes) {
+        const content = await vault.readNote(path);
+        if (content) searchIndex.update(path, content);
+    }
+    console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+}
 
 // --- MCP Server ---
 const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
@@ -114,6 +134,7 @@ server.addTool({
         if (!ok) {
             return `Failed to write note: ${path}`;
         }
+        searchIndex.update(path, content);
         const deepLink = makeDeepLink(VAULT_NAME, path);
         return `Note saved: ${path}\n[Open in Obsidian](${deepLink})`;
     },
@@ -148,7 +169,7 @@ server.addTool({
         query: z.string().describe("Text to search for (case-insensitive)"),
     }),
     execute: async ({ query }) => {
-        const results = await vault.searchVault(query);
+        const results = searchIndex.search(query);
         if (results.length === 0) {
             return `No results for: ${query}`;
         }
@@ -168,6 +189,7 @@ server.addTool({
     }),
     execute: async ({ path }) => {
         const ok = await vault.deleteNote(path);
+        if (ok) searchIndex.remove(path);
         return ok ? `Deleted: ${path}` : `Failed to delete: ${path}`;
     },
 });
@@ -181,10 +203,13 @@ server.addTool({
         to: z.string().describe("New path, e.g. 'projects/new-name.md'"),
     }),
     execute: async ({ from, to }) => {
+        const content = await vault.readNote(from);
         const ok = await vault.moveNote(from, to);
         if (!ok) {
             return `Failed to move: ${from} → ${to}`;
         }
+        searchIndex.remove(from);
+        if (content) searchIndex.update(to, content);
         const deepLink = makeDeepLink(VAULT_NAME, to);
         return `Moved: ${from} → ${to}\n[Open in Obsidian](${deepLink})`;
     },
@@ -229,6 +254,7 @@ server.addTool({
 // --- Graceful shutdown ---
 async function shutdown() {
     console.log("Shutting down...");
+    await searchIndex.saveToDisk();
     await vault.close();
     process.exit(0);
 }
