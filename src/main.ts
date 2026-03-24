@@ -112,16 +112,22 @@ const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
     instructions: "Access and manage an Obsidian vault. You can read, write, list, search, and delete markdown notes. Every response includes a deep link to open the note directly in Obsidian.",
 };
 
-// Auth: a closure that gets wired up after the OAuth routes are mounted
-let _validateToken: (auth: string | undefined) => boolean = () => true;
+// Auth
+import type { AuthHandle } from "./auth.js";
+let auth: AuthHandle | null = null;
 
 if (AUTH_TOKEN) {
     serverOptions.authenticate = async (req: any) => {
-        const auth = req.headers["authorization"] as string | undefined;
-        if (!_validateToken(auth)) {
-            throw new Response("Unauthorized", { status: 401 });
+        const header = req.headers["authorization"] as string | undefined;
+        // Accept static Bearer token (for curl, MCP Inspector, custom agents)
+        if (header === `Bearer ${AUTH_TOKEN}`) {
+            return { authenticated: true };
         }
-        return { authenticated: true };
+        // Accept OAuth-issued tokens (for Claude Web/Desktop/Mobile)
+        if (auth?.validateToken(header)) {
+            return { authenticated: true };
+        }
+        throw new Response("Unauthorized", { status: 401 });
     };
     console.log("Auth enabled (password-gated OAuth).");
 } else {
@@ -131,8 +137,11 @@ if (AUTH_TOKEN) {
 const server = new FastMCP(serverOptions);
 
 if (AUTH_TOKEN) {
-    const app = server.getApp();
-    _validateToken = mountPasswordAuth(app, BASE_URL, AUTH_TOKEN);
+    const tokenPath = VAULT_PATH
+        ? join(VAULT_PATH, ".obsidian-mcp", "auth-tokens.json")
+        : "/tmp/obsidian-mcp-auth-tokens.json";
+    auth = mountPasswordAuth(server.getApp(), BASE_URL, AUTH_TOKEN, tokenPath);
+    await auth.loadTokens();
 }
 
 // --- Tools ---
@@ -288,6 +297,7 @@ server.addTool({
 async function shutdown() {
     console.log("Shutting down...");
     await searchIndex.saveToDisk();
+    if (auth) await auth.saveTokens();
     await vault.close();
     process.exit(0);
 }

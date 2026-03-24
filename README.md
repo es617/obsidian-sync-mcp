@@ -191,7 +191,7 @@ Comparable to Obsidian Sync ($4/month) and you own the data.
 - **Read notes** — fetch any markdown note by path, with full content
 - **Write notes** — create or update notes; the server handles LiveSync's chunked format in remote mode
 - **List notes** — browse the vault, optionally filtered by folder
-- **Search** — full-text search across all notes with context snippets
+- **Search** — sub-millisecond full-text search via [FlexSearch](https://github.com/nextapps-de/flexsearch) index, with context snippets
 - **Delete notes** — remove notes from the vault
 - **Deep links** — every response includes an `obsidian://` link to open the note in Obsidian on Mac or iOS
 
@@ -254,7 +254,9 @@ When a remote agent connects:
 1. The agent discovers the OAuth endpoints automatically
 2. A browser window opens showing a password page
 3. The user enters the `MCP_AUTH_TOKEN` password
-4. The agent gets an access token and makes authenticated requests
+4. The agent gets an access token and refreshes it transparently
+
+You only enter the password once — the session is shared across all your Claude interfaces (Desktop, Web, Mobile). The refresh token keeps it alive for 14 days of inactivity (configurable via `MCP_REFRESH_DAYS`).
 
 Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable for local testing or use behind a private tunnel.
 
@@ -322,7 +324,7 @@ fly deploy --build-arg MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:v1.0.0
 
 ## Known limitations
 
-- **Search is brute-force.** Both modes read every note to search. Fine for hundreds of notes, slow for thousands. CouchDB full-text indexing would help in remote mode.
+- **Search index rebuilds on cold start.** The FlexSearch full-text index lives in memory and persists to disk on shutdown. Typical rebuild: ~200ms for 2000 notes. Survives Fly.io suspend/resume (memory preserved). External edits (from Obsidian) are picked up automatically via filesystem watcher (local) or CouchDB `_changes` feed (remote).
 - **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, CouchDB's revision system handles it in remote mode (last write wins). Local mode has no protection — the last write overwrites.
 - **Text only.** Binary attachments (images, PDFs) are not exposed through the MCP tools. The underlying library supports them, but most agents can't do much with raw binary data.
 - **Node 22+ required.** Uses `fs/promises.glob` in local mode.

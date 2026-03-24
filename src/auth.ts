@@ -14,6 +14,8 @@
  */
 
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "crypto";
+import { readFile, writeFile, mkdir } from "fs/promises";
+import { dirname } from "path";
 import type { Hono } from "hono";
 
 interface PendingAuth {
@@ -46,7 +48,13 @@ const REFRESH_EXPIRY_MS = parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAUL
 const MAX_FAILED_BEFORE_LOCKOUT = 5;
 const BASE_LOCKOUT_MS = 5 * 1000; // 5 seconds, doubles each lockout
 
-export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) {
+export interface AuthHandle {
+    validateToken: (auth: string | undefined) => boolean;
+    saveTokens: () => Promise<void>;
+    loadTokens: () => Promise<boolean>;
+}
+
+export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, persistPath?: string): AuthHandle {
     const pendingAuths = new Map<string, PendingAuth>();
     const csrfTokens = new Map<string, string>(); // code -> csrf token
     const tokens = new Map<string, TokenRecord>();
@@ -297,17 +305,55 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
         return c.json({ error: "unsupported_grant_type" }, 400);
     });
 
-    // Return a function that validates Bearer tokens
-    return function validateToken(authHeader: string | undefined): boolean {
-        if (!authHeader?.startsWith("Bearer ")) return false;
-        const token = authHeader.slice(7);
-        const record = tokens.get(token);
-        if (!record) return false;
-        if (Date.now() > record.expiresAt) {
-            tokens.delete(token);
-            return false;
-        }
-        return true;
+    return {
+        validateToken(authHeader: string | undefined): boolean {
+            if (!authHeader?.startsWith("Bearer ")) return false;
+            const token = authHeader.slice(7);
+            const record = tokens.get(token);
+            if (!record) return false;
+            if (Date.now() > record.expiresAt) {
+                tokens.delete(token);
+                return false;
+            }
+            return true;
+        },
+
+        async saveTokens(): Promise<void> {
+            if (!persistPath) return;
+            try {
+                await mkdir(dirname(persistPath), { recursive: true });
+                const data = JSON.stringify({
+                    tokens: Object.fromEntries(tokens),
+                    refreshTokens: Object.fromEntries(refreshTokens),
+                    clients: Object.fromEntries(clients),
+                });
+                await writeFile(persistPath, data, "utf-8");
+                console.log(`Auth tokens saved to disk (${tokens.size} sessions).`);
+            } catch (err) {
+                console.error("Failed to save auth tokens:", err);
+            }
+        },
+
+        async loadTokens(): Promise<boolean> {
+            if (!persistPath) return false;
+            try {
+                const raw = await readFile(persistPath, "utf-8");
+                const data = JSON.parse(raw);
+                for (const [k, v] of Object.entries(data.tokens ?? {})) {
+                    tokens.set(k, v as TokenRecord);
+                }
+                for (const [k, v] of Object.entries(data.refreshTokens ?? {})) {
+                    refreshTokens.set(k, v as TokenRecord);
+                }
+                for (const [k, v] of Object.entries(data.clients ?? {})) {
+                    clients.set(k, v as RegisteredClient);
+                }
+                console.log(`Auth tokens loaded from disk (${tokens.size} sessions).`);
+                return tokens.size > 0;
+            } catch {
+                return false;
+            }
+        },
     };
 }
 
@@ -327,8 +373,8 @@ function renderPasswordPage(code: string, csrf: string, error?: string): string 
   <form method="POST" action="/oauth/approve" autocomplete="on">
     <input type="hidden" name="code" value="${code}">
     <input type="hidden" name="csrf" value="${csrf}">
-    <input type="text" name="username" value="obsidian-sync-mcp" autocomplete="username" style="display:none">
-    <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+    <input type="text" name="username" id="username" value="obsidian-sync-mcp" autocomplete="username" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none">
+    <input type="password" name="password" id="password" placeholder="Password" autocomplete="current-password" autofocus required>
     <br><button type="submit">Authorize</button>
   </form>
 </body></html>`;

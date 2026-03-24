@@ -7,8 +7,8 @@ import { mountPasswordAuth } from "./auth.js";
 function setup(password = "test-password") {
     const app = new Hono();
     const baseUrl = "https://example.com";
-    const validateToken = mountPasswordAuth(app, baseUrl, password);
-    return { app, baseUrl, validateToken };
+    const auth = mountPasswordAuth(app, baseUrl, password);
+    return { app, baseUrl, validateToken: auth.validateToken };
 }
 
 function generatePKCE() {
