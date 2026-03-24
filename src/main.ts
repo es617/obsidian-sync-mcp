@@ -196,7 +196,13 @@ server.addTool({
             .describe("Folder to filter by, e.g. 'daily/' or 'projects/'. Omit for all notes."),
     }),
     execute: async ({ folder }) => {
-        const notes = await vault.listNotes(folder);
+        // Use search index for listing — works with encrypted vaults
+        // where enumerateAllNormalDocs returns raw encrypted paths.
+        // Falls back to vault.listNotes if index is empty (first startup before watcher runs).
+        let notes = searchIndex.listPaths(folder);
+        if (notes.length === 0) {
+            notes = await vault.listNotes(folder);
+        }
         if (notes.length === 0) {
             return folder ? `No notes found in folder: ${folder}` : "Vault is empty.";
         }

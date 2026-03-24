@@ -2,3 +2,6 @@ node_modules/
 dist/
 .env
 *.log
+CLAUDE.md
+.claude/
+scripts/review.sh

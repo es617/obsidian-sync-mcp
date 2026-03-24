@@ -116,6 +116,15 @@ export class SearchIndex {
         return output;
     }
 
+    /** List all indexed paths, optionally filtered by folder prefix. */
+    listPaths(folder?: string): string[] {
+        const paths = [...this.contents.keys()].filter((p) => p.endsWith(".md"));
+        if (folder) {
+            return paths.filter((p) => p.startsWith(folder)).sort();
+        }
+        return paths.sort();
+    }
+
     get size(): number {
         return this.contents.size;
     }
