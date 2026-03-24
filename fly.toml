@@ -1,42 +1,40 @@
-# Fly.io configuration for obsidian-sync-mcp
+# fly.toml app configuration file generated for obsidian-sync-mcp on 2026-03-24T16:24:33-04:00
 #
-# Deploy:
-#   fly launch
-#   fly secrets set COUCHDB_PASSWORD=<password> MCP_AUTH_TOKEN=<password> VAULT_NAME=MyVault
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "obsidian-sync-mcp"
-primary_region = "iad"
+app = 'obsidian-sync-mcp'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile.fly"
+  dockerfile = 'Dockerfile.fly'
 
-# MCP server (for AI agents)
+[[mounts]]
+  source = 'couchdb_data'
+  destination = '/opt/couchdb/data'
+
 [http_service]
   internal_port = 8787
   force_https = true
-  auto_stop_machines = "suspend"
+  auto_stop_machines = 'suspend'
   auto_start_machines = true
   min_machines_running = 0
 
-[[http_service.checks]]
-  path = "/health"
-  interval = "30s"
-  timeout = "5s"
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    path = '/health'
 
-# CouchDB (for Obsidian LiveSync)
 [[services]]
+  protocol = 'tcp'
   internal_port = 5984
-  protocol = "tcp"
 
   [[services.ports]]
     port = 5984
-    handlers = ["tls", "http"]
-
-[mounts]
-  source = "couchdb_data"
-  destination = "/opt/couchdb/data"
+    handlers = ['tls', 'http']
 
 [[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 512

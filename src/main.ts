@@ -58,9 +58,9 @@ await vault.init();
 console.log("Vault ready.");
 
 // --- Per-vault data directory ---
-const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
+const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
 const vaultId = createHash("sha256").update(VAULT_PATH ?? COUCHDB_URL ?? "default").digest("hex").slice(0, 12);
-const dataDir = join(homeDir, ".obsidian-mcp", vaultId);
+const dataDir = join(baseDataDir, vaultId);
 
 // --- Search index ---
 const indexPath = join(dataDir, "search-index.json");
@@ -329,6 +329,6 @@ setInterval(async () => {
 // --- Start server ---
 server.start({
     transportType: "httpStream",
-    httpStream: { port: PORT, endpoint: "/mcp" },
+    httpStream: { port: PORT, endpoint: "/mcp", host: process.env.HOST ?? "0.0.0.0" },
 });
 console.log(`MCP server listening on port ${PORT}`);

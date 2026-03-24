@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2
+
+### Fixes
+- Fly.io deployment: bind to 0.0.0.0 (was localhost-only, unreachable by Fly proxy)
+- Fly.io deployment: CouchDB readiness check accepts 401 (auth-required means ready)
+- Fly.io deployment: set COUCHDB_URL in entrypoint
+- Fly.io deployment: use CouchDB base image (fixes missing libmozjs on amd64)
+- Fly.io deployment: override ENTRYPOINT to avoid CouchDB entrypoint conflict
+- CSP fix: removed form-action 'self' that blocked OAuth redirects in Claude's browser
+- Persist data to Fly.io volume (DATA_DIR) — tokens and search index survive deploys
+- Dockerfile.fly uses published ghcr.io image (no source build needed)
+
 ## 0.1.1
 
 Same as 0.1.0 with CI and publishing fixes.

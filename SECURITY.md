@@ -28,7 +28,7 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 - **Timing-safe comparison** — both password and CSRF token comparisons use `crypto.timingSafeEqual` to prevent timing side-channel attacks.
 - **CSRF protection** — the OAuth approval form includes a per-request CSRF token. Submissions without a valid token are rejected.
 - **Redirect URI validation** — the `/oauth/authorize` endpoint validates that the `redirect_uri` matches what the client registered, preventing authorization code theft via open redirect.
-- **Token persistence** — OAuth tokens are persisted to disk on clean shutdown and loaded on restart, so sessions survive server restarts. Files are stored in `~/.obsidian-mcp/<vault-hash>/` (outside the vault directory, never synced) with `0600` permissions (owner-only). Each vault gets an isolated subdirectory.
+- **Token persistence** — OAuth tokens are persisted to disk on clean shutdown (and every 5 minutes) and loaded on restart, so sessions survive server restarts and deploys. Files are stored in `DATA_DIR/<vault-hash>/` with `0600` permissions (owner-only). Defaults to `~/.obsidian-mcp/` locally, or the persistent volume on Fly.io. Each vault gets an isolated subdirectory.
 
 ---
 

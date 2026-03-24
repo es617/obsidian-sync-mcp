@@ -2,23 +2,22 @@
 # Uses the pre-built MCP server image from ghcr.io
 
 ARG MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:latest
-FROM couchdb:3 AS couchdb
 FROM ${MCP_IMAGE} AS mcp
 
-# --- Runtime ---
-FROM node:22-slim
+# Use CouchDB as base — has all CouchDB deps pre-installed
+FROM couchdb:3
 LABEL org.opencontainers.image.source="https://github.com/es617/obsidian-sync-mcp"
 ARG MCP_IMAGE
 LABEL mcp.image="${MCP_IMAGE}"
 
-# Install CouchDB from the official image
-COPY --from=couchdb /opt/couchdb /opt/couchdb
+# Install Node.js 22
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libicu-dev libmozjs-115-0 supervisor curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r couchdb && useradd -r -g couchdb couchdb \
-    && mkdir -p /opt/couchdb/data /opt/couchdb/etc/local.d \
-    && chown -R couchdb:couchdb /opt/couchdb
+    curl ca-certificates gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 # CouchDB config
 COPY deploy/couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
@@ -30,10 +29,10 @@ COPY --from=mcp /app/node_modules/ node_modules/
 COPY --from=mcp /app/dist/ dist/
 
 # Startup
-COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY deploy/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8787
 
+ENTRYPOINT []
 CMD ["/app/entrypoint.sh"]

@@ -220,6 +220,8 @@ The agent handles multi-step flows. "Summarize my last 5 daily notes" means list
 | `BASE_URL` | Both | `http://localhost:PORT` | Public URL (for OAuth callbacks) |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for OAuth approval page. When set, all MCP requests require authentication. |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before the session expires and the user must re-enter the password. |
+| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (search index, auth tokens). On Fly.io, automatically set to the persistent volume. |
+| `HOST` | Optional | `0.0.0.0` | Bind address for the HTTP server. Set to `127.0.0.1` to restrict to localhost only. |
 
 Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is set, the server exits with an error.
 
@@ -357,4 +359,8 @@ This project is licensed under the MIT License — see [LICENSE](LICENSE) for de
 
 - [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) by vrtmrz — the Obsidian plugin and CouchDB sync protocol
 - [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) by vrtmrz — the shared library for reading/writing the LiveSync document format
-- [FastMCP](https://github.com/punkpeye/fastmcp) — TypeScript MCP framework with built-in OAuth
+- [FastMCP](https://github.com/punkpeye/fastmcp) — TypeScript MCP framework
+- [FlexSearch](https://github.com/nextapps-de/flexsearch) — full-text search engine
+- [CouchDB](https://couchdb.apache.org/) — document database
+- [Fly.io](https://fly.io/) — deployment platform
+- [tsup](https://github.com/egoist/tsup) — TypeScript bundler
