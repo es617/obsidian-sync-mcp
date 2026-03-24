@@ -13,6 +13,15 @@ permissions:
   id-token: write
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npx --yes oxlint@latest --deny-warnings src/
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -31,8 +40,20 @@ jobs:
           name: package
           path: "*.tgz"
 
-  # Smoke test: start server in local mode, verify it responds
   test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+
+  # Smoke test: start server in local mode, verify MCP handshake
+  test-e2e:
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -50,7 +71,6 @@ jobs:
           echo "# Test Note" > /tmp/test-vault/test.md
           VAULT_PATH=/tmp/test-vault VAULT_NAME=TestVault node dist/main.js &
           sleep 3
-          # MCP initialize handshake
           RESP=$(curl -s -X POST http://localhost:8787/mcp \
             -H "Content-Type: application/json" \
             -H "Accept: application/json, text/event-stream" \
@@ -62,7 +82,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, test]
+    needs: [lint, build, test, test-e2e]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

@@ -22,16 +22,17 @@ export class LocalVault {
     async close(): Promise<void> {}
 
     async readNote(path: string): Promise<string | null> {
+        const fullPath = this.safePath(path);
         try {
-            return await readFile(this.safePath(path), "utf-8");
+            return await readFile(fullPath, "utf-8");
         } catch {
             return null;
         }
     }
 
     async writeNote(path: string, content: string): Promise<boolean> {
+        const fullPath = this.safePath(path);
         try {
-            const fullPath = this.safePath(path);
             await mkdir(dirname(fullPath), { recursive: true });
             await writeFile(fullPath, content, "utf-8");
             return true;
@@ -41,8 +42,9 @@ export class LocalVault {
     }
 
     async deleteNote(path: string): Promise<boolean> {
+        const fullPath = this.safePath(path);
         try {
-            await unlink(this.safePath(path));
+            await unlink(fullPath);
             return true;
         } catch {
             return false;

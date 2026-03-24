@@ -206,14 +206,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
         if (pending.state) url.searchParams.set("state", pending.state);
         const redirectUrl = url.toString();
 
-        // Show a brief success page so the browser triggers the password save prompt
-        // before redirecting to the OAuth callback
-        return c.html(`<!DOCTYPE html>
-<html><head><title>Authorized</title></head>
-<body>
-<p>Authorized. Redirecting...</p>
-<script>setTimeout(()=>window.location.href=${JSON.stringify(redirectUrl)},1000)</script>
-</body></html>`);
+        return c.redirect(redirectUrl);
     });
 
     // --- Token endpoint ---

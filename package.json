@@ -21,9 +21,11 @@
         "LICENSE"
     ],
     "scripts": {
+        "lint": "npx --yes oxlint@latest --deny-warnings src/",
         "build": "tsup",
         "start": "node dist/main.js",
-        "dev": "tsx src/main.ts"
+        "dev": "tsx src/main.ts",
+        "test": "node --import tsx --test 'src/**/*.test.ts'"
     },
     "dependencies": {
         "diff-match-patch": "^1.0.5",
