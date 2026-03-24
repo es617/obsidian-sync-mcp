@@ -32,7 +32,8 @@
         "build": "tsup",
         "start": "node dist/main.js",
         "dev": "tsx src/main.ts",
-        "test": "node --import tsx --test 'src/**/*.test.ts'"
+        "test": "node --import tsx --test 'src/**/*.test.ts'",
+        "test:e2e": "bash test/e2e.sh"
     },
     "dependencies": {
         "diff-match-patch": "^1.0.5",
