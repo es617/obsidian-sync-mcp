@@ -1,10 +1,10 @@
 import { FastMCP, GoogleProvider } from "fastmcp";
 import { z } from "zod";
-import { Vault } from "./vault.js";
 import { makeDeepLink } from "./deeplink.js";
 
 // --- Configuration from environment ---
-const COUCHDB_URL = process.env.COUCHDB_URL ?? "http://localhost:5984";
+const VAULT_PATH = process.env.VAULT_PATH; // Local mode: path to vault directory
+const COUCHDB_URL = process.env.COUCHDB_URL;
 const COUCHDB_USER = process.env.COUCHDB_USER ?? "admin";
 const COUCHDB_PASSWORD = process.env.COUCHDB_PASSWORD ?? "password";
 const COUCHDB_DATABASE = process.env.COUCHDB_DATABASE ?? "obsidian";
@@ -15,16 +15,40 @@ const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
-// --- Initialize vault ---
-const vault = new Vault({
-    couchdbUrl: COUCHDB_URL,
-    couchdbUser: COUCHDB_USER,
-    couchdbPassword: COUCHDB_PASSWORD,
-    database: COUCHDB_DATABASE,
-    passphrase: COUCHDB_PASSPHRASE,
-});
+// --- Initialize vault (local or remote) ---
+interface VaultBackend {
+    init(): Promise<void>;
+    close(): Promise<void>;
+    readNote(path: string): Promise<string | null>;
+    writeNote(path: string, content: string): Promise<boolean>;
+    deleteNote(path: string): Promise<boolean>;
+    listNotes(folder?: string): Promise<string[]>;
+    searchVault(query: string): Promise<Array<{ path: string; snippet: string }>>;
+}
+
+let vault: VaultBackend;
+
+if (VAULT_PATH) {
+    const { LocalVault } = await import("./vault-local.js");
+    vault = new LocalVault(VAULT_PATH);
+    console.log(`Local mode: ${VAULT_PATH}`);
+} else if (COUCHDB_URL) {
+    const { Vault } = await import("./vault.js");
+    vault = new Vault({
+        couchdbUrl: COUCHDB_URL,
+        couchdbUser: COUCHDB_USER,
+        couchdbPassword: COUCHDB_PASSWORD,
+        database: COUCHDB_DATABASE,
+        passphrase: COUCHDB_PASSPHRASE,
+    });
+    console.log(`Remote mode: ${COUCHDB_URL}`);
+} else {
+    console.error("Set VAULT_PATH for local mode or COUCHDB_URL for remote mode.");
+    process.exit(1);
+}
+
 await vault.init();
-console.log("Vault connected.");
+console.log("Vault ready.");
 
 // --- MCP Server ---
 const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
@@ -40,8 +64,6 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
         clientSecret: GOOGLE_CLIENT_SECRET,
     });
     console.log("OAuth enabled (Google).");
-} else {
-    console.log("OAuth disabled (set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable).");
 }
 
 const server = new FastMCP(serverOptions);
