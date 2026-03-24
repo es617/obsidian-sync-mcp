@@ -68,20 +68,24 @@ const searchIndex = new SearchIndex(indexPath);
 
 const loaded = await searchIndex.loadFromDisk();
 if (!loaded) {
-    console.log("Building search index...");
     const start = performance.now();
     const notes = await vault.listNotes();
-    for (const path of notes) {
-        const content = await vault.readNote(path);
-        if (content) searchIndex.update(path, content);
+    console.log(`Building search index (${notes.length} notes)...`);
+    for (let i = 0; i < notes.length; i++) {
+        const content = await vault.readNote(notes[i]);
+        if (content) searchIndex.update(notes[i], content);
+        if (notes.length > 100 && (i + 1) % 500 === 0) {
+            console.log(`  indexed ${i + 1}/${notes.length}...`);
+        }
     }
     console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
 }
 
 // --- Watch for external changes ---
+let fsWatcher: ReturnType<typeof watch> | null = null;
 if (VAULT_PATH) {
     // Local mode: watch filesystem for changes from Obsidian
-    const watcher = watch(VAULT_PATH, { recursive: true }, async (event, filename) => {
+    fsWatcher = watch(VAULT_PATH, { recursive: true }, async (event, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
         // Normalize path separators
         const notePath = filename.replace(/\\/g, "/");
@@ -93,9 +97,6 @@ if (VAULT_PATH) {
             searchIndex.remove(notePath);
         }
     });
-    // Clean up watcher on shutdown
-    process.on("SIGTERM", () => watcher.close());
-    process.on("SIGINT", () => watcher.close());
     console.log("Watching vault for external changes.");
 } else if (COUCHDB_URL && "watchChanges" in vault) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates
@@ -199,10 +200,15 @@ server.addTool({
         if (notes.length === 0) {
             return folder ? `No notes found in folder: ${folder}` : "Vault is empty.";
         }
-        const lines = notes.map((p) => {
+        const total = notes.length;
+        const capped = notes.slice(0, 500);
+        const lines = capped.map((p) => {
             const deepLink = makeDeepLink(VAULT_NAME, p);
             return `- [${p}](${deepLink})`;
         });
+        if (total > 500) {
+            lines.push(`\n... and ${total - 500} more. Use a folder filter to narrow results.`);
+        }
         return lines.join("\n");
     },
 });
@@ -299,6 +305,7 @@ server.addTool({
 // --- Graceful shutdown ---
 async function shutdown() {
     console.log("Shutting down...");
+    if (fsWatcher) fsWatcher.close();
     await searchIndex.saveToDisk();
     if (auth) await auth.saveTokens();
     await vault.close();
@@ -306,6 +313,12 @@ async function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+// --- Periodic save (every 5 minutes) ---
+setInterval(async () => {
+    await searchIndex.saveToDisk();
+    if (auth) await auth.saveTokens();
+}, 5 * 60 * 1000).unref();
 
 // --- Start server ---
 server.start({

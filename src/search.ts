@@ -14,14 +14,14 @@ import { dirname } from "path";
 const MAX_RESULTS = 50;
 
 export class SearchIndex {
-    private index: FlexSearch.Document<{ path: string; content: string }, true>;
+    private index: FlexSearch.Document<{ path: string; content: string }>;
     private contents = new Map<string, string>(); // path -> content (for snippet extraction)
     private persistPath: string | null;
 
     constructor(persistPath?: string) {
         this.persistPath = persistPath ?? null;
         this.index = new FlexSearch.Document({
-            document: { id: "path", index: ["content", "path"], store: true },
+            document: { id: "path", index: ["content", "path"] },
             tokenize: "forward",
         });
     }
