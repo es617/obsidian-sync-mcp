@@ -41,7 +41,28 @@ export class Vault {
     }
 
     async close(): Promise<void> {
+        this.manipulator.endWatch();
         await this.manipulator.close();
+    }
+
+    watchChanges(callback: (path: string, content: string | null) => void): void {
+        this.manipulator.beginWatch(
+            (doc) => {
+                const path = doc.path ?? "";
+                if (!path.endsWith(".md")) return;
+                if (doc.deleted) {
+                    callback(path, null);
+                } else {
+                    const content = "data" in doc && Array.isArray(doc.data) ? doc.data.join("") : null;
+                    callback(path, content);
+                }
+            },
+            (meta) => {
+                // Only interested in markdown files
+                const path = meta.path ?? "";
+                return path.endsWith(".md");
+            },
+        );
     }
 
     async readNote(path: string): Promise<string | null> {

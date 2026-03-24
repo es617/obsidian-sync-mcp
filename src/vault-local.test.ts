@@ -1,9 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, unlink, readFile } from "fs/promises";
+import { watch } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
+import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
 let vault: LocalVault;
@@ -204,5 +206,98 @@ describe("searchVault", () => {
         assert.ok(match);
         assert.ok(match!.snippet.startsWith("..."));
         assert.ok(match!.snippet.endsWith("..."));
+    });
+});
+
+describe("file watcher integration", () => {
+    it("detects new file and updates search index", async () => {
+        const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
+        const searchIndex = new SearchIndex();
+
+        // Start watcher (same logic as main.ts)
+        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
+            if (!filename || !filename.endsWith(".md")) return;
+            const notePath = filename.replace(/\\/g, "/");
+            try {
+                const content = await readFile(join(watchDir, notePath), "utf-8");
+                searchIndex.update(notePath, content);
+            } catch {
+                searchIndex.remove(notePath);
+            }
+        });
+
+        try {
+            // Write a file externally (simulating Obsidian editing)
+            await writeFile(join(watchDir, "external.md"), "external edit keyword banana");
+            // Wait for watcher to pick it up
+            await new Promise((r) => setTimeout(r, 500));
+
+            const results = searchIndex.search("banana");
+            assert.equal(results.length, 1);
+            assert.equal(results[0].path, "external.md");
+
+            // Delete the file
+            await unlink(join(watchDir, "external.md"));
+            await new Promise((r) => setTimeout(r, 500));
+
+            assert.deepEqual(searchIndex.search("banana"), []);
+        } finally {
+            watcher.close();
+            await rm(watchDir, { recursive: true, force: true });
+        }
+    });
+
+    it("ignores non-md files", async () => {
+        const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
+        const searchIndex = new SearchIndex();
+
+        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
+            if (!filename || !filename.endsWith(".md")) return;
+            const notePath = filename.replace(/\\/g, "/");
+            try {
+                const content = await readFile(join(watchDir, notePath), "utf-8");
+                searchIndex.update(notePath, content);
+            } catch {
+                searchIndex.remove(notePath);
+            }
+        });
+
+        try {
+            await writeFile(join(watchDir, "image.png"), "not a note");
+            await new Promise((r) => setTimeout(r, 500));
+            assert.equal(searchIndex.size, 0);
+        } finally {
+            watcher.close();
+            await rm(watchDir, { recursive: true, force: true });
+        }
+    });
+
+    it("detects files in subdirectories", async () => {
+        const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
+        const searchIndex = new SearchIndex();
+
+        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
+            if (!filename || !filename.endsWith(".md")) return;
+            const notePath = filename.replace(/\\/g, "/");
+            try {
+                const content = await readFile(join(watchDir, notePath), "utf-8");
+                searchIndex.update(notePath, content);
+            } catch {
+                searchIndex.remove(notePath);
+            }
+        });
+
+        try {
+            await mkdir(join(watchDir, "sub", "dir"), { recursive: true });
+            await writeFile(join(watchDir, "sub", "dir", "deep.md"), "deep nested content mango");
+            await new Promise((r) => setTimeout(r, 500));
+
+            const results = searchIndex.search("mango");
+            assert.equal(results.length, 1);
+            assert.ok(results[0].path.includes("deep.md"));
+        } finally {
+            watcher.close();
+            await rm(watchDir, { recursive: true, force: true });
+        }
     });
 });

@@ -1,6 +1,8 @@
 import { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { join } from "path";
+import { watch } from "fs";
+import { readFile } from "fs/promises";
 import { makeDeepLink } from "./deeplink.js";
 import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
@@ -70,6 +72,37 @@ if (!loaded) {
         if (content) searchIndex.update(path, content);
     }
     console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+}
+
+// --- Watch for external changes ---
+if (VAULT_PATH) {
+    // Local mode: watch filesystem for changes from Obsidian
+    const watcher = watch(VAULT_PATH, { recursive: true }, async (event, filename) => {
+        if (!filename || !filename.endsWith(".md")) return;
+        // Normalize path separators
+        const notePath = filename.replace(/\\/g, "/");
+        try {
+            const content = await readFile(join(VAULT_PATH!, notePath), "utf-8");
+            searchIndex.update(notePath, content);
+        } catch {
+            // File deleted
+            searchIndex.remove(notePath);
+        }
+    });
+    // Clean up watcher on shutdown
+    process.on("SIGTERM", () => watcher.close());
+    process.on("SIGINT", () => watcher.close());
+    console.log("Watching vault for external changes.");
+} else if (COUCHDB_URL && "watchChanges" in vault) {
+    // Remote mode: watch CouchDB _changes feed for LiveSync updates
+    (vault as any).watchChanges((path: string, content: string | null) => {
+        if (content) {
+            searchIndex.update(path, content);
+        } else {
+            searchIndex.remove(path);
+        }
+    });
+    console.log("Watching CouchDB for LiveSync changes.");
 }
 
 // --- MCP Server ---
