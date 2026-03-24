@@ -8,7 +8,7 @@
  */
 
 import FlexSearch from "flexsearch";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
 
 const MAX_RESULTS = 50;
@@ -51,7 +51,8 @@ export class SearchIndex {
             const data = JSON.stringify({
                 contents: Object.fromEntries(this.contents),
             });
-            await writeFile(this.persistPath, data, "utf-8");
+            await writeFile(this.persistPath, data, { encoding: "utf-8", mode: 0o600 });
+            await chmod(this.persistPath, 0o600);
             console.log(`Search index saved to disk (${this.contents.size} notes).`);
         } catch (err) {
             console.error("Failed to save search index:", err);

@@ -47,17 +47,10 @@ if [ -n "$LIVESYNC_USER" ] && [ -n "$LIVESYNC_PASS" ]; then
     # Create _users database if needed
     curl -s -o /dev/null -u "$ADMIN_USER:$ADMIN_PASS" -X PUT "http://localhost:5984/_users" 2>/dev/null || true
 
-    # Create or update the user
-    USER_DOC=$(cat <<EOF
-{
-    "_id": "org.couchdb.user:${LIVESYNC_USER}",
-    "name": "${LIVESYNC_USER}",
-    "password": "${LIVESYNC_PASS}",
-    "roles": [],
-    "type": "user"
-}
-EOF
-)
+    # Create or update the user (escape quotes in values for safe JSON)
+    SAFE_USER=$(printf '%s' "$LIVESYNC_USER" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    SAFE_PASS=$(printf '%s' "$LIVESYNC_PASS" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    USER_DOC="{\"_id\":\"org.couchdb.user:${SAFE_USER}\",\"name\":\"${SAFE_USER}\",\"password\":\"${SAFE_PASS}\",\"roles\":[],\"type\":\"user\"}"
     # Try to create; if exists, get rev and update
     RESP=$(curl -s -u "$ADMIN_USER:$ADMIN_PASS" -X PUT \
         "http://localhost:5984/_users/org.couchdb.user:${LIVESYNC_USER}" \
@@ -73,13 +66,8 @@ EOF
     fi
 
     # Grant user access to the vault database
-    SECURITY=$(cat <<EOF
-{
-    "admins": { "names": ["${ADMIN_USER}"], "roles": [] },
-    "members": { "names": ["${LIVESYNC_USER}"], "roles": [] }
-}
-EOF
-)
+    SAFE_ADMIN=$(printf '%s' "$ADMIN_USER" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    SECURITY="{\"admins\":{\"names\":[\"${SAFE_ADMIN}\"],\"roles\":[]},\"members\":{\"names\":[\"${SAFE_USER}\"],\"roles\":[]}}"
     curl -s -o /dev/null -u "$ADMIN_USER:$ADMIN_PASS" -X PUT \
         "http://localhost:5984/$DB/_security" \
         -H "Content-Type: application/json" \

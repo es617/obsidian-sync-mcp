@@ -250,10 +250,16 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         if (grantType === "authorization_code") {
             const code = body["code"] as string;
             const codeVerifier = body["code_verifier"] as string;
+            const redirectUri = body["redirect_uri"] as string;
 
             const pending = pendingAuths.get(code);
             if (!pending) {
                 return c.json({ error: "invalid_grant" }, 400);
+            }
+
+            // Verify redirect_uri matches the original request
+            if (redirectUri !== pending.redirectUri) {
+                return c.json({ error: "invalid_grant", error_description: "redirect_uri mismatch" }, 400);
             }
 
             // Verify PKCE
