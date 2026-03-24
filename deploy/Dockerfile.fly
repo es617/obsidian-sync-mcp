@@ -1,28 +1,36 @@
 # Combined CouchDB + MCP server for Fly.io deployment
+# Uses the pre-built MCP server image from ghcr.io
+
+ARG MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:latest
 FROM couchdb:3 AS couchdb
+FROM ${MCP_IMAGE} AS mcp
+
+# --- Runtime ---
 FROM node:22-slim
 
 # Install CouchDB from the official image
 COPY --from=couchdb /opt/couchdb /opt/couchdb
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libicu-dev libmozjs-115-0 supervisor \
+    libicu-dev libmozjs-115-0 supervisor curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r couchdb && useradd -r -g couchdb couchdb \
     && mkdir -p /opt/couchdb/data /opt/couchdb/etc/local.d \
     && chown -R couchdb:couchdb /opt/couchdb
 
 # CouchDB config
-COPY deploy/couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
+COPY couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
 
-# MCP server
+# MCP server (from published image)
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-COPY dist/ dist/
+COPY --from=mcp /app/package.json /app/package-lock.json ./
+COPY --from=mcp /app/node_modules/ node_modules/
+COPY --from=mcp /app/dist/ dist/
 
-# Supervisor to run both processes
-COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+# Startup
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8787
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["/app/entrypoint.sh"]

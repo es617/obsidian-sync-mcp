@@ -27,7 +27,7 @@ Local agents (Claude Code, Cursor, etc.) can already read vault files directly. 
 
 | Option | Setup | Best for |
 |---|---|---|
-| **1. Local + tunnel** | Point at vault folder, expose with a tunnel | Simplest; Mac must stay on |
+| **1. Local + tunnel** | Point at vault folder, expose with a tunnel | Simplest; no database needed; Mac must stay on |
 | **2. Docker Compose** | CouchDB + MCP server in containers | Local dev; everything in Docker |
 | **3. Fly.io** | Deploy to the cloud, always on | Production; no Mac needed |
 
@@ -96,7 +96,15 @@ Then set up your vault:
 3. Configure it: server `http://localhost:5984`, username/password from above, database `obsidian`
 4. Enable LiveSync mode
 
-Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for remote access.
+Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for remote access:
+
+```bash
+# Install cloudflared (one-time)
+brew install cloudflared
+
+# Expose the MCP server
+cloudflared tunnel --url http://localhost:8787
+```
 
 ```
 Docker Compose
@@ -108,26 +116,53 @@ Docker Compose
 
 ## Option 3: Fly.io
 
-Always-on deployment. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data.
+Always-on deployment. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data. The database is created automatically on first boot.
+
+### One-click deploy
+
+[![Deploy on Fly](https://fly.io/button/button.svg)](https://fly.io/launch?repo=https://github.com/es617/obsidian-sync-mcp&ref=main&config=deploy/fly.toml)
+
+After deploy, set your secrets in the Fly.io dashboard or CLI:
+
+```bash
+fly secrets set COUCHDB_PASSWORD=$(openssl rand -hex 16) MCP_AUTH_TOKEN=$(openssl rand -hex 16) VAULT_NAME=MyVault
+```
+
+### Setup script
+
+Generates credentials, creates the volume, and deploys — all in one command:
+
+```bash
+git clone https://github.com/es617/obsidian-sync-mcp.git
+cd obsidian-sync-mcp
+./deploy/setup.sh
+```
+
+Save the credentials it prints — they won't be shown again.
+
+### Manual CLI
 
 ```bash
 cd deploy
-fly launch
+fly launch --no-deploy --copy-config
 fly secrets set \
   COUCHDB_USER=admin \
   COUCHDB_PASSWORD=$(openssl rand -hex 16) \
   COUCHDB_DATABASE=obsidian \
   VAULT_NAME=MyVault \
   MCP_AUTH_TOKEN=$(openssl rand -hex 16)
+fly volumes create couchdb_data --size 1
+fly deploy
 ```
 
-After deployment:
+### After deployment
 
-1. Create the database: `curl -u admin:<password> -X PUT https://your-app.fly.dev:5984/obsidian`
-2. In Obsidian, configure LiveSync to point at `https://your-app.fly.dev:5984`
-3. Your MCP endpoint is `https://your-app.fly.dev/mcp`
-
-The `MCP_AUTH_TOKEN` secret is the password users enter when an agent connects (see [Authentication](#authentication)).
+1. In Obsidian, install [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) and configure it:
+   - Server URL: `https://your-app.fly.dev:5984`
+   - Username / password: the CouchDB credentials from setup
+   - Database: `obsidian`
+2. Your MCP endpoint is `https://your-app.fly.dev/mcp`
+3. The `MCP_AUTH_TOKEN` is the password you (or your users) enter when an agent connects
 
 ```
 Fly.io (always on)
@@ -141,11 +176,11 @@ Obsidian + LiveSync    Remote MCP agents
 
 | Component | Cost |
 |---|---|
-| Fly.io VM (shared, 512MB) | ~$0-3/month |
+| Fly.io VM (shared, 512MB) | ~$3-4/month |
 | 1GB persistent volume | ~$0.15/month |
-| **Total** | **~$0-3/month** |
+| **Total** | **~$3-4/month** |
 
-Cheaper than Obsidian Sync ($4/month) and you own the data.
+Comparable to Obsidian Sync ($4/month) and you own the data.
 
 ---
 
