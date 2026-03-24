@@ -1,12 +1,20 @@
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { glob } from "fs/promises";
 
 export class LocalVault {
     private root: string;
 
     constructor(vaultPath: string) {
-        this.root = vaultPath;
+        this.root = resolve(vaultPath);
+    }
+
+    private safePath(path: string): string {
+        const full = resolve(this.root, path);
+        if (!full.startsWith(this.root + "/")) {
+            throw new Error("Path traversal blocked");
+        }
+        return full;
     }
 
     async init(): Promise<void> {}
@@ -15,7 +23,7 @@ export class LocalVault {
 
     async readNote(path: string): Promise<string | null> {
         try {
-            return await readFile(join(this.root, path), "utf-8");
+            return await readFile(this.safePath(path), "utf-8");
         } catch {
             return null;
         }
@@ -23,7 +31,7 @@ export class LocalVault {
 
     async writeNote(path: string, content: string): Promise<boolean> {
         try {
-            const fullPath = join(this.root, path);
+            const fullPath = this.safePath(path);
             await mkdir(dirname(fullPath), { recursive: true });
             await writeFile(fullPath, content, "utf-8");
             return true;
@@ -34,7 +42,7 @@ export class LocalVault {
 
     async deleteNote(path: string): Promise<boolean> {
         try {
-            await unlink(join(this.root, path));
+            await unlink(this.safePath(path));
             return true;
         } catch {
             return false;

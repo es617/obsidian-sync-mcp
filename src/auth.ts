@@ -13,7 +13,7 @@
  * No external identity provider needed.
  */
 
-import { randomUUID, randomBytes, createHash } from "crypto";
+import { randomUUID, randomBytes, createHash, timingSafeEqual } from "crypto";
 import type { Hono } from "hono";
 
 interface PendingAuth {
@@ -43,17 +43,19 @@ interface RegisteredClient {
 const TOKEN_EXPIRY_MS = 3600 * 1000; // 1 hour
 const DEFAULT_REFRESH_DAYS = 14;
 const REFRESH_EXPIRY_MS = parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAULT_REFRESH_DAYS)) * 24 * 3600 * 1000;
-const MAX_FAILED_ATTEMPTS = 5;
-const LOCKOUT_MS = 30 * 1000; // 30 seconds
+const MAX_FAILED_BEFORE_LOCKOUT = 5;
+const BASE_LOCKOUT_MS = 5 * 1000; // 5 seconds, doubles each lockout
 
 export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) {
     const pendingAuths = new Map<string, PendingAuth>();
+    const csrfTokens = new Map<string, string>(); // code -> csrf token
     const tokens = new Map<string, TokenRecord>();
     const refreshTokens = new Map<string, TokenRecord>();
     const clients = new Map<string, RegisteredClient>();
 
-    // Rate limiting state
+    // Rate limiting: exponential backoff, never resets until success
     let failedAttempts = 0;
+    let lockoutCount = 0;
     let lockedUntil = 0;
 
     // HTTPS warning
@@ -118,6 +120,20 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
         const codeChallengeMethod = c.req.query("code_challenge_method") ?? "S256";
         const state = c.req.query("state") ?? "";
 
+        // Validate redirect URI against registered client
+        const client = clients.get(clientId);
+        if (!client) {
+            return c.text("Unknown client", 400);
+        }
+        if (client.redirectUris.length > 0 && !client.redirectUris.includes(redirectUri)) {
+            return c.text("Invalid redirect URI", 400);
+        }
+
+        // Require S256 PKCE
+        if (codeChallengeMethod !== "S256" || !codeChallenge) {
+            return c.text("PKCE with S256 is required", 400);
+        }
+
         const code = randomBytes(32).toString("hex");
         pendingAuths.set(code, {
             clientId,
@@ -128,7 +144,9 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
             code,
         });
 
-        return c.html(renderPasswordPage(code));
+        const csrf = randomBytes(32).toString("hex");
+        csrfTokens.set(code, csrf);
+        return c.html(renderPasswordPage(code, csrf));
     });
 
     // --- Approval handler ---
@@ -136,36 +154,49 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
     app.post("/oauth/approve", async (c) => {
         const body = await c.req.parseBody();
         const code = body["code"] as string;
+        const submittedCsrf = body["csrf"] as string;
         const submittedPassword = body["password"] as string;
 
         const pending = pendingAuths.get(code);
-        if (!pending) {
+        const expectedCsrf = csrfTokens.get(code);
+        if (!pending || !expectedCsrf) {
             return c.html("<p>Invalid or expired authorization request.</p>", 400);
         }
 
-        // Rate limiting
+        // Validate CSRF token
+        if (submittedCsrf !== expectedCsrf) {
+            return c.html("<p>Invalid request.</p>", 403);
+        }
+
+        // Rate limiting: check lockout
         if (Date.now() < lockedUntil) {
             const waitSec = Math.ceil((lockedUntil - Date.now()) / 1000);
             console.warn(`Auth: locked out, ${waitSec}s remaining`);
-            return c.html(renderPasswordPage(code, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
+            return c.html(renderPasswordPage(code, expectedCsrf, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
         }
 
-        if (submittedPassword !== password) {
+        const a = Buffer.from(submittedPassword);
+        const b = Buffer.from(password);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
             failedAttempts++;
-            console.warn(`Auth: failed attempt ${failedAttempts}/${MAX_FAILED_ATTEMPTS}`);
+            console.warn(`Auth: failed attempt ${failedAttempts} total`);
 
-            if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-                lockedUntil = Date.now() + LOCKOUT_MS;
-                failedAttempts = 0;
-                console.warn(`Auth: locked out for ${LOCKOUT_MS / 1000}s`);
-                return c.html(renderPasswordPage(code, `Too many attempts. Try again in ${LOCKOUT_MS / 1000} seconds.`), 429);
+            if (failedAttempts >= MAX_FAILED_BEFORE_LOCKOUT) {
+                lockoutCount++;
+                const lockoutMs = BASE_LOCKOUT_MS * Math.pow(2, lockoutCount - 1);
+                lockedUntil = Date.now() + lockoutMs;
+                console.warn(`Auth: lockout #${lockoutCount}, ${lockoutMs / 1000}s`);
+                return c.html(renderPasswordPage(code, expectedCsrf, `Too many attempts. Try again in ${Math.ceil(lockoutMs / 1000)} seconds.`), 429);
             }
 
-            return c.html(renderPasswordPage(code, "Wrong password."), 401);
+            return c.html(renderPasswordPage(code, expectedCsrf, "Wrong password."), 401);
         }
 
-        // Password correct — reset rate limiter
+        // Password correct — reset everything
         failedAttempts = 0;
+        lockoutCount = 0;
+        lockedUntil = 0;
+        csrfTokens.delete(code);
         console.log("Auth: password accepted, issuing authorization code.");
 
         const url = new URL(pending.redirectUri);
@@ -285,7 +316,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string) 
     };
 }
 
-function renderPasswordPage(code: string, error?: string): string {
+function renderPasswordPage(code: string, csrf: string, error?: string): string {
     return `<!DOCTYPE html>
 <html><head><title>Obsidian Sync MCP - Authorize</title>
 <style>
@@ -300,6 +331,7 @@ function renderPasswordPage(code: string, error?: string): string {
   ${error ? `<p class="error">${error}</p>` : "<p>Enter the server password to authorize access to your vault.</p>"}
   <form method="POST" action="/oauth/approve" autocomplete="on">
     <input type="hidden" name="code" value="${code}">
+    <input type="hidden" name="csrf" value="${csrf}">
     <input type="text" name="username" value="obsidian-sync-mcp" autocomplete="username" style="display:none">
     <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
     <br><button type="submit">Authorize</button>

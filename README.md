@@ -7,19 +7,19 @@
 ![Node](https://img.shields.io/badge/node-22%2B-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)
 
-A remote MCP server that gives Claude Web and Claude Mobile read/write access to your Obsidian vault. Works with any MCP-compatible client over HTTP.
+Give any AI agent remote read/write access to your Obsidian vault over MCP. Run it locally from your machine, or deploy it to the cloud so it works even when your laptop is off.
 
-> **Example:** From Claude on your phone, ask: "What's in my daily note for today?" — and get the full content back, with a link to open it in Obsidian.
+> **Example:** From your phone, ask your Claude AI: "What's in my daily note for today?" — and get the full content back, with a link to open it in Obsidian.
 
 ---
 
 ## Why this exists
 
-Claude Code and Claude Desktop can already read your vault directly from the filesystem. But Claude Web and Claude Mobile can't — they have no way to access files on your machine.
+Your Obsidian vault is locked to your device. Neither iCloud nor Obsidian Sync expose an API — Obsidian Sync is E2E encrypted with keys held only inside the app, intentionally inaccessible to external tools.
 
-Neither iCloud nor Obsidian Sync expose an API. Obsidian Sync is E2E encrypted with keys held only inside the Obsidian app — intentionally inaccessible to external tools.
+This server makes your vault available to any MCP-compatible agent — Claude, Copilot, custom agents, anything that speaks the [Model Context Protocol](https://modelcontextprotocol.io). It runs as a remote HTTP server, so agents can reach your notes from anywhere: web interfaces, mobile apps, CI pipelines, other machines.
 
-This server fills the gap. It exposes your vault over MCP's HTTP transport, so any Claude interface can read, write, search, and manage your notes.
+Local agents (Claude Code, Cursor, etc.) can already read vault files directly. This project solves the harder problem: **remote access**.
 
 ---
 
@@ -47,7 +47,7 @@ npm install && npm run build
 VAULT_PATH=~/Documents/MyVault VAULT_NAME=MyVault node dist/main.js
 ```
 
-Expose it for Claude Web/Mobile:
+Expose it for remote agents:
 
 ```bash
 # Pick one:
@@ -56,13 +56,13 @@ tailscale funnel 8787                             # Tailscale
 ngrok http 8787                                   # ngrok
 ```
 
-Use the tunnel URL + `/mcp` as your MCP server endpoint in Claude.
+Use the tunnel URL + `/mcp` as your MCP server endpoint.
 
 ```
 Your Mac
 ├── Obsidian (vault on disk)
 ├── obsidian-sync-mcp (reads files directly)
-└── tunnel → Claude Web/Mobile
+└── tunnel → remote MCP agents
 ```
 
 ---
@@ -96,12 +96,12 @@ Then set up your vault:
 3. Configure it: server `http://localhost:5984`, username/password from above, database `obsidian`
 4. Enable LiveSync mode
 
-Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for Claude Web/Mobile access.
+Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for remote access.
 
 ```
 Docker Compose
 ├── CouchDB (port 5984) ←── Obsidian + LiveSync plugin
-└── MCP server (port 8787) ←── Claude Web/Mobile (via tunnel)
+└── MCP server (port 8787) ←── Remote agents (via tunnel)
 ```
 
 ---
@@ -127,14 +127,14 @@ After deployment:
 2. In Obsidian, configure LiveSync to point at `https://your-app.fly.dev:5984`
 3. Your MCP endpoint is `https://your-app.fly.dev/mcp`
 
-The `MCP_AUTH_TOKEN` secret is the password users enter when Claude connects (see [Authentication](#authentication)).
+The `MCP_AUTH_TOKEN` secret is the password users enter when an agent connects (see [Authentication](#authentication)).
 
 ```
 Fly.io (always on)
 ├── CouchDB + persistent volume
 └── MCP server
       ↑                    ↑
-Obsidian + LiveSync    Claude Web/Mobile
+Obsidian + LiveSync    Remote MCP agents
 ```
 
 ### Cost
@@ -208,12 +208,12 @@ Set `MCP_AUTH_TOKEN` to a password:
 MCP_AUTH_TOKEN=mysecretpassword node dist/main.js
 ```
 
-When Claude Web or Claude Mobile connects:
+When a remote agent connects:
 
-1. Claude discovers the OAuth endpoints automatically
+1. The agent discovers the OAuth endpoints automatically
 2. A browser window opens showing a password page
 3. The user enters the `MCP_AUTH_TOKEN` password
-4. Claude gets an access token and makes authenticated requests
+4. The agent gets an access token and makes authenticated requests
 
 Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable for local testing or use behind a private tunnel.
 
@@ -265,9 +265,25 @@ docker build -f deploy/Dockerfile.fly -t obsidian-sync-mcp-fly .
 ## Known limitations
 
 - **Search is brute-force.** Both modes read every note to search. Fine for hundreds of notes, slow for thousands. CouchDB full-text indexing would help in remote mode.
-- **No conflict resolution.** If Claude and Obsidian edit the same note simultaneously, CouchDB's revision system handles it in remote mode (last write wins). Local mode has no protection — the last write overwrites.
-- **Text only.** Binary attachments (images, PDFs) are not exposed through the MCP tools. The underlying library supports them, but Claude can't do much with raw binary data.
+- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, CouchDB's revision system handles it in remote mode (last write wins). Local mode has no protection — the last write overwrites.
+- **Text only.** Binary attachments (images, PDFs) are not exposed through the MCP tools. The underlying library supports them, but most agents can't do much with raw binary data.
 - **Node 22+ required.** Uses `fs/promises.glob` in local mode.
+
+---
+
+## Safety
+
+This server gives an AI agent read/write access to your Obsidian vault. That's the point — and it means you should understand what it can do.
+
+**Agents can modify and delete notes.** A bad prompt or a misbehaving agent can overwrite or delete your notes. Keep backups. Use tool approval deliberately — "always allow" is convenient but means the agent can repeat any action without further confirmation.
+
+**Local mode has filesystem scope.** The server restricts file access to your vault directory (path traversal is blocked), but the process itself runs with your user permissions.
+
+**Authentication is optional.** Without `MCP_AUTH_TOKEN`, any client that can reach the server has full vault access. Always set a password when exposing the server to the internet.
+
+**Use HTTPS in production.** The server doesn't handle TLS itself — use a tunnel (Cloudflare, Tailscale, ngrok) or deploy behind a reverse proxy. Without TLS, passwords and tokens travel in cleartext.
+
+This software is provided as-is under the [MIT license](LICENSE). You are responsible for what agents do with your vault.
 
 ---
 
