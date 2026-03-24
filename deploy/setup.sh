@@ -20,6 +20,7 @@ fi
 
 # Generate credentials
 COUCHDB_PASSWORD=$(openssl rand -hex 16)
+LIVESYNC_PASSWORD=$(openssl rand -hex 16)
 MCP_AUTH_TOKEN=$(openssl rand -hex 16)
 
 echo "Generated credentials."
@@ -34,6 +35,8 @@ fly secrets set \
     COUCHDB_USER=admin \
     COUCHDB_PASSWORD="$COUCHDB_PASSWORD" \
     COUCHDB_DATABASE=obsidian \
+    LIVESYNC_USER=livesync \
+    LIVESYNC_PASSWORD="$LIVESYNC_PASSWORD" \
     MCP_AUTH_TOKEN="$MCP_AUTH_TOKEN"
 
 # Create volume for CouchDB data
@@ -53,9 +56,9 @@ echo "MCP endpoint:     https://${APP_NAME}.fly.dev/mcp"
 echo "MCP password:     $MCP_AUTH_TOKEN"
 echo ""
 echo "LiveSync settings for Obsidian:"
-echo "  Server URL:     https://${APP_NAME}.fly.dev"
-echo "  Username:       admin"
-echo "  Password:       $COUCHDB_PASSWORD"
+echo "  Server URL:     https://${APP_NAME}.fly.dev:5984"
+echo "  Username:       livesync"
+echo "  Password:       $LIVESYNC_PASSWORD"
 echo "  Database:       obsidian"
 echo ""
 echo "Save these credentials — they won't be shown again."

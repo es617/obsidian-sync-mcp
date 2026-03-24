@@ -1,8 +1,9 @@
 # Create a .env file to override defaults:
-#   COUCHDB_USER=admin
 #   COUCHDB_PASSWORD=<strong-password>
 #   VAULT_NAME=MyVault
 #   MCP_AUTH_TOKEN=<password-for-mcp>
+#   LIVESYNC_USER=livesync          (optional, recommended)
+#   LIVESYNC_PASSWORD=<password>    (optional, recommended)
 
 services:
   couchdb:

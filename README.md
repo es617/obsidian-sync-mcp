@@ -21,6 +21,8 @@ This server makes your vault available to any MCP-compatible agent — Claude, C
 
 Local agents (Claude Code, Cursor, etc.) can already read vault files directly. This project solves the harder problem: **remote access**.
 
+In remote mode, the server uses [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) — the same library that powers the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin — for proper chunk handling, content-defined splitting, and metadata management. No shortcuts or reimplementation.
+
 ---
 
 ## Three ways to run it
@@ -209,6 +211,8 @@ The agent handles multi-step flows. "Summarize my last 5 daily notes" means list
 | `COUCHDB_PASSWORD` | Remote mode | `password` | CouchDB password |
 | `COUCHDB_DATABASE` | Remote mode | `obsidian` | CouchDB database name |
 | `COUCHDB_PASSPHRASE` | Remote mode | — | LiveSync E2E encryption passphrase (if enabled) |
+| `LIVESYNC_USER` | Remote mode | — | Non-admin CouchDB user for LiveSync (recommended). If set with `LIVESYNC_PASSWORD`, the entrypoint creates a restricted user with access only to the vault database. |
+| `LIVESYNC_PASSWORD` | Remote mode | — | Password for the LiveSync user |
 | `VAULT_NAME` | Both | `MyVault` | Vault name for deep links (must match your Obsidian vault name) |
 | `PORT` | Both | `8787` | HTTP port |
 | `BASE_URL` | Both | `http://localhost:PORT` | Public URL (for OAuth callbacks) |
