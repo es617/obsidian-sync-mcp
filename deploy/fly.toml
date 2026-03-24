@@ -3,7 +3,7 @@
 # Deploy:
 #   cd deploy
 #   fly launch
-#   fly secrets set COUCHDB_USER=admin COUCHDB_PASSWORD=<strong-password> COUCHDB_DATABASE=obsidian VAULT_NAME=MyVault
+#   fly secrets set COUCHDB_PASSWORD=<password> MCP_AUTH_TOKEN=<password> VAULT_NAME=MyVault
 
 app = "obsidian-sync-mcp"
 primary_region = "iad"
@@ -11,6 +11,7 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile.fly"
 
+# MCP server (for AI agents)
 [http_service]
   internal_port = 8787
   force_https = true
@@ -22,6 +23,15 @@ primary_region = "iad"
   path = "/health"
   interval = "30s"
   timeout = "5s"
+
+# CouchDB (for Obsidian LiveSync)
+[[services]]
+  internal_port = 5984
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 5984
+    handlers = ["tls", "http"]
 
 [mounts]
   source = "couchdb_data"
