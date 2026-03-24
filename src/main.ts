@@ -53,16 +53,9 @@ console.log("Vault ready.");
 // --- MCP Server ---
 const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
     name: "obsidian-sync-mcp",
-    version: "0.1.0",
+    version: process.env.npm_package_version ?? "0.0.0",
     instructions: "Access and manage an Obsidian vault. You can read, write, list, search, and delete markdown notes. Every response includes a deep link to open the note directly in Obsidian.",
 };
-
-// If auth token is set, use password-gated OAuth and validate Bearer tokens on MCP requests
-if (AUTH_TOKEN) {
-    const app = new FastMCP(serverOptions).getApp();
-    // We need to create the server first, mount auth, then set up authenticate
-    // Actually, let's create the server with authenticate callback
-}
 
 // Auth: a closure that gets wired up after the OAuth routes are mounted
 let _validateToken: (auth: string | undefined) => boolean = () => true;
@@ -176,6 +169,15 @@ server.addTool({
         return ok ? `Deleted: ${path}` : `Failed to delete: ${path}`;
     },
 });
+
+// --- Graceful shutdown ---
+async function shutdown() {
+    console.log("Shutting down...");
+    await vault.close();
+    process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 // --- Start server ---
 server.start({

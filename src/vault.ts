@@ -101,6 +101,7 @@ export class Vault {
                 (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
 
             results.push({ path: notePath, snippet });
+            if (results.length >= 50) break;
         }
         return results;
     }

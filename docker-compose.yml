@@ -1,11 +1,17 @@
+# Create a .env file to override defaults:
+#   COUCHDB_USER=admin
+#   COUCHDB_PASSWORD=<strong-password>
+#   VAULT_NAME=MyVault
+#   MCP_AUTH_TOKEN=<password-for-mcp>
+
 services:
   couchdb:
     image: couchdb:3
     ports:
-      - "5984:5984"
+      - "5984:5984"  # Exposed for Obsidian LiveSync plugin to connect
     environment:
       COUCHDB_USER: ${COUCHDB_USER:-admin}
-      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:-password}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?Set COUCHDB_PASSWORD in .env}
     volumes:
       - couchdb_data:/opt/couchdb/data
       - ./deploy/couchdb-init.ini:/opt/couchdb/etc/local.d/livesync.ini
@@ -17,7 +23,7 @@ services:
     environment:
       COUCHDB_URL: http://couchdb:5984
       COUCHDB_USER: ${COUCHDB_USER:-admin}
-      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:-password}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?Set COUCHDB_PASSWORD in .env}
       COUCHDB_DATABASE: ${COUCHDB_DATABASE:-obsidian}
       VAULT_NAME: ${VAULT_NAME:-MyVault}
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}

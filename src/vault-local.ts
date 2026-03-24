@@ -50,6 +50,7 @@ export class LocalVault {
     }
 
     async listNotes(folder?: string): Promise<string[]> {
+        if (folder && !folder.endsWith("/")) folder += "/";
         const searchDir = folder ? join(this.root, folder) : this.root;
         const paths: string[] = [];
         try {
@@ -81,6 +82,7 @@ export class LocalVault {
                 (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
 
             results.push({ path: notePath, snippet });
+            if (results.length >= 50) break;
         }
         return results;
     }

@@ -1,6 +1,9 @@
 import { defineConfig } from "tsup";
 import path from "path";
+import { readFileSync } from "fs";
 import type { Plugin } from "esbuild";
+
+const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 
 const livesyncAliases: Plugin = {
     name: "livesync-aliases",
@@ -44,6 +47,9 @@ export default defineConfig({
     banner: {
         js: `// Node polyfills for livesync-commonlib browser globals
 if(!("navigator" in globalThis)){globalThis.navigator={language:"en"};}`,
+    },
+    define: {
+        "process.env.npm_package_version": JSON.stringify(pkg.version),
     },
     esbuildPlugins: [livesyncAliases],
 });
