@@ -23,56 +23,129 @@ This server fills the gap. It exposes your vault over MCP's HTTP transport, so a
 
 ---
 
-## Two modes
+## Three ways to run it
 
-| Mode | How it works | Best for |
+| Option | Setup | Best for |
 |---|---|---|
-| **Local** | Reads `.md` files directly from your vault folder | Mac is always on; use with a tunnel (Cloudflare, Tailscale, ngrok) |
-| **Remote** | Reads from CouchDB via [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) | Always available; vault synced across devices via CouchDB |
+| **1. Local + tunnel** | Point at vault folder, expose with a tunnel | Simplest; Mac must stay on |
+| **2. Docker Compose** | CouchDB + MCP server in containers | Local dev; everything in Docker |
+| **3. Fly.io** | Deploy to the cloud, always on | Production; no Mac needed |
 
-Local mode is simpler — no database, no plugins. Remote mode is independent of your Mac being on.
+Options 2 and 3 use [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) to sync your vault to CouchDB. The MCP server reads from CouchDB, so it works even when your Mac is off.
 
 ---
 
-## Quickstart (local mode)
+## Option 1: Local mode + tunnel
+
+No database, no containers. The server reads `.md` files directly from your vault.
 
 ```bash
 git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
 cd obsidian-sync-mcp
-npm install
-npm run build
+npm install && npm run build
 
-# Point it at your vault
 VAULT_PATH=~/Documents/MyVault VAULT_NAME=MyVault node dist/main.js
 ```
 
-The server starts on `http://localhost:8787/mcp`. Try it with the [MCP Inspector](#try-without-an-agent), or expose it with a tunnel for Claude Web/Mobile access.
+Expose it for Claude Web/Mobile:
+
+```bash
+# Pick one:
+cloudflared tunnel --url http://localhost:8787    # Cloudflare (free)
+tailscale funnel 8787                             # Tailscale
+ngrok http 8787                                   # ngrok
+```
+
+Use the tunnel URL + `/mcp` as your MCP server endpoint in Claude.
+
+```
+Your Mac
+├── Obsidian (vault on disk)
+├── obsidian-sync-mcp (reads files directly)
+└── tunnel → Claude Web/Mobile
+```
 
 ---
 
-## Quickstart (remote mode)
+## Option 2: Docker Compose
 
-Requires [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin syncing your vault to a CouchDB instance.
+CouchDB and the MCP server run side by side in Docker. Your Obsidian vault syncs to CouchDB via the LiveSync plugin.
 
 ```bash
 git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
 cd obsidian-sync-mcp
-npm install
-npm run build
 
-COUCHDB_URL=http://localhost:5984 \
-COUCHDB_USER=admin \
-COUCHDB_PASSWORD=yourpassword \
-COUCHDB_DATABASE=obsidian \
-VAULT_NAME=MyVault \
-node dist/main.js
-```
+# Optional: create a .env file
+cat > .env <<EOF
+COUCHDB_USER=admin
+COUCHDB_PASSWORD=changeme
+VAULT_NAME=MyVault
+EOF
 
-A `docker-compose.yml` is included for running CouchDB locally:
-
-```bash
 docker compose up -d
 ```
+
+This starts:
+- **CouchDB** on port 5984
+- **MCP server** on port 8787, pre-configured to talk to CouchDB
+
+Then set up your vault:
+
+1. Create the database: `curl -u admin:changeme -X PUT http://localhost:5984/obsidian`
+2. In Obsidian, install the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin
+3. Configure it: server `http://localhost:5984`, username/password from above, database `obsidian`
+4. Enable LiveSync mode
+
+Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for Claude Web/Mobile access.
+
+```
+Docker Compose
+├── CouchDB (port 5984) ←── Obsidian + LiveSync plugin
+└── MCP server (port 8787) ←── Claude Web/Mobile (via tunnel)
+```
+
+---
+
+## Option 3: Fly.io
+
+Always-on deployment. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data.
+
+```bash
+cd deploy
+fly launch
+fly secrets set \
+  COUCHDB_USER=admin \
+  COUCHDB_PASSWORD=$(openssl rand -hex 16) \
+  COUCHDB_DATABASE=obsidian \
+  VAULT_NAME=MyVault \
+  MCP_AUTH_TOKEN=$(openssl rand -hex 16)
+```
+
+After deployment:
+
+1. Create the database: `curl -u admin:<password> -X PUT https://your-app.fly.dev:5984/obsidian`
+2. In Obsidian, configure LiveSync to point at `https://your-app.fly.dev:5984`
+3. Your MCP endpoint is `https://your-app.fly.dev/mcp`
+
+The `MCP_AUTH_TOKEN` secret is the password users enter when Claude connects (see [Authentication](#authentication)).
+
+```
+Fly.io (always on)
+├── CouchDB + persistent volume
+└── MCP server
+      ↑                    ↑
+Obsidian + LiveSync    Claude Web/Mobile
+```
+
+### Cost
+
+| Component | Cost |
+|---|---|
+| Fly.io VM (shared, 512MB) | ~$0-3/month |
+| 1GB persistent volume | ~$0.15/month |
+| **Total** | **~$0-3/month** |
+
+Cheaper than Obsidian Sync ($4/month) and you own the data.
 
 ---
 
@@ -104,8 +177,7 @@ The agent handles multi-step flows. "Summarize my last 5 daily notes" means list
 | `VAULT_NAME` | Both | `MyVault` | Vault name for deep links (must match your Obsidian vault name) |
 | `PORT` | Both | `8787` | HTTP port |
 | `BASE_URL` | Both | `http://localhost:PORT` | Public URL (for OAuth callbacks) |
-| `GOOGLE_CLIENT_ID` | Optional | — | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Optional | — | Google OAuth client secret |
+| `MCP_AUTH_TOKEN` | Optional | — | Password for OAuth approval page. When set, all MCP requests require authentication. |
 
 Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is set, the server exits with an error.
 
@@ -127,18 +199,22 @@ Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Ex
 
 ## Authentication
 
-For Claude Web and Claude Mobile, the server supports **OAuth 2.1 via Google** using [FastMCP](https://github.com/punkpeye/fastmcp)'s built-in provider. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to enable.
+The server includes a **self-contained OAuth 2.1 provider** with password-gated approval. No Google, GitHub, or any third-party OAuth app needed.
 
-When OAuth is enabled, Claude goes through the standard flow: discover metadata → redirect to Google login → get access token → make authenticated requests. You control access through your Google account.
+Set `MCP_AUTH_TOKEN` to a password:
 
-Without OAuth credentials, the server runs without authentication — suitable for local testing or use behind a private tunnel.
+```bash
+MCP_AUTH_TOKEN=mysecretpassword node dist/main.js
+```
 
-To set up Google OAuth:
+When Claude Web or Claude Mobile connects:
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Create an OAuth 2.0 Client ID (Web application)
-3. Add `{BASE_URL}/oauth/callback` as an authorized redirect URI
-4. Set the client ID and secret as environment variables
+1. Claude discovers the OAuth endpoints automatically
+2. A browser window opens showing a password page
+3. The user enters the `MCP_AUTH_TOKEN` password
+4. Claude gets an access token and makes authenticated requests
+
+Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable for local testing or use behind a private tunnel.
 
 ---
 
@@ -158,62 +234,13 @@ Open the Inspector URL, set transport to **Streamable HTTP**, enter `http://loca
 
 ---
 
-## Remote access (tunnels)
-
-To access the server from Claude Web or Claude Mobile, you need to expose it to the internet. The simplest options:
-
-```bash
-# Cloudflare Tunnel (free, no account needed for quick tunnels)
-cloudflared tunnel --url http://localhost:8787
-
-# Tailscale Funnel
-tailscale funnel 8787
-
-# ngrok
-ngrok http 8787
-```
-
-Use the tunnel URL + `/mcp` as your MCP server endpoint in Claude.
-
----
-
-## Architecture
-
-### Local mode
-
-```
-Obsidian vault (filesystem)
-         |
-  obsidian-sync-mcp (reads .md files directly)
-         |
-  Claude Web / Claude Mobile
-```
-
-### Remote mode
-
-```
-Obsidian (Mac/iOS)
-     |
-     └──── LiveSync plugin ────┐
-                                |
-                           CouchDB
-                                |
-                  obsidian-sync-mcp (via livesync-commonlib)
-                                |
-                  Claude Web / Claude Mobile
-```
-
-Remote mode uses [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib)'s `DirectFileManipulator` for proper chunk handling — content-defined chunking, path encoding, and metadata management. No shortcuts like single-chunk writes.
-
----
-
 ## Development
 
 ```bash
 git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
 cd obsidian-sync-mcp
 npm install
-npm run build    # builds dist/main.js via tsup
+npm run build
 ```
 
 The `--recursive` flag is important — it pulls the `livesync-commonlib` submodule needed for remote mode.
@@ -222,18 +249,15 @@ The `--recursive` flag is important — it pulls the `livesync-commonlib` submod
 
 [tsup](https://github.com/egoist/tsup) bundles `livesync-commonlib` (which uses Deno-style TypeScript imports) into standard Node.js modules via an esbuild plugin that resolves `.ts` imports, path aliases, and browser polyfills at build time.
 
-```bash
-npm run build    # production build
-```
-
-### Local CouchDB for development
+### Docker
 
 ```bash
-docker compose up -d                              # start CouchDB
-curl -u admin:password -X PUT localhost:5984/obsidian  # create database
-```
+# Build the standalone MCP server image
+docker build -t obsidian-sync-mcp .
 
-Then install the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin in Obsidian, point it at `http://localhost:5984`, and enable LiveSync mode.
+# Build the combined CouchDB + MCP image (for Fly.io)
+docker build -f deploy/Dockerfile.fly -t obsidian-sync-mcp-fly .
+```
 
 ---
 

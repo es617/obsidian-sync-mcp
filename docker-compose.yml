@@ -4,11 +4,26 @@ services:
     ports:
       - "5984:5984"
     environment:
-      COUCHDB_USER: admin
-      COUCHDB_PASSWORD: password
+      COUCHDB_USER: ${COUCHDB_USER:-admin}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:-password}
     volumes:
       - couchdb_data:/opt/couchdb/data
       - ./deploy/couchdb-init.ini:/opt/couchdb/etc/local.d/livesync.ini
+
+  mcp:
+    image: ghcr.io/es617/obsidian-sync-mcp:latest
+    ports:
+      - "8787:8787"
+    environment:
+      COUCHDB_URL: http://couchdb:5984
+      COUCHDB_USER: ${COUCHDB_USER:-admin}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:-password}
+      COUCHDB_DATABASE: ${COUCHDB_DATABASE:-obsidian}
+      VAULT_NAME: ${VAULT_NAME:-MyVault}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      BASE_URL: ${BASE_URL:-http://localhost:8787}
+    depends_on:
+      - couchdb
 
 volumes:
   couchdb_data:

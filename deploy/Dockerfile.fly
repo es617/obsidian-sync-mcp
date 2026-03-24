@@ -1,0 +1,28 @@
+# Combined CouchDB + MCP server for Fly.io deployment
+FROM couchdb:3 AS couchdb
+FROM node:22-slim
+
+# Install CouchDB from the official image
+COPY --from=couchdb /opt/couchdb /opt/couchdb
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libicu-dev libmozjs-115-0 supervisor \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r couchdb && useradd -r -g couchdb couchdb \
+    && mkdir -p /opt/couchdb/data /opt/couchdb/etc/local.d \
+    && chown -R couchdb:couchdb /opt/couchdb
+
+# CouchDB config
+COPY deploy/couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
+
+# MCP server
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY dist/ dist/
+
+# Supervisor to run both processes
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+EXPOSE 8787
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

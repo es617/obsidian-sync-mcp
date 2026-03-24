@@ -1,6 +1,7 @@
-import { FastMCP, GoogleProvider } from "fastmcp";
+import { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
+import { mountPasswordAuth } from "./auth.js";
 
 // --- Configuration from environment ---
 const VAULT_PATH = process.env.VAULT_PATH; // Local mode: path to vault directory
@@ -12,8 +13,7 @@ const COUCHDB_PASSPHRASE = process.env.COUCHDB_PASSPHRASE || undefined;
 const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
 const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 
 // --- Initialize vault (local or remote) ---
 interface VaultBackend {
@@ -57,16 +57,35 @@ const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
     instructions: "Access and manage an Obsidian vault. You can read, write, list, search, and delete markdown notes. Every response includes a deep link to open the note directly in Obsidian.",
 };
 
-if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
-    serverOptions.auth = new GoogleProvider({
-        baseUrl: BASE_URL,
-        clientId: GOOGLE_CLIENT_ID,
-        clientSecret: GOOGLE_CLIENT_SECRET,
-    });
-    console.log("OAuth enabled (Google).");
+// If auth token is set, use password-gated OAuth and validate Bearer tokens on MCP requests
+if (AUTH_TOKEN) {
+    const app = new FastMCP(serverOptions).getApp();
+    // We need to create the server first, mount auth, then set up authenticate
+    // Actually, let's create the server with authenticate callback
+}
+
+// Auth: a closure that gets wired up after the OAuth routes are mounted
+let _validateToken: (auth: string | undefined) => boolean = () => true;
+
+if (AUTH_TOKEN) {
+    serverOptions.authenticate = async (req: any) => {
+        const auth = req.headers["authorization"] as string | undefined;
+        if (!_validateToken(auth)) {
+            throw new Response("Unauthorized", { status: 401 });
+        }
+        return { authenticated: true };
+    };
+    console.log("Auth enabled (password-gated OAuth).");
+} else {
+    console.log("Auth disabled (set MCP_AUTH_TOKEN to enable).");
 }
 
 const server = new FastMCP(serverOptions);
+
+if (AUTH_TOKEN) {
+    const app = server.getApp();
+    _validateToken = mountPasswordAuth(app, BASE_URL, AUTH_TOKEN);
+}
 
 // --- Tools ---
 
