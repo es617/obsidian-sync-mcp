@@ -22,6 +22,18 @@ jobs:
           node-version: "22"
       - run: npx --yes oxlint@latest --deny-warnings src/
 
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm audit --audit-level=high
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -69,7 +81,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, build, test, test-e2e]
+    needs: [lint, audit, build, test, test-e2e]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
