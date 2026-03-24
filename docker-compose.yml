@@ -1,0 +1,14 @@
+services:
+  couchdb:
+    image: couchdb:3
+    ports:
+      - "5984:5984"
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: password
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+      - ./deploy/couchdb-init.ini:/opt/couchdb/etc/local.d/livesync.ini
+
+volumes:
+  couchdb_data:

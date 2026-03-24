@@ -1,0 +1,4 @@
+[submodule "lib/livesync-commonlib"]
+	path = lib/livesync-commonlib
+	url = https://github.com/es617/livesync-commonlib.git
+	branch = fix/enumerate-metaonly-yield

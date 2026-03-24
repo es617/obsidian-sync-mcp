@@ -1,0 +1,40 @@
+{
+    "name": "obsidian-sync-mcp",
+    "version": "0.1.0",
+    "description": "MCP server for accessing your Obsidian vault via CouchDB LiveSync",
+    "type": "module",
+    "bin": {
+        "obsidian-sync-mcp": "./dist/main.js"
+    },
+    "scripts": {
+        "build:lib": "tsup lib/livesync-commonlib/src/index.ts --format esm --dts --outDir dist/lib --external pouchdb-core --external pouchdb-adapter-http --external pouchdb-mapreduce --external pouchdb-replication --external pouchdb-find --external transform-pouch --external pouchdb-merge --external pouchdb-utils --external pouchdb-errors --external octagonal-wheels --external diff-match-patch --external xxhash-wasm --external fflate --external minimatch",
+        "build:server": "tsup src/main.ts --format esm --outDir dist --external ./dist/lib",
+        "build": "npm run build:lib && npm run build:server",
+        "start": "node dist/main.js",
+        "dev": "tsx src/main.ts"
+    },
+    "dependencies": {
+        "diff-match-patch": "^1.0.5",
+        "fastmcp": "^3.34.0",
+        "fflate": "^0.8.2",
+        "minimatch": "^9",
+        "octagonal-wheels": "^0.1.39",
+        "pouchdb-adapter-http": "^9.0.0",
+        "pouchdb-core": "^9.0.0",
+        "pouchdb-errors": "^9.0.0",
+        "pouchdb-find": "^9.0.0",
+        "pouchdb-mapreduce": "^9.0.0",
+        "pouchdb-merge": "^9.0.0",
+        "pouchdb-replication": "^9.0.0",
+        "pouchdb-utils": "^9.0.0",
+        "transform-pouch": "^2.0.0",
+        "xxhash-wasm": "^1.0.2",
+        "zod": "^3"
+    },
+    "devDependencies": {
+        "@types/node": "^22",
+        "tsup": "^8",
+        "tsx": "^4",
+        "typescript": "^5"
+    }
+}
