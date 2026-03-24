@@ -36,6 +36,10 @@ describe("safePath — path traversal prevention", () => {
         await assert.rejects(() => vault.deleteNote("../../important.md"), /Path traversal blocked/);
     });
 
+    it("blocks listNotes with traversal", async () => {
+        await assert.rejects(() => vault.listNotes("../../etc"), /Path traversal blocked/);
+    });
+
     it("allows nested paths within vault", async () => {
         await vault.writeNote("sub/dir/note.md", "ok");
         assert.equal(await vault.readNote("sub/dir/note.md"), "ok");

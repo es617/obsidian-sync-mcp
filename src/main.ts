@@ -1,6 +1,7 @@
 import { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { join } from "path";
+import { timingSafeEqual, createHash } from "crypto";
 import { watch } from "fs";
 import { readFile } from "fs/promises";
 import { makeDeepLink } from "./deeplink.js";
@@ -56,10 +57,13 @@ if (VAULT_PATH) {
 await vault.init();
 console.log("Vault ready.");
 
+// --- Per-vault data directory ---
+const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
+const vaultId = createHash("sha256").update(VAULT_PATH ?? COUCHDB_URL ?? "default").digest("hex").slice(0, 12);
+const dataDir = join(homeDir, ".obsidian-mcp", vaultId);
+
 // --- Search index ---
-const indexPath = VAULT_PATH
-    ? join(VAULT_PATH, ".obsidian-mcp", "search-index.json")
-    : "/tmp/obsidian-mcp-search-index.json";
+const indexPath = join(dataDir, "search-index.json");
 const searchIndex = new SearchIndex(indexPath);
 
 const loaded = await searchIndex.loadFromDisk();
@@ -120,7 +124,8 @@ if (AUTH_TOKEN) {
     serverOptions.authenticate = async (req: any) => {
         const header = req.headers["authorization"] as string | undefined;
         // Accept static Bearer token (for curl, MCP Inspector, custom agents)
-        if (header === `Bearer ${AUTH_TOKEN}`) {
+        const expected = `Bearer ${AUTH_TOKEN}`;
+        if (header && header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected))) {
             return { authenticated: true };
         }
         // Accept OAuth-issued tokens (for Claude Web/Desktop/Mobile)
@@ -137,9 +142,7 @@ if (AUTH_TOKEN) {
 const server = new FastMCP(serverOptions);
 
 if (AUTH_TOKEN) {
-    const tokenPath = VAULT_PATH
-        ? join(VAULT_PATH, ".obsidian-mcp", "auth-tokens.json")
-        : "/tmp/obsidian-mcp-auth-tokens.json";
+    const tokenPath = join(dataDir, "auth-tokens.json");
     auth = mountPasswordAuth(server.getApp(), BASE_URL, AUTH_TOKEN, tokenPath);
     await auth.loadTokens();
 }

@@ -1,5 +1,6 @@
-import { readFile, writeFile, unlink, mkdir, stat } from "fs/promises";
-import { join, dirname, resolve, sep } from "path";
+import { readFile, writeFile, unlink, mkdir, stat, realpath } from "fs/promises";
+import { dirname, resolve, sep } from "path";
+import { realpathSync } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 
@@ -7,15 +8,26 @@ export class LocalVault {
     private root: string;
 
     constructor(vaultPath: string) {
-        this.root = resolve(vaultPath);
+        this.root = realpathSync(resolve(vaultPath));
     }
 
-    private safePath(path: string): string {
+    private async safePath(path: string): Promise<string> {
         const full = resolve(this.root, path);
+        // Lexical check first (catches ../ without hitting disk)
         if (!full.startsWith(this.root + sep)) {
             throw new Error("Path traversal blocked");
         }
-        return full;
+        // Resolve symlinks and re-check (catches symlink escapes)
+        try {
+            const real = await realpath(full);
+            if (!real.startsWith(this.root + sep)) {
+                throw new Error("Path traversal blocked");
+            }
+            return real;
+        } catch (e: any) {
+            if (e.code === "ENOENT") return full; // file doesn't exist yet (write)
+            throw e;
+        }
     }
 
     async init(): Promise<void> {}
@@ -23,7 +35,7 @@ export class LocalVault {
     async close(): Promise<void> {}
 
     async readNote(path: string): Promise<string | null> {
-        const fullPath = this.safePath(path);
+        const fullPath = await this.safePath(path);
         try {
             return await readFile(fullPath, "utf-8");
         } catch {
@@ -32,7 +44,7 @@ export class LocalVault {
     }
 
     async writeNote(path: string, content: string): Promise<boolean> {
-        const fullPath = this.safePath(path);
+        const fullPath = await this.safePath(path);
         try {
             await mkdir(dirname(fullPath), { recursive: true });
             await writeFile(fullPath, content, "utf-8");
@@ -43,7 +55,7 @@ export class LocalVault {
     }
 
     async deleteNote(path: string): Promise<boolean> {
-        const fullPath = this.safePath(path);
+        const fullPath = await this.safePath(path);
         try {
             await unlink(fullPath);
             return true;
@@ -61,7 +73,7 @@ export class LocalVault {
     }
 
     async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
-        const fullPath = this.safePath(path);
+        const fullPath = await this.safePath(path);
         try {
             const [content, s] = await Promise.all([
                 readFile(fullPath, "utf-8"),
@@ -81,7 +93,7 @@ export class LocalVault {
 
     async listNotes(folder?: string): Promise<string[]> {
         if (folder && !folder.endsWith("/") && !folder.endsWith("\\")) folder += "/";
-        const searchDir = folder ? join(this.root, folder) : this.root;
+        const searchDir = folder ? await this.safePath(folder) : this.root;
         const paths: string[] = [];
         try {
             for await (const entry of glob("**/*.md", { cwd: searchDir })) {

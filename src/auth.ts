@@ -14,7 +14,7 @@
  */
 
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "crypto";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
 import type { Hono } from "hono";
 
@@ -25,6 +25,7 @@ interface PendingAuth {
     codeChallengeMethod: string;
     state: string;
     code: string;
+    createdAt: number;
 }
 
 interface TokenRecord {
@@ -47,6 +48,9 @@ const DEFAULT_REFRESH_DAYS = 14;
 const REFRESH_EXPIRY_MS = parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAULT_REFRESH_DAYS)) * 24 * 3600 * 1000;
 const MAX_FAILED_BEFORE_LOCKOUT = 5;
 const BASE_LOCKOUT_MS = 5 * 1000; // 5 seconds, doubles each lockout
+const MAX_CLIENTS = 100;
+const MAX_PENDING = 100;
+const PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface AuthHandle {
     validateToken: (auth: string | undefined) => boolean;
@@ -60,6 +64,17 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
     const tokens = new Map<string, TokenRecord>();
     const refreshTokens = new Map<string, TokenRecord>();
     const clients = new Map<string, RegisteredClient>();
+
+    // Cleanup expired pending auths and CSRF tokens
+    function cleanupPending() {
+        const now = Date.now();
+        for (const [code, pending] of pendingAuths) {
+            if (now - pending.createdAt > PENDING_TTL_MS) {
+                pendingAuths.delete(code);
+                csrfTokens.delete(code);
+            }
+        }
+    }
 
     // Rate limiting: exponential backoff, never resets until success
     let failedAttempts = 0;
@@ -98,6 +113,9 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
     // --- Dynamic Client Registration (RFC 7591) ---
 
     app.post("/oauth/register", async (c) => {
+        if (clients.size >= MAX_CLIENTS) {
+            return c.json({ error: "too_many_clients" }, 429);
+        }
         const body = await c.req.json();
         const clientId = randomUUID();
         const clientSecret = randomBytes(32).toString("hex");
@@ -142,6 +160,11 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             return c.text("PKCE with S256 is required", 400);
         }
 
+        cleanupPending();
+        if (pendingAuths.size >= MAX_PENDING) {
+            return c.text("Too many pending authorizations", 429);
+        }
+
         const code = randomBytes(32).toString("hex");
         pendingAuths.set(code, {
             clientId,
@@ -150,6 +173,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             codeChallengeMethod,
             state,
             code,
+            createdAt: Date.now(),
         });
 
         const csrf = randomBytes(32).toString("hex");
@@ -327,7 +351,8 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
                     refreshTokens: Object.fromEntries(refreshTokens),
                     clients: Object.fromEntries(clients),
                 });
-                await writeFile(persistPath, data, "utf-8");
+                await writeFile(persistPath, data, { encoding: "utf-8", mode: 0o600 });
+                await chmod(persistPath, 0o600);
                 console.log(`Auth tokens saved to disk (${tokens.size} sessions).`);
             } catch (err) {
                 console.error("Failed to save auth tokens:", err);

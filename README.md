@@ -35,6 +35,8 @@ In remote mode, the server uses [livesync-commonlib](https://github.com/vrtmrz/l
 
 Options 2 and 3 use [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) to sync your vault to CouchDB. The MCP server reads from CouchDB, so it works even when your Mac is off.
 
+**Already have LiveSync?** Just point the MCP server at your existing CouchDB — no need to set up a new database. Run `COUCHDB_URL=https://your-db:5984 node dist/main.js` locally, or deploy the MCP-only Docker image (`ghcr.io/es617/obsidian-sync-mcp`) anywhere.
+
 ---
 
 ## Option 1: Local mode + tunnel
