@@ -301,6 +301,23 @@ docker build -f deploy/Dockerfile.fly -t obsidian-sync-mcp-fly .
 
 ---
 
+## Updating
+
+| How you run it | How to update |
+|---|---|
+| `npx obsidian-sync-mcp` | Automatic — npx pulls latest |
+| `npm install -g obsidian-sync-mcp` | `npm update -g obsidian-sync-mcp` |
+| Fly.io | `fly deploy` — pulls latest MCP image + CouchDB patch |
+| Docker Compose | `docker compose pull && docker compose up -d` |
+
+For Fly.io, `fly deploy` rebuilds the container from the latest published image on ghcr.io. No git clone or source code needed. Pin a specific version with:
+
+```bash
+fly deploy --build-arg MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:v1.0.0
+```
+
+---
+
 ## Known limitations
 
 - **Search is brute-force.** Both modes read every note to search. Fine for hundreds of notes, slow for thousands. CouchDB full-text indexing would help in remote mode.
