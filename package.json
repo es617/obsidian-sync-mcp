@@ -1,7 +1,7 @@
 {
     "name": "obsidian-sync-mcp",
-    "version": "0.2.2",
-    "description": "Remote MCP server that gives Claude access to your Obsidian vault via Self-hosted LiveSync and CouchDB",
+    "version": "0.3.0",
+    "description": "Give any AI agent access to your Obsidian vault over MCP",
     "type": "module",
     "license": "MIT",
     "repository": {

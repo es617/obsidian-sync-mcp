@@ -1,5 +1,9 @@
-# MCP server only — connect to your existing CouchDB
+# fly.toml app configuration file generated for mcp-only-restless-meadow-564 on 2026-03-25T15:05:33-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
+app = 'mcp-only-restless-meadow-564'
 primary_region = 'iad'
 
 [build]
@@ -22,5 +26,5 @@ primary_region = 'iad'
 
 [[vm]]
   memory = '256mb'
-  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Restructured deploy into `deploy/mcp-only` and `deploy/mcp-with-db`
+- Setup script asks which mode, vault name, and encryption passphrase
+- MCP-only gets persistent volume (fixes auth state loss and 2-machine split)
+- Single machine enforced on Fly.io (in-memory auth requires it)
+- Shared IPv4 allocated by default (free instead of $2/month dedicated)
+- README rewritten with decision table and three clear setup paths
+- Agent instructions show deep links with visible URLs
+
 ## 0.2.2
 
 ### Fixes
