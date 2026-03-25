@@ -29,6 +29,21 @@ Content`;
         assert.ok(result.tags.includes("important"));
     });
 
+    it("parses multi-line YAML tags", () => {
+        const content = `---
+tags:
+  - project
+  - active
+  - important
+---
+
+Content`;
+        const result = parseFrontmatterAndLinks(content);
+        assert.ok(result.tags.includes("project"));
+        assert.ok(result.tags.includes("active"));
+        assert.ok(result.tags.includes("important"));
+    });
+
     it("parses inline #tags", () => {
         const content = "Some text #idea and #project/sub-tag here";
         const result = parseFrontmatterAndLinks(content);

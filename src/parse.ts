@@ -18,17 +18,36 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
         const end = content.indexOf("\n---", 4);
         if (end !== -1) {
             const yaml = content.slice(4, end);
+            let inTagsList = false;
             for (const line of yaml.split("\n")) {
+                // Multi-line tags list item: "  - tagname"
+                if (inTagsList) {
+                    const listItem = line.match(/^\s+-\s+(.+)/);
+                    if (listItem) {
+                        const trimmed = listItem[1].trim();
+                        if (trimmed) tags.add(trimmed);
+                        continue;
+                    }
+                    inTagsList = false;
+                }
+
                 const match = line.match(/^(\w[\w-]*)\s*:\s*(.+)/);
                 if (match) {
                     frontmatter[match[1]] = match[2].trim();
                 }
-                // Frontmatter tags
+                // Frontmatter tags (inline: [a, b] or start of multi-line list)
                 if (/^tags\s*:/.test(line)) {
-                    const tagValues = line.replace(/^tags\s*:\s*/, "").replace(/[[\]]/g, "");
-                    for (const t of tagValues.split(",")) {
-                        const trimmed = t.trim();
-                        if (trimmed) tags.add(trimmed);
+                    const value = line.replace(/^tags\s*:\s*/, "").trim();
+                    if (value) {
+                        // Inline: tags: [a, b] or tags: a, b
+                        const tagValues = value.replace(/[[\]]/g, "");
+                        for (const t of tagValues.split(",")) {
+                            const trimmed = t.trim();
+                            if (trimmed) tags.add(trimmed);
+                        }
+                    } else {
+                        // Multi-line list follows
+                        inTagsList = true;
                     }
                 }
             }

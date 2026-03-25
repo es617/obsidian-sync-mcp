@@ -175,34 +175,33 @@ describe("listNotes", () => {
     });
 });
 
+function createWatcher(dir: string, index: SearchIndex) {
+    return watch(dir, { recursive: true }, async (_event, filename) => {
+        if (!filename || !filename.endsWith(".md")) return;
+        const notePath = filename.replace(/\\/g, "/");
+        try {
+            const content = await readFile(join(dir, notePath), "utf-8");
+            index.update(notePath, content);
+        } catch {
+            index.remove(notePath);
+        }
+    });
+}
+
 describe("file watcher integration", () => {
     it("detects new file and updates search index", async () => {
         const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
         const searchIndex = new SearchIndex();
-
-        // Start watcher (same logic as main.ts)
-        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
-            if (!filename || !filename.endsWith(".md")) return;
-            const notePath = filename.replace(/\\/g, "/");
-            try {
-                const content = await readFile(join(watchDir, notePath), "utf-8");
-                searchIndex.update(notePath, content);
-            } catch {
-                searchIndex.remove(notePath);
-            }
-        });
+        const watcher = createWatcher(watchDir, searchIndex);
 
         try {
-            // Write a file externally (simulating Obsidian editing)
             await writeFile(join(watchDir, "external.md"), "external edit keyword banana");
-            // Wait for watcher to pick it up
             await new Promise((r) => setTimeout(r, 500));
 
             const results = searchIndex.search("banana");
             assert.equal(results.length, 1);
             assert.equal(results[0].path, "external.md");
 
-            // Delete the file
             await unlink(join(watchDir, "external.md"));
             await new Promise((r) => setTimeout(r, 500));
 
@@ -216,17 +215,7 @@ describe("file watcher integration", () => {
     it("ignores non-md files", async () => {
         const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
         const searchIndex = new SearchIndex();
-
-        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
-            if (!filename || !filename.endsWith(".md")) return;
-            const notePath = filename.replace(/\\/g, "/");
-            try {
-                const content = await readFile(join(watchDir, notePath), "utf-8");
-                searchIndex.update(notePath, content);
-            } catch {
-                searchIndex.remove(notePath);
-            }
-        });
+        const watcher = createWatcher(watchDir, searchIndex);
 
         try {
             await writeFile(join(watchDir, "image.png"), "not a note");
@@ -241,17 +230,7 @@ describe("file watcher integration", () => {
     it("detects files in subdirectories", async () => {
         const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
         const searchIndex = new SearchIndex();
-
-        const watcher = watch(watchDir, { recursive: true }, async (_event, filename) => {
-            if (!filename || !filename.endsWith(".md")) return;
-            const notePath = filename.replace(/\\/g, "/");
-            try {
-                const content = await readFile(join(watchDir, notePath), "utf-8");
-                searchIndex.update(notePath, content);
-            } catch {
-                searchIndex.remove(notePath);
-            }
-        });
+        const watcher = createWatcher(watchDir, searchIndex);
 
         try {
             await mkdir(join(watchDir, "sub", "dir"), { recursive: true });

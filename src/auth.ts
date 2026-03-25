@@ -364,9 +364,12 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             if (!persistPath) return;
             try {
                 await mkdir(dirname(persistPath), { recursive: true });
+                const now = Date.now();
+                const activeTokens = [...tokens.entries()].filter(([_, r]) => r.expiresAt > now);
+                const activeRefresh = [...refreshTokens.entries()].filter(([_, r]) => r.refreshExpiresAt > now);
                 const data = JSON.stringify({
-                    tokens: Object.fromEntries(tokens),
-                    refreshTokens: Object.fromEntries(refreshTokens),
+                    tokens: Object.fromEntries(activeTokens),
+                    refreshTokens: Object.fromEntries(activeRefresh),
                     clients: Object.fromEntries(clients),
                 });
                 await writeFile(persistPath, data, { encoding: "utf-8", mode: 0o600 });
