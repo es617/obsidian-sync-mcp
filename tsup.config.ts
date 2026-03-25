@@ -45,7 +45,8 @@ export default defineConfig({
     sourcemap: true,
     noExternal: [/livesync-commonlib/, /\.\/stubs/],
     banner: {
-        js: `// Node polyfills for livesync-commonlib browser globals
+        js: `#!/usr/bin/env node
+// Node polyfills for livesync-commonlib browser globals
 if(!("navigator" in globalThis)){globalThis.navigator={language:"en"};}`,
     },
     define: {

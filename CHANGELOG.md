@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+### Fixes
+- Add shebang to dist/main.js so `npx obsidian-sync-mcp` works
+
 ## 0.2.0
 
 ### Features
