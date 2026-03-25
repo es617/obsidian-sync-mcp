@@ -128,9 +128,10 @@ export class SearchIndex {
 
     /** List all indexed paths with mtimes, optionally filtered by folder prefix. */
     listWithMtime(folder?: string): Array<{ path: string; mtime: number }> {
+        const prefix = folder && !folder.endsWith("/") ? folder + "/" : folder;
         const entries = [...this.knownPaths]
             .filter((p) => p.endsWith(".md"))
-            .filter((p) => !folder || p.startsWith(folder))
+            .filter((p) => !prefix || p.startsWith(prefix))
             .map((p) => ({ path: p, mtime: this.mtimes.get(p) ?? 0 }));
         return entries.sort((a, b) => a.path.localeCompare(b.path));
     }

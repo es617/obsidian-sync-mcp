@@ -17,6 +17,10 @@ done
 
 # Admin credentials
 DB=${COUCHDB_DATABASE:-obsidian}
+if ! printf '%s' "$DB" | grep -qE '^[a-z][a-z0-9_$()+/-]*$'; then
+    echo "ERROR: COUCHDB_DATABASE contains invalid characters: $DB"
+    exit 1
+fi
 ADMIN_USER=${COUCHDB_USER:-admin}
 ADMIN_PASS=${COUCHDB_PASSWORD}
 

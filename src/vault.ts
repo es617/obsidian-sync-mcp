@@ -67,7 +67,7 @@ export class Vault implements VaultBackend {
     }
 
     private validatePath(path: string): void {
-        if (!path || path.includes("\0") || path.length > 1000) {
+        if (!path || path.includes("\0") || path.includes("..") || path.length > 1000) {
             throw new Error("Invalid path");
         }
     }

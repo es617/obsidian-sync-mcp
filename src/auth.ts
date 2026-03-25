@@ -45,7 +45,7 @@ interface RegisteredClient {
 
 const TOKEN_EXPIRY_MS = 3600 * 1000; // 1 hour
 const DEFAULT_REFRESH_DAYS = 14;
-const REFRESH_EXPIRY_MS = parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAULT_REFRESH_DAYS)) * 24 * 3600 * 1000;
+const REFRESH_EXPIRY_MS = (parseInt(process.env.MCP_REFRESH_DAYS ?? String(DEFAULT_REFRESH_DAYS)) || DEFAULT_REFRESH_DAYS) * 24 * 3600 * 1000;
 const MAX_FAILED_BEFORE_LOCKOUT = 5;
 const BASE_LOCKOUT_MS = 5 * 1000; // 5 seconds, doubles each lockout
 const MAX_CLIENTS = 100;
