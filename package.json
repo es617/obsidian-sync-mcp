@@ -1,6 +1,6 @@
 {
     "name": "obsidian-sync-mcp",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "description": "Remote MCP server that gives Claude access to your Obsidian vault via Self-hosted LiveSync and CouchDB",
     "type": "module",
     "license": "MIT",

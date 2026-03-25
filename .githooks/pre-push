@@ -1,0 +1,32 @@
+#!/bin/sh
+# Verify version consistency before pushing a tag
+
+while read local_ref local_sha remote_ref remote_sha; do
+    # Only check version tags
+    case "$local_ref" in
+        refs/tags/v*)
+            TAG_VERSION="${local_ref#refs/tags/v}"
+            PKG_VERSION=$(node -p "require('./package.json').version")
+            LOCK_VERSION=$(node -p "require('./package-lock.json').version")
+            CHANGELOG_HAS=$(grep -c "^## ${TAG_VERSION}$" CHANGELOG.md)
+
+            ERRORS=""
+            if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+                ERRORS="${ERRORS}\n  package.json: ${PKG_VERSION} (expected ${TAG_VERSION})"
+            fi
+            if [ "$LOCK_VERSION" != "$TAG_VERSION" ]; then
+                ERRORS="${ERRORS}\n  package-lock.json: ${LOCK_VERSION} (expected ${TAG_VERSION})"
+            fi
+            if [ "$CHANGELOG_HAS" = "0" ]; then
+                ERRORS="${ERRORS}\n  CHANGELOG.md: missing ## ${TAG_VERSION} section"
+            fi
+
+            if [ -n "$ERRORS" ]; then
+                echo "ERROR: Version mismatch for tag v${TAG_VERSION}:${ERRORS}"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+exit 0

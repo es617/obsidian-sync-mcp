@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0
+
+### Features
+- README rewrite: "Already have LiveSync?" as first-class path for 600k+ existing users
+- Standalone MCP-only Fly.io deploy documented (no CouchDB needed)
+- Multi-line YAML tag parsing (`tags:\n  - foo\n  - bar`)
+- Deep link moved before note content (prevents link from polluting written notes)
+
+### Refactoring
+- Extracted VaultBackend interface to shared module with compile-time checks
+- Extracted tools to separate tools.ts (main.ts reduced from 335 to 166 lines)
+- Extracted extractSnippet() utility (was duplicated 3 times)
+- Removed dead searchVault from both vault backends
+- Fixed authenticate callback type (http.IncomingMessage instead of any)
+- Fixed frontmatter type (Record<string, string> instead of any)
+
+### Security
+- Require redirect_uris at client registration (prevents open redirect)
+- Validate registration payload sizes (5 URIs max, 256 char client names)
+- HTML-escape error messages on OAuth password page
+- Filter expired tokens on save and load
+- Check auth code TTL at token exchange
+- Fix CouchDB readiness check regex
+
+### Fixes
+- Fly.io app name no longer hardcoded (fly launch generates unique name)
+- Deep links noted as client-dependent in Known Limitations
+
 ## 0.1.2
 
 ### Fixes
