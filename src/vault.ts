@@ -8,6 +8,7 @@ import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { ReadyEntry, MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
+import type { VaultBackend, NoteInfo } from "./vault-backend.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -17,7 +18,7 @@ export interface VaultConfig {
     passphrase?: string;
 }
 
-export class Vault {
+export class Vault implements VaultBackend {
     private manipulator: DirectFileManipulator;
 
     constructor(config: VaultConfig) {
@@ -113,7 +114,7 @@ export class Vault {
         return await this.deleteNote(from);
     }
 
-    async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
+    async getMetadata(path: string): Promise<NoteInfo | null> {
         this.validatePath(path);
         const entry = await this.manipulator.get(path as FilePathWithPrefix);
         if (!entry) return null;
@@ -142,29 +143,4 @@ export class Vault {
         return paths.sort();
     }
 
-    async searchVault(query: string): Promise<Array<{ path: string; snippet: string }>> {
-        const results: Array<{ path: string; snippet: string }> = [];
-        const lowerQuery = query.toLowerCase();
-
-        for await (const doc of this.manipulator.enumerateAllNormalDocs({ metaOnly: false })) {
-            const entry = doc as ReadyEntry;
-            if (entry.deleted) continue;
-            const notePath = entry.path ?? "";
-            if (!notePath.endsWith(".md")) continue;
-
-            const content = entry.data?.join("") ?? "";
-            const lowerContent = content.toLowerCase();
-            const idx = lowerContent.indexOf(lowerQuery);
-            if (idx === -1) continue;
-
-            const start = Math.max(0, idx - 80);
-            const end = Math.min(content.length, idx + query.length + 80);
-            const snippet =
-                (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
-
-            results.push({ path: notePath, snippet });
-            if (results.length >= 50) break;
-        }
-        return results;
-    }
 }

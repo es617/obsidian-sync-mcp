@@ -3,8 +3,9 @@ import { dirname, resolve, sep } from "path";
 import { realpathSync } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
+import type { VaultBackend, NoteInfo } from "./vault-backend.js";
 
-export class LocalVault {
+export class LocalVault implements VaultBackend {
     private root: string;
 
     constructor(vaultPath: string) {
@@ -84,7 +85,7 @@ export class LocalVault {
         }
     }
 
-    async getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null> {
+    async getMetadata(path: string): Promise<NoteInfo | null> {
         const fullPath = await this.safePath(path);
         try {
             const [content, s] = await Promise.all([
@@ -118,26 +119,4 @@ export class LocalVault {
         return paths.sort();
     }
 
-    async searchVault(query: string): Promise<Array<{ path: string; snippet: string }>> {
-        const results: Array<{ path: string; snippet: string }> = [];
-        const lowerQuery = query.toLowerCase();
-        const notes = await this.listNotes();
-
-        for (const notePath of notes) {
-            const content = await this.readNote(notePath);
-            if (!content) continue;
-
-            const idx = content.toLowerCase().indexOf(lowerQuery);
-            if (idx === -1) continue;
-
-            const start = Math.max(0, idx - 80);
-            const end = Math.min(content.length, idx + query.length + 80);
-            const snippet =
-                (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
-
-            results.push({ path: notePath, snippet });
-            if (results.length >= 50) break;
-        }
-        return results;
-    }
 }

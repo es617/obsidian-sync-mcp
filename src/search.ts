@@ -10,6 +10,7 @@
 import FlexSearch from "flexsearch";
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
+import { extractSnippet } from "./parse.js";
 
 const MAX_RESULTS = 50;
 
@@ -92,25 +93,12 @@ export class SearchIndex {
         }
 
         const output: Array<{ path: string; snippet: string }> = [];
-        const lowerQuery = query.toLowerCase();
 
         for (const path of paths) {
             if (output.length >= MAX_RESULTS) break;
             const content = this.contents.get(path);
             if (!content) continue;
-
-            // Extract snippet around first match
-            const idx = content.toLowerCase().indexOf(lowerQuery);
-            if (idx !== -1) {
-                const start = Math.max(0, idx - 80);
-                const end = Math.min(content.length, idx + query.length + 80);
-                const snippet =
-                    (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
-                output.push({ path, snippet });
-            } else {
-                // FlexSearch matched via tokenization — show beginning of content
-                output.push({ path, snippet: content.slice(0, 160) + (content.length > 160 ? "..." : "") });
-            }
+            output.push({ path, snippet: extractSnippet(content, query) });
         }
 
         return output;

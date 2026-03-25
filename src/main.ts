@@ -21,17 +21,7 @@ const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 
 // --- Initialize vault (local or remote) ---
-interface VaultBackend {
-    init(): Promise<void>;
-    close(): Promise<void>;
-    readNote(path: string): Promise<string | null>;
-    writeNote(path: string, content: string): Promise<boolean>;
-    deleteNote(path: string): Promise<boolean>;
-    moveNote(from: string, to: string): Promise<boolean>;
-    getMetadata(path: string): Promise<{ path: string; size: number; ctime: number; mtime: number; frontmatter: Record<string, any>; tags: string[]; links: string[] } | null>;
-    listNotes(folder?: string): Promise<string[]>;
-    searchVault(query: string): Promise<Array<{ path: string; snippet: string }>>;
-}
+import type { VaultBackend } from "./vault-backend.js";
 
 let vault: VaultBackend;
 
@@ -98,9 +88,9 @@ if (VAULT_PATH) {
         }
     });
     console.log("Watching vault for external changes.");
-} else if (COUCHDB_URL && "watchChanges" in vault) {
+} else if (COUCHDB_URL && vault.watchChanges) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates
-    (vault as any).watchChanges((path: string, content: string | null) => {
+    vault.watchChanges((path: string, content: string | null) => {
         if (content) {
             searchIndex.update(path, content);
         } else {

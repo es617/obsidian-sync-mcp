@@ -3,7 +3,7 @@
  */
 
 export interface NoteMetadata {
-    frontmatter: Record<string, any>;
+    frontmatter: Record<string, string>;
     tags: string[];
     links: string[];
 }
@@ -51,4 +51,14 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     }
 
     return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+}
+
+export function extractSnippet(content: string, query: string, context = 80): string {
+    const idx = content.toLowerCase().indexOf(query.toLowerCase());
+    if (idx === -1) {
+        return content.slice(0, 160) + (content.length > 160 ? "..." : "");
+    }
+    const start = Math.max(0, idx - context);
+    const end = Math.min(content.length, idx + query.length + context);
+    return (start > 0 ? "..." : "") + content.slice(start, end) + (end < content.length ? "..." : "");
 }

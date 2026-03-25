@@ -175,44 +175,6 @@ describe("listNotes", () => {
     });
 });
 
-describe("searchVault", () => {
-    before(async () => {
-        await vault.writeNote("search/fox.md", "The quick brown fox jumps over the lazy dog");
-        await vault.writeNote("search/bar.md", "Nothing interesting here");
-    });
-
-    it("finds case-insensitive match", async () => {
-        const results = await vault.searchVault("QUICK");
-        assert.equal(results.length, 1);
-        assert.equal(results[0].path, "search/fox.md");
-        assert.ok(results[0].snippet.includes("quick brown fox"));
-    });
-
-    it("returns empty array when nothing matches", async () => {
-        assert.deepEqual(await vault.searchVault("zzz_nonexistent_zzz"), []);
-    });
-
-    it("caps results at 50", async () => {
-        // Create 60 notes containing "findme"
-        const dir = "search/cap";
-        for (let i = 0; i < 60; i++) {
-            await vault.writeNote(`${dir}/${i}.md`, `findme content ${i}`);
-        }
-        const results = await vault.searchVault("findme");
-        assert.equal(results.length, 50);
-    });
-
-    it("includes ... prefix for mid-content matches", async () => {
-        const padding = "x".repeat(200);
-        await vault.writeNote("search/long.md", `${padding}NEEDLE${padding}`);
-        const results = await vault.searchVault("NEEDLE");
-        const match = results.find((r) => r.path === "search/long.md");
-        assert.ok(match);
-        assert.ok(match!.snippet.startsWith("..."));
-        assert.ok(match!.snippet.endsWith("..."));
-    });
-});
-
 describe("file watcher integration", () => {
     it("detects new file and updates search index", async () => {
         const watchDir = await mkdtemp(join(tmpdir(), "watch-test-"));
