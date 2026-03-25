@@ -2,7 +2,7 @@ import { FastMCP } from "fastmcp";
 import { join } from "path";
 import { timingSafeEqual, createHash } from "crypto";
 import { watch } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, stat } from "fs/promises";
 import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
 import { registerTools } from "./tools.js";
@@ -53,18 +53,20 @@ const dataDir = join(baseDataDir, vaultId);
 
 // --- Search index ---
 const indexPath = join(dataDir, "search-index.json");
-const searchIndex = new SearchIndex(indexPath);
+const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
-const loaded = await searchIndex.loadFromDisk();
-if (!loaded) {
-    const start = performance.now();
-    const notes = await vault.listNotes();
-    console.log(`Building search index (${notes.length} notes)...`);
-    for (let i = 0; i < notes.length; i++) {
-        const content = await vault.readNote(notes[i]);
-        if (content) searchIndex.update(notes[i], content);
-        if (notes.length > 100 && (i + 1) % 500 === 0) {
-            console.log(`  indexed ${i + 1}/${notes.length}...`);
+// Load metadata (paths + mtimes) from disk, then rebuild FlexSearch index
+await searchIndex.loadFromDisk();
+const start = performance.now();
+const notesWithMtime = await vault.listNotesWithMtime();
+if (notesWithMtime.length > 0) {
+    console.log(`Building search index (${notesWithMtime.length} notes)...`);
+    for (let i = 0; i < notesWithMtime.length; i++) {
+        const { path, mtime } = notesWithMtime[i];
+        const content = await vault.readNote(path);
+        if (content) searchIndex.update(path, content, mtime);
+        if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
+            console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
         }
     }
     console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
@@ -79,8 +81,9 @@ if (VAULT_PATH) {
         // Normalize path separators
         const notePath = filename.replace(/\\/g, "/");
         try {
-            const content = await readFile(join(VAULT_PATH!, notePath), "utf-8");
-            searchIndex.update(notePath, content);
+            const fullPath = join(VAULT_PATH!, notePath);
+            const [content, s] = await Promise.all([readFile(fullPath, "utf-8"), stat(fullPath)]);
+            searchIndex.update(notePath, content, s.mtimeMs);
         } catch {
             // File deleted
             searchIndex.remove(notePath);
@@ -89,9 +92,9 @@ if (VAULT_PATH) {
     console.log("Watching vault for external changes.");
 } else if (COUCHDB_URL && vault.watchChanges) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates
-    vault.watchChanges((path: string, content: string | null) => {
+    vault.watchChanges((path: string, content: string | null, mtime?: number) => {
         if (content) {
-            searchIndex.update(path, content);
+            searchIndex.update(path, content, mtime);
         } else {
             searchIndex.remove(path);
         }

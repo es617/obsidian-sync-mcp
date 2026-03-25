@@ -8,7 +8,7 @@ import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import type { VaultBackend, NoteInfo } from "./vault-backend.js";
+import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -46,7 +46,7 @@ export class Vault implements VaultBackend {
         await this.manipulator.close();
     }
 
-    watchChanges(callback: (path: string, content: string | null) => void): void {
+    watchChanges(callback: (path: string, content: string | null, mtime?: number) => void): void {
         this.manipulator.beginWatch(
             (doc) => {
                 const path = doc.path ?? "";
@@ -55,7 +55,7 @@ export class Vault implements VaultBackend {
                     callback(path, null);
                 } else {
                     const content = "data" in doc && Array.isArray(doc.data) ? doc.data.join("") : null;
-                    callback(path, content);
+                    callback(path, content, doc.mtime);
                 }
             },
             (meta) => {
@@ -129,18 +129,21 @@ export class Vault implements VaultBackend {
     }
 
     async listNotes(folder?: string): Promise<string[]> {
-        const paths: string[] = [];
+        const notes = await this.listNotesWithMtime(folder);
+        return notes.map((n) => n.path);
+    }
+
+    async listNotesWithMtime(folder?: string): Promise<NoteListing[]> {
+        const results: NoteListing[] = [];
         for await (const doc of this.manipulator.enumerateAllNormalDocs({ metaOnly: true })) {
             const entry = doc as MetaEntry;
             if (entry.deleted) continue;
             const notePath = entry.path ?? "";
             if (!notePath.endsWith(".md")) continue;
-            if (folder) {
-                if (!notePath.startsWith(folder)) continue;
-            }
-            paths.push(notePath);
+            if (folder && !notePath.startsWith(folder)) continue;
+            results.push({ path: notePath, mtime: entry.mtime ?? 0 });
         }
-        return paths.sort();
+        return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
 }

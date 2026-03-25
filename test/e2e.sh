@@ -145,6 +145,15 @@ assert_contains "move confirmed" "$MOVE" "Moved"
 assert_file_missing "source removed" "$VAULT/ci-test.md"
 assert_file_exists "dest created" "$VAULT/archive/ci-test.md"
 
+echo "=== list_notes (sort by modified, limit) ==="
+LIST_M=$(mcp_call "$SESSION" '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"list_notes","arguments":{"sort_by":"modified","limit":2}}}')
+assert_contains "has timestamps" "$LIST_M" "202"
+assert_contains "limited to 2" "$LIST_M" "more"
+
+echo "=== search_vault (with snippets) ==="
+SEARCH_S=$(mcp_call "$SESSION" '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"search_vault","arguments":{"query":"Hello world","include_snippets":true}}}')
+assert_contains "snippet present" "$SEARCH_S" "Hello world"
+
 echo "=== delete_note ==="
 DEL=$(mcp_call "$SESSION" '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"delete_note","arguments":{"path":"archive/ci-test.md"}}}')
 assert_contains "delete confirmed" "$DEL" "Deleted"

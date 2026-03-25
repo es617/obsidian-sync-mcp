@@ -7,6 +7,11 @@ export interface NoteInfo extends NoteMetadata {
     mtime: number;
 }
 
+export interface NoteListing {
+    path: string;
+    mtime: number;
+}
+
 export interface VaultBackend {
     init(): Promise<void>;
     close(): Promise<void>;
@@ -16,5 +21,6 @@ export interface VaultBackend {
     moveNote(from: string, to: string): Promise<boolean>;
     getMetadata(path: string): Promise<NoteInfo | null>;
     listNotes(folder?: string): Promise<string[]>;
-    watchChanges?(callback: (path: string, content: string | null) => void): void;
+    listNotesWithMtime(folder?: string): Promise<NoteListing[]>;
+    watchChanges?(callback: (path: string, content: string | null, mtime?: number) => void): void;
 }

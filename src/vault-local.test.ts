@@ -200,7 +200,7 @@ describe("file watcher integration", () => {
 
             const results = searchIndex.search("banana");
             assert.equal(results.length, 1);
-            assert.equal(results[0].path, "external.md");
+            assert.equal(results[0], "external.md");
 
             await unlink(join(watchDir, "external.md"));
             await new Promise((r) => setTimeout(r, 500));
@@ -239,7 +239,7 @@ describe("file watcher integration", () => {
 
             const results = searchIndex.search("mango");
             assert.equal(results.length, 1);
-            assert.ok(results[0].path.includes("deep.md"));
+            assert.ok(results[0].includes("deep.md"));
         } finally {
             watcher.close();
             await rm(watchDir, { recursive: true, force: true });

@@ -23,8 +23,7 @@ describe("SearchIndex", () => {
 
         const results = idx.search("quick brown");
         assert.equal(results.length, 1);
-        assert.equal(results[0].path, "hello.md");
-        assert.ok(results[0].snippet.includes("quick brown"));
+        assert.equal(results[0], "hello.md");
     });
 
     it("returns empty for no match", () => {
@@ -59,16 +58,6 @@ describe("SearchIndex", () => {
         assert.ok(results.length <= 50);
     });
 
-    it("includes snippet with context", () => {
-        const padding = "x ".repeat(100);
-        const idx = new SearchIndex();
-        idx.update("note.md", `${padding}NEEDLE${padding}`);
-        const results = idx.search("NEEDLE");
-        assert.equal(results.length, 1);
-        assert.ok(results[0].snippet.startsWith("..."));
-        assert.ok(results[0].snippet.includes("NEEDLE"));
-    });
-
     it("tracks size correctly", () => {
         const idx = new SearchIndex();
         assert.equal(idx.size, 0);
@@ -79,28 +68,53 @@ describe("SearchIndex", () => {
         idx.remove("a.md");
         assert.equal(idx.size, 1);
     });
+
+    it("stores and retrieves mtimes", () => {
+        const idx = new SearchIndex();
+        idx.update("note.md", "content", 1234567890);
+        const notes = idx.listWithMtime();
+        assert.equal(notes.length, 1);
+        assert.equal(notes[0].mtime, 1234567890);
+    });
 });
 
 describe("SearchIndex persistence", () => {
-    it("saves and loads from disk", async () => {
+    it("saves and loads mtimes from disk", async () => {
         const path = join(tmpDir, "index.json");
 
-        // Create and save
         const idx1 = new SearchIndex(path);
-        idx1.update("note1.md", "Hello world");
-        idx1.update("note2.md", "Goodbye world");
+        idx1.update("note1.md", "Hello world", 100);
+        idx1.update("note2.md", "Goodbye world", 200);
         await idx1.saveToDisk();
 
-        // Load into fresh instance
         const idx2 = new SearchIndex(path);
         const loaded = await idx2.loadFromDisk();
         assert.ok(loaded);
         assert.equal(idx2.size, 2);
 
-        // Search works on loaded index
-        const results = idx2.search("Hello");
-        assert.equal(results.length, 1);
-        assert.equal(results[0].path, "note1.md");
+        const notes = idx2.listWithMtime();
+        assert.equal(notes.length, 2);
+        assert.ok(notes.some((n) => n.path === "note1.md" && n.mtime === 100));
+        assert.ok(notes.some((n) => n.path === "note2.md" && n.mtime === 200));
+    });
+
+    it("saves and loads encrypted when passphrase set", async () => {
+        const path = join(tmpDir, "encrypted-index.json");
+
+        const idx1 = new SearchIndex(path, "mypassphrase");
+        idx1.update("secret.md", "classified content", 999);
+        await idx1.saveToDisk();
+
+        // Verify file is not plaintext
+        const { readFile } = await import("fs/promises");
+        const raw = await readFile(path, "utf-8");
+        assert.ok(!raw.includes("secret.md"));
+        assert.ok(!raw.includes("classified"));
+
+        const idx2 = new SearchIndex(path, "mypassphrase");
+        const loaded = await idx2.loadFromDisk();
+        assert.ok(loaded);
+        assert.equal(idx2.size, 1);
     });
 
     it("returns false when no persisted index exists", async () => {

@@ -3,7 +3,7 @@ import { dirname, resolve, sep } from "path";
 import { realpathSync } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import type { VaultBackend, NoteInfo } from "./vault-backend.js";
+import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 
 export class LocalVault implements VaultBackend {
     private root: string;
@@ -105,18 +105,32 @@ export class LocalVault implements VaultBackend {
     }
 
     async listNotes(folder?: string): Promise<string[]> {
+        const notes = await this.listNotesWithMtime(folder);
+        return notes.map((n) => n.path);
+    }
+
+    async listNotesWithMtime(folder?: string): Promise<NoteListing[]> {
         if (folder && !folder.endsWith("/") && !folder.endsWith("\\")) folder += "/";
         const searchDir = folder ? await this.safePath(folder) : this.root;
-        const paths: string[] = [];
+        const entries: string[] = [];
         try {
             for await (const entry of glob("**/*.md", { cwd: searchDir })) {
-                const notePath = folder ? `${folder}${entry}` : entry;
-                paths.push(notePath);
+                entries.push(folder ? `${folder}${entry}` : entry);
             }
         } catch {
-            // Directory doesn't exist
+            return [];
         }
-        return paths.sort();
+        const results = await Promise.all(
+            entries.map(async (p) => {
+                try {
+                    const s = await stat(resolve(this.root, p));
+                    return { path: p, mtime: s.mtimeMs };
+                } catch {
+                    return { path: p, mtime: 0 };
+                }
+            }),
+        );
+        return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
 }

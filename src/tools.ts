@@ -1,6 +1,7 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
+import { extractSnippet } from "./parse.js";
 import type { VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 
@@ -40,7 +41,7 @@ export function registerTools(
             if (!ok) {
                 return `Failed to write note: ${path}`;
             }
-            searchIndex.update(path, content);
+            searchIndex.update(path, content, Date.now());
             const deepLink = makeDeepLink(vaultName, path);
             return `Note saved: ${path}\n[Open in Obsidian](${deepLink})`;
         },
@@ -48,29 +49,51 @@ export function registerTools(
 
     server.addTool({
         name: "list_notes",
-        description: "List all markdown notes in the vault, optionally filtered to a folder.",
+        description: "List markdown notes in the vault with modification timestamps. Use sort_by='modified' to find recently changed notes. Use modified_after to filter by date.",
         parameters: z.object({
             folder: z
                 .string()
                 .optional()
                 .describe("Folder to filter by, e.g. 'daily/' or 'projects/'. Omit for all notes."),
+            sort_by: z
+                .enum(["name", "modified"])
+                .optional()
+                .describe("Sort order: 'name' (default) or 'modified' (most recent first)."),
+            modified_after: z
+                .string()
+                .optional()
+                .describe("Only include notes modified after this ISO date, e.g. '2026-03-25' or '2026-03-25T10:00'."),
+            limit: z
+                .number()
+                .optional()
+                .describe("Max number of notes to return. Default 500."),
         }),
-        execute: async ({ folder }) => {
-            let notes = searchIndex.listPaths(folder);
+        execute: async ({ folder, sort_by, modified_after, limit }) => {
+            // Use search index (works with encrypted vaults), fall back to vault
+            let notes = searchIndex.listWithMtime(folder);
             if (notes.length === 0) {
-                notes = await vault.listNotes(folder);
+                notes = await vault.listNotesWithMtime(folder);
+            }
+            if (modified_after) {
+                const cutoff = new Date(modified_after).getTime();
+                notes = notes.filter((n) => n.mtime >= cutoff);
             }
             if (notes.length === 0) {
                 return folder ? `No notes found in folder: ${folder}` : "Vault is empty.";
             }
+            if (sort_by === "modified") {
+                notes.sort((a, b) => b.mtime - a.mtime);
+            }
+            const cap = limit ?? 500;
             const total = notes.length;
-            const capped = notes.slice(0, 500);
-            const lines = capped.map((p) => {
-                const deepLink = makeDeepLink(vaultName, p);
-                return `- [${p}](${deepLink})`;
+            const capped = notes.slice(0, cap);
+            const lines = capped.map((n) => {
+                const deepLink = makeDeepLink(vaultName, n.path);
+                const date = n.mtime ? new Date(n.mtime).toISOString().slice(0, 16) : "";
+                return `- ${date} [${n.path}](${deepLink})`;
             });
-            if (total > 500) {
-                lines.push(`\n... and ${total - 500} more. Use a folder filter to narrow results.`);
+            if (total > cap) {
+                lines.push(`\n... and ${total - cap} more. Use a folder filter or limit to narrow results.`);
             }
             return lines.join("\n");
         },
@@ -78,20 +101,39 @@ export function registerTools(
 
     server.addTool({
         name: "search_vault",
-        description: "Search for a text query across all notes in the vault. Returns matching notes with snippets.",
+        description: "Search for a text query across all notes in the vault. Returns matching paths. Use modified_after to filter by date. Set include_snippets=true for content snippets.",
         parameters: z.object({
             query: z.string().describe("Text to search for (case-insensitive)"),
+            modified_after: z
+                .string()
+                .optional()
+                .describe("Only include notes modified after this ISO date, e.g. '2026-03-25'."),
+            include_snippets: z
+                .boolean()
+                .optional()
+                .describe("Fetch content snippets for each result. Default false (paths only)."),
         }),
-        execute: async ({ query }) => {
-            const results = searchIndex.search(query);
-            if (results.length === 0) {
+        execute: async ({ query, modified_after, include_snippets }) => {
+            let paths = searchIndex.search(query);
+            if (modified_after) {
+                const cutoff = new Date(modified_after).getTime();
+                paths = paths.filter((p) => searchIndex.getMtime(p) >= cutoff);
+            }
+            if (paths.length === 0) {
                 return `No results for: ${query}`;
             }
-            const lines = results.map((r) => {
-                const deepLink = makeDeepLink(vaultName, r.path);
-                return `### [${r.path}](${deepLink})\n\`\`\`\n${r.snippet}\n\`\`\``;
-            });
-            return lines.join("\n\n");
+            const lines: string[] = [];
+            for (const path of paths) {
+                const deepLink = makeDeepLink(vaultName, path);
+                if (include_snippets) {
+                    const content = await vault.readNote(path);
+                    const snippet = content ? extractSnippet(content, query) : "";
+                    lines.push(`### [${path}](${deepLink})\n\`\`\`\n${snippet}\n\`\`\``);
+                } else {
+                    lines.push(`- [${path}](${deepLink})`);
+                }
+            }
+            return lines.join(include_snippets ? "\n\n" : "\n");
         },
     });
 
@@ -123,7 +165,7 @@ export function registerTools(
                 return `Failed to move: ${from} → ${to}`;
             }
             searchIndex.remove(from);
-            if (content) searchIndex.update(to, content);
+            if (content) searchIndex.update(to, content, Date.now());
             const deepLink = makeDeepLink(vaultName, to);
             return `Moved: ${from} → ${to}\n[Open in Obsidian](${deepLink})`;
         },
