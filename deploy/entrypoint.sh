@@ -8,7 +8,7 @@ COUCH_PID=$!
 # Wait for CouchDB to be ready
 echo "Waiting for CouchDB..."
 for i in $(seq 1 30); do
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:5984/ 2>/dev/null | grep -q "[2-4]"; then
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:5984/ 2>/dev/null | grep -qE "^[2-4]"; then
         echo "CouchDB is ready."
         break
     fi

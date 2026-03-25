@@ -117,14 +117,25 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             return c.json({ error: "too_many_clients" }, 429);
         }
         const body = await c.req.json();
+
+        // Validate redirect_uris
+        const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris.slice(0, 5) : [];
+        if (redirectUris.length === 0) {
+            return c.json({ error: "invalid_client_metadata", error_description: "redirect_uris required" }, 400);
+        }
+        if (redirectUris.some((u: any) => typeof u !== "string" || u.length > 2048)) {
+            return c.json({ error: "invalid_client_metadata", error_description: "invalid redirect_uri" }, 400);
+        }
+
         const clientId = randomUUID();
         const clientSecret = randomBytes(32).toString("hex");
+        const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 256) : undefined;
 
         const client: RegisteredClient = {
             clientId,
             clientSecret,
-            redirectUris: body.redirect_uris || [],
-            clientName: body.client_name,
+            redirectUris,
+            clientName,
         };
         clients.set(clientId, client);
 
@@ -151,7 +162,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         if (!client) {
             return c.text("Unknown client", 400);
         }
-        if (client.redirectUris.length > 0 && !client.redirectUris.includes(redirectUri)) {
+        if (!client.redirectUris.includes(redirectUri)) {
             return c.text("Invalid redirect URI", 400);
         }
 
@@ -253,7 +264,8 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             const redirectUri = body["redirect_uri"] as string;
 
             const pending = pendingAuths.get(code);
-            if (!pending) {
+            if (!pending || Date.now() - pending.createdAt > PENDING_TTL_MS) {
+                if (pending) pendingAuths.delete(code);
                 return c.json({ error: "invalid_grant" }, 400);
             }
 
@@ -370,11 +382,14 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             try {
                 const raw = await readFile(persistPath, "utf-8");
                 const data = JSON.parse(raw);
+                const now = Date.now();
                 for (const [k, v] of Object.entries(data.tokens ?? {})) {
-                    tokens.set(k, v as TokenRecord);
+                    const record = v as TokenRecord;
+                    if (record.expiresAt > now) tokens.set(k, record);
                 }
                 for (const [k, v] of Object.entries(data.refreshTokens ?? {})) {
-                    refreshTokens.set(k, v as TokenRecord);
+                    const record = v as TokenRecord;
+                    if (record.refreshExpiresAt > now) refreshTokens.set(k, record);
                 }
                 for (const [k, v] of Object.entries(data.clients ?? {})) {
                     clients.set(k, v as RegisteredClient);
@@ -401,7 +416,7 @@ function renderPasswordPage(code: string, csrf: string, error?: string): string 
 </style></head>
 <body>
   <h1>Obsidian Sync MCP</h1>
-  ${error ? `<p class="error">${error}</p>` : "<p>Enter the server password to authorize access to your vault.</p>"}
+  ${error ? `<p class="error">${error.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>` : "<p>Enter the server password to authorize access to your vault.</p>"}
   <form method="POST" action="/oauth/approve" autocomplete="on">
     <input type="hidden" name="code" value="${code}">
     <input type="hidden" name="csrf" value="${csrf}">
