@@ -290,6 +290,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 - **Search rebuilds on cold start.** The FlexSearch index persists to disk and rebuilds in ~200ms for 2000 notes. External edits are picked up automatically.
 - **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins.
 - **Text only.** Binary attachments are not exposed through MCP tools.
+- **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
 - **Node 22+ required.**
 
 ---

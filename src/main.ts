@@ -163,7 +163,7 @@ server.addTool({
             return `Note not found: ${path}`;
         }
         const deepLink = makeDeepLink(VAULT_NAME, path);
-        return `${content}\n\n---\n[Open in Obsidian](${deepLink})`;
+        return `[Open in Obsidian](${deepLink})\n\n---\n\n${content}`;
     },
 });
 
