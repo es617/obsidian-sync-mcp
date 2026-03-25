@@ -46,8 +46,8 @@ fly volumes create couchdb_data --size 1 --region "$REGION" || true
 # Deploy
 fly deploy
 
-# Get the app name
-APP_NAME=$(grep "^app " fly.toml | sed 's/app = "//' | sed 's/"//')
+# Get the app name (fly launch writes it to fly.toml)
+APP_NAME=$(grep "^app " fly.toml | sed "s/app = ['\"]*//" | sed "s/['\"]//g")
 
 echo ""
 echo "=== Setup Complete ==="

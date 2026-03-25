@@ -9,46 +9,90 @@
 
 Give any AI agent remote read/write access to your Obsidian vault over MCP. Run it locally from your machine, or deploy it to the cloud so it works even when your laptop is off.
 
-> **Example:** From your phone, ask your Claude AI: "What's in my daily note for today?" — and get the full content back, with a link to open it in Obsidian.
+> **Example:** From your phone, ask your AI: "What's in my daily note for today?" — and get the full content back, with a link to open it in Obsidian.
 
 ---
 
-## Why this exists
+## How it works
 
-Your Obsidian vault is locked to your device. Neither iCloud nor Obsidian Sync expose an API — Obsidian Sync is E2E encrypted with keys held only inside the app, intentionally inaccessible to external tools.
+The server has two modes:
 
-This server makes your vault available to any MCP-compatible agent — Claude, Copilot, custom agents, anything that speaks the [Model Context Protocol](https://modelcontextprotocol.io). It runs as a remote HTTP server, so agents can reach your notes from anywhere: web interfaces, mobile apps, CI pipelines, other machines.
+- **Local mode** — reads `.md` files directly from your vault folder. No database needed.
+- **Remote mode** — reads from CouchDB via [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync), the community plugin that replaces iCloud/Obsidian Sync with a CouchDB backend (600k+ downloads). The server uses [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) — the same library that powers the plugin — for proper chunk handling and E2E encryption support.
 
-Local agents (Claude Code, Cursor, etc.) can already read vault files directly. This project solves the harder problem: **remote access**.
-
-In remote mode, the server uses [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) — the same library that powers the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin — for proper chunk handling, content-defined splitting, and metadata management. No shortcuts or reimplementation.
+Both modes expose the same MCP tools over HTTP, so any MCP-compatible agent can connect: Claude, Copilot, custom agents, anything that speaks the [Model Context Protocol](https://modelcontextprotocol.io).
 
 ---
 
-## Three ways to run it
+## Choose your setup
 
-| Option | Setup | Best for |
+| You have... | Do this | What happens |
 |---|---|---|
-| **1. Local + tunnel** | Point at vault folder, expose with a tunnel | Simplest; no database needed; Mac must stay on |
-| **2. Docker Compose** | CouchDB + MCP server in containers | Local dev; everything in Docker |
-| **3. Fly.io** | Deploy to the cloud, always on | Production; no Mac needed |
-
-Options 2 and 3 use [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) to sync your vault to CouchDB. The MCP server reads from CouchDB, so it works even when your Mac is off.
-
-**Already have LiveSync?** Just point the MCP server at your existing CouchDB — no need to set up a new database. Run `COUCHDB_URL=https://your-db:5984 node dist/main.js` locally, or deploy the MCP-only Docker image (`ghcr.io/es617/obsidian-sync-mcp`) anywhere.
+| **LiveSync already** | Point MCP server at your CouchDB | Add AI access to your existing setup |
+| **A Mac that's always on** | Run in local mode + tunnel | Reads files directly, no database |
+| **Nothing yet, want it always on** | Deploy to Fly.io | CouchDB + MCP server in the cloud |
 
 ---
 
-## Option 1: Local mode + tunnel
+## Already have LiveSync?
 
-No database, no containers. The server reads `.md` files directly from your vault.
+If you're already using Self-hosted LiveSync, you just need the MCP server. No database setup, no plugin changes — point it at your existing CouchDB.
+
+### Run locally
 
 ```bash
-git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
-cd obsidian-sync-mcp
-npm install && npm run build
+npx obsidian-sync-mcp
+```
 
-VAULT_PATH=~/Documents/MyVault VAULT_NAME=MyVault node dist/main.js
+Set your CouchDB connection:
+
+```bash
+COUCHDB_URL=https://your-couchdb:5984 \
+COUCHDB_USER=admin \
+COUCHDB_PASSWORD=yourpassword \
+COUCHDB_DATABASE=obsidian \
+VAULT_NAME=MyVault \
+MCP_AUTH_TOKEN=yourpassword \
+npx obsidian-sync-mcp
+```
+
+### Or deploy to Fly.io (MCP only, no CouchDB)
+
+```bash
+fly launch --image ghcr.io/es617/obsidian-sync-mcp:latest
+fly secrets set \
+  COUCHDB_URL=https://your-couchdb:5984 \
+  COUCHDB_USER=admin \
+  COUCHDB_PASSWORD=yourpassword \
+  COUCHDB_DATABASE=obsidian \
+  VAULT_NAME=MyVault \
+  MCP_AUTH_TOKEN=$(openssl rand -hex 16) \
+  BASE_URL=https://your-app.fly.dev
+```
+
+No volume needed — the MCP server is stateless (it reads from your CouchDB).
+
+Your MCP endpoint is `https://your-app.fly.dev/mcp`.
+
+> If you use E2E encryption in LiveSync, also set `COUCHDB_PASSPHRASE` to the same passphrase.
+
+---
+
+## Local mode + tunnel
+
+No database, no containers. The server reads `.md` files directly from your vault. Your Mac needs to stay on.
+
+```bash
+npx obsidian-sync-mcp
+```
+
+With configuration:
+
+```bash
+VAULT_PATH=~/Documents/MyVault \
+VAULT_NAME=MyVault \
+MCP_AUTH_TOKEN=yourpassword \
+npx obsidian-sync-mcp
 ```
 
 Expose it for remote agents:
@@ -60,7 +104,7 @@ tailscale funnel 8787                             # Tailscale
 ngrok http 8787                                   # ngrok
 ```
 
-Use the tunnel URL + `/mcp` as your MCP server endpoint.
+Use the tunnel URL + `/mcp` as your MCP server endpoint. Set `BASE_URL` to the tunnel URL when using authentication.
 
 ```
 Your Mac
@@ -71,70 +115,13 @@ Your Mac
 
 ---
 
-## Option 2: Docker Compose
+## Full Fly.io deploy (CouchDB + MCP)
 
-CouchDB and the MCP server run side by side in Docker. Your Obsidian vault syncs to CouchDB via the LiveSync plugin.
+For a fresh setup with everything in the cloud. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data.
 
-```bash
-git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
-cd obsidian-sync-mcp
-
-# Optional: create a .env file
-cat > .env <<EOF
-COUCHDB_USER=admin
-COUCHDB_PASSWORD=changeme
-VAULT_NAME=MyVault
-EOF
-
-docker compose up -d
-```
-
-This starts:
-- **CouchDB** on port 5984
-- **MCP server** on port 8787, pre-configured to talk to CouchDB
-
-Then set up your vault:
-
-1. Create the database: `curl -u admin:changeme -X PUT http://localhost:5984/obsidian`
-2. In Obsidian, install the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin
-3. Configure it: server `http://localhost:5984`, username/password from above, database `obsidian`
-4. Enable LiveSync mode
-
-Your MCP server is at `http://localhost:8787/mcp`. Expose it with a tunnel for remote access:
-
-```bash
-# Install cloudflared (one-time)
-brew install cloudflared
-
-# Expose the MCP server
-cloudflared tunnel --url http://localhost:8787
-```
-
-```
-Docker Compose
-├── CouchDB (port 5984) ←── Obsidian + LiveSync plugin
-└── MCP server (port 8787) ←── Remote agents (via tunnel)
-```
-
----
-
-## Option 3: Fly.io
-
-Always-on deployment. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data. The database is created automatically on first boot.
-
-### One-click deploy
-
-[![Deploy on Fly](https://fly.io/button/button.svg)](https://fly.io/launch?repo=https://github.com/es617/obsidian-sync-mcp&ref=main&config=deploy/fly.toml)
-
-After deploy, set your secrets in the Fly.io dashboard or CLI:
-
-```bash
-fly secrets set COUCHDB_PASSWORD=$(openssl rand -hex 16) MCP_AUTH_TOKEN=$(openssl rand -hex 16) VAULT_NAME=MyVault
-```
+Requires [flyctl](https://fly.io/docs/flyctl/install/) and a Fly.io account.
 
 ### Setup script
-
-Generates credentials, creates the volume, and deploys — all in one command:
 
 ```bash
 git clone https://github.com/es617/obsidian-sync-mcp.git
@@ -142,19 +129,18 @@ cd obsidian-sync-mcp
 ./deploy/setup.sh
 ```
 
-Save the credentials it prints — they won't be shown again.
+Generates credentials, creates the volume, and deploys. Save the credentials it prints.
 
 ### Manual CLI
 
 ```bash
-cd deploy
 fly launch --no-deploy --copy-config
 fly secrets set \
-  COUCHDB_USER=admin \
   COUCHDB_PASSWORD=$(openssl rand -hex 16) \
-  COUCHDB_DATABASE=obsidian \
   VAULT_NAME=MyVault \
   MCP_AUTH_TOKEN=$(openssl rand -hex 16)
+fly ips allocate-v4 --shared
+fly ips allocate-v6
 fly volumes create couchdb_data --size 1
 fly deploy
 ```
@@ -163,10 +149,12 @@ fly deploy
 
 1. In Obsidian, install [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) and configure it:
    - Server URL: `https://your-app.fly.dev:5984`
-   - Username / password: the CouchDB credentials from setup
+   - Username / password: from setup
    - Database: `obsidian`
 2. Your MCP endpoint is `https://your-app.fly.dev/mcp`
-3. The `MCP_AUTH_TOKEN` is the password you (or your users) enter when an agent connects
+3. The `MCP_AUTH_TOKEN` is the password you enter when an agent connects
+
+If you enable E2E encryption in LiveSync, also set: `fly secrets set COUCHDB_PASSPHRASE=your-passphrase`
 
 ```
 Fly.io (always on)
@@ -188,42 +176,25 @@ Comparable to Obsidian Sync ($4/month) and you own the data.
 
 ---
 
-## What the agent can do
+## Docker Compose (local dev)
 
-- **Read notes** — fetch any markdown note by path, with full content
-- **Write notes** — create or update notes; the server handles LiveSync's chunked format in remote mode
-- **List notes** — browse the vault, optionally filtered by folder
-- **Search** — sub-millisecond full-text search via [FlexSearch](https://github.com/nextapps-de/flexsearch) index, with context snippets
-- **Delete notes** — remove notes from the vault
-- **Deep links** — every response includes an `obsidian://` link to open the note in Obsidian on Mac or iOS
+CouchDB and the MCP server run side by side in Docker.
 
-> "List all my notes in the projects/ folder, then read the one about the MCP server."
+```bash
+git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
+cd obsidian-sync-mcp
 
-The agent handles multi-step flows. "Summarize my last 5 daily notes" means listing the folder, reading each note, and synthesizing — without you specifying each step.
+cat > .env <<EOF
+COUCHDB_PASSWORD=changeme
+VAULT_NAME=MyVault
+EOF
 
----
+docker compose up -d
+```
 
-## Environment variables
+Then set up LiveSync in Obsidian: server `http://localhost:5984`, database `obsidian`.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `VAULT_PATH` | Local mode | — | Path to your Obsidian vault directory |
-| `COUCHDB_URL` | Remote mode | — | CouchDB server URL (e.g. `http://localhost:5984`) |
-| `COUCHDB_USER` | Remote mode | `admin` | CouchDB username |
-| `COUCHDB_PASSWORD` | Remote mode | `password` | CouchDB password |
-| `COUCHDB_DATABASE` | Remote mode | `obsidian` | CouchDB database name |
-| `COUCHDB_PASSPHRASE` | Remote mode | — | LiveSync E2E encryption passphrase (if enabled) |
-| `LIVESYNC_USER` | Remote mode | — | Non-admin CouchDB user for LiveSync (recommended). If set with `LIVESYNC_PASSWORD`, the entrypoint creates a restricted user with access only to the vault database. |
-| `LIVESYNC_PASSWORD` | Remote mode | — | Password for the LiveSync user |
-| `VAULT_NAME` | Both | `MyVault` | Vault name for deep links (must match your Obsidian vault name) |
-| `PORT` | Both | `8787` | HTTP port |
-| `BASE_URL` | Both | `http://localhost:PORT` | Public URL (for OAuth callbacks) |
-| `MCP_AUTH_TOKEN` | Optional | — | Password for OAuth approval page. When set, all MCP requests require authentication. |
-| `MCP_REFRESH_DAYS` | Optional | `14` | Days before the session expires and the user must re-enter the password. |
-| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (search index, auth tokens). On Fly.io, automatically set to the persistent volume. |
-| `HOST` | Optional | `0.0.0.0` | Bind address for the HTTP server. Set to `127.0.0.1` to restrict to localhost only. |
-
-Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is set, the server exits with an error.
+Your MCP server is at `http://localhost:8787/mcp`.
 
 ---
 
@@ -234,35 +205,58 @@ Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode. If neither is 
 | `read_note` | Read a note's markdown content by path |
 | `write_note` | Create or overwrite a note (preserves creation time on updates) |
 | `list_notes` | List all `.md` files, optionally filtered by folder |
-| `search_vault` | Full-text search across all notes (capped at 50 results) |
+| `search_vault` | Sub-millisecond full-text search across all notes (capped at 50 results) |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
 | `get_note_metadata` | Get frontmatter, tags, links, size, and timestamps without reading the full content |
 
 Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) (`obsidian://open?vault=...&file=...`) that works on Mac and iOS.
 
+> "List all my notes in the projects/ folder, then read the one about the MCP server."
+
 ---
 
 ## Authentication
 
-The server includes a **self-contained OAuth 2.1 provider** with password-gated approval. No Google, GitHub, or any third-party OAuth app needed.
-
-Set `MCP_AUTH_TOKEN` to a password:
+Set `MCP_AUTH_TOKEN` to a password to enable authentication:
 
 ```bash
-MCP_AUTH_TOKEN=mysecretpassword node dist/main.js
+MCP_AUTH_TOKEN=mysecretpassword npx obsidian-sync-mcp
 ```
 
-When a remote agent connects:
+The server includes a self-contained OAuth 2.1 provider. When an agent connects:
 
-1. The agent discovers the OAuth endpoints automatically
-2. A browser window opens showing a password page
-3. The user enters the `MCP_AUTH_TOKEN` password
-4. The agent gets an access token and refreshes it transparently
+1. A browser window opens with a password page
+2. Enter the `MCP_AUTH_TOKEN` password
+3. The agent gets an access token and refreshes it transparently
 
-You only enter the password once — the session is shared across all your Claude interfaces (Desktop, Web, Mobile). The refresh token keeps it alive for 14 days of inactivity (configurable via `MCP_REFRESH_DAYS`).
+The session is shared across all your Claude interfaces (Desktop, Web, Mobile) and persists across server restarts. You'll need to re-enter the password after 14 days of inactivity (configurable via `MCP_REFRESH_DAYS`).
+
+For non-OAuth clients (curl, MCP Inspector, custom agents), you can also pass the token directly as `Authorization: Bearer <MCP_AUTH_TOKEN>`.
 
 Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable for local testing or use behind a private tunnel.
+
+---
+
+## Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `VAULT_PATH` | Local mode | — | Path to your Obsidian vault directory |
+| `COUCHDB_URL` | Remote mode | — | CouchDB server URL |
+| `COUCHDB_USER` | Remote mode | `admin` | CouchDB username |
+| `COUCHDB_PASSWORD` | Remote mode | `password` | CouchDB password |
+| `COUCHDB_DATABASE` | Remote mode | `obsidian` | CouchDB database name |
+| `COUCHDB_PASSPHRASE` | Remote mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
+| `VAULT_NAME` | Both | `MyVault` | Vault name for Obsidian deep links |
+| `MCP_AUTH_TOKEN` | Optional | — | Password for authentication |
+| `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |
+| `PORT` | Optional | `8787` | HTTP port |
+| `HOST` | Optional | `0.0.0.0` | Bind address (`127.0.0.1` to restrict to localhost) |
+| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (search index, auth tokens) |
+| `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
+
+Set `VAULT_PATH` for local mode or `COUCHDB_URL` for remote mode.
 
 ---
 
@@ -271,41 +265,11 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 Test the server interactively using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
 
 ```bash
-# Start the server
-VAULT_PATH=~/Documents/MyVault node dist/main.js
-
-# In another terminal
+VAULT_PATH=~/Documents/MyVault npx obsidian-sync-mcp &
 npx @modelcontextprotocol/inspector
 ```
 
-Open the Inspector URL, set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and connect. You can call any tool from the web UI.
-
----
-
-## Development
-
-```bash
-git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
-cd obsidian-sync-mcp
-npm install
-npm run build
-```
-
-The `--recursive` flag is important — it pulls the `livesync-commonlib` submodule needed for remote mode.
-
-### Build
-
-[tsup](https://github.com/egoist/tsup) bundles `livesync-commonlib` (which uses Deno-style TypeScript imports) into standard Node.js modules via an esbuild plugin that resolves `.ts` imports, path aliases, and browser polyfills at build time.
-
-### Docker
-
-```bash
-# Build the standalone MCP server image
-docker build -t obsidian-sync-mcp .
-
-# Build the combined CouchDB + MCP image (for Fly.io)
-docker build -f deploy/Dockerfile.fly -t obsidian-sync-mcp-fly .
-```
+Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and connect.
 
 ---
 
@@ -314,46 +278,51 @@ docker build -f deploy/Dockerfile.fly -t obsidian-sync-mcp-fly .
 | How you run it | How to update |
 |---|---|
 | `npx obsidian-sync-mcp` | Automatic — npx pulls latest |
-| `npm install -g obsidian-sync-mcp` | `npm update -g obsidian-sync-mcp` |
-| Fly.io | `fly deploy` — pulls latest MCP image + CouchDB patch |
+| Fly.io (MCP only) | `fly deploy --image ghcr.io/es617/obsidian-sync-mcp:latest` |
+| Fly.io (full deploy) | Clone the repo, `fly deploy` from the repo root |
 | Docker Compose | `docker compose pull && docker compose up -d` |
-
-For Fly.io, `fly deploy` rebuilds the container from the latest published image on ghcr.io. No git clone or source code needed. Pin a specific version with:
-
-```bash
-fly deploy --build-arg MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:v1.0.0
-```
 
 ---
 
 ## Known limitations
 
-- **Search index rebuilds on cold start.** The FlexSearch full-text index lives in memory and persists to disk on shutdown. Typical rebuild: ~200ms for 2000 notes. Survives Fly.io suspend/resume (memory preserved). External edits (from Obsidian) are picked up automatically via filesystem watcher (local) or CouchDB `_changes` feed (remote).
-- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, CouchDB's revision system handles it in remote mode (last write wins). Local mode has no protection — the last write overwrites.
-- **Text only.** Binary attachments (images, PDFs) are not exposed through the MCP tools. The underlying library supports them, but most agents can't do much with raw binary data.
-- **Node 22+ required.** Uses `fs/promises.glob` in local mode.
+- **Single vault per instance.** Each server connects to one vault. For multiple vaults, run multiple instances on different ports.
+- **Search rebuilds on cold start.** The FlexSearch index persists to disk and rebuilds in ~200ms for 2000 notes. External edits are picked up automatically.
+- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins.
+- **Text only.** Binary attachments are not exposed through MCP tools.
+- **Node 22+ required.**
 
 ---
 
 ## Safety
 
-This server gives an AI agent read/write access to your Obsidian vault. That's the point — and it means you should understand what it can do.
+This server gives an AI agent read/write access to your Obsidian vault.
 
-**Agents can modify and delete notes.** A bad prompt or a misbehaving agent can overwrite or delete your notes. Keep backups. Use tool approval deliberately — "always allow" is convenient but means the agent can repeat any action without further confirmation.
+**Agents can modify and delete notes.** Keep backups. Use tool approval deliberately.
 
-**Local mode has filesystem scope.** The server restricts file access to your vault directory (path traversal is blocked), but the process itself runs with your user permissions.
+**Authentication is optional.** Always set `MCP_AUTH_TOKEN` when exposing to the internet.
 
-**Authentication is optional.** Without `MCP_AUTH_TOKEN`, any client that can reach the server has full vault access. Always set a password when exposing the server to the internet.
+**Use HTTPS in production.** Use a tunnel or deploy behind a reverse proxy.
 
-**Use HTTPS in production.** The server doesn't handle TLS itself — use a tunnel (Cloudflare, Tailscale, ngrok) or deploy behind a reverse proxy. Without TLS, passwords and tokens travel in cleartext.
+This software is provided as-is under the [MIT license](https://github.com/es617/obsidian-sync-mcp/blob/main/LICENSE). You are responsible for what agents do with your vault.
 
-This software is provided as-is under the [MIT license](LICENSE). You are responsible for what agents do with your vault.
+---
+
+## Development
+
+```bash
+git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
+cd obsidian-sync-mcp
+npm install && npm run build
+npm test          # 79 unit tests
+npm run test:e2e  # integration tests
+```
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](https://github.com/es617/obsidian-sync-mcp/blob/main/LICENSE).
 
 ## Acknowledgements
 
@@ -363,4 +332,3 @@ This project is licensed under the MIT License — see [LICENSE](LICENSE) for de
 - [FlexSearch](https://github.com/nextapps-de/flexsearch) — full-text search engine
 - [CouchDB](https://couchdb.apache.org/) — document database
 - [Fly.io](https://fly.io/) — deployment platform
-- [tsup](https://github.com/egoist/tsup) — TypeScript bundler

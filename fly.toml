@@ -1,9 +1,5 @@
-# fly.toml app configuration file generated for obsidian-sync-mcp on 2026-03-24T16:24:33-04:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
-app = 'obsidian-sync-mcp'
+# Fly.io configuration for obsidian-sync-mcp
+# fly launch will generate a unique app name
 primary_region = 'iad'
 
 [build]

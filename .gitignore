@@ -5,3 +5,4 @@ dist/
 CLAUDE.md
 .claude/
 scripts/review.sh
+Dockerfile.dev.fly
