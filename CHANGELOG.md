@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.2.1
+## 0.2.2
 
 ### Fixes
 - Add shebang to dist/main.js so `npx obsidian-sync-mcp` works
+- Fix npm bin path normalization
 
 ## 0.2.0
 

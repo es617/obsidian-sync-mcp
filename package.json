@@ -1,12 +1,12 @@
 {
     "name": "obsidian-sync-mcp",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "description": "Remote MCP server that gives Claude access to your Obsidian vault via Self-hosted LiveSync and CouchDB",
     "type": "module",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/es617/obsidian-sync-mcp.git"
+        "url": "git+https://github.com/es617/obsidian-sync-mcp.git"
     },
     "keywords": [
         "mcp",
@@ -20,7 +20,7 @@
         "node": ">=22"
     },
     "bin": {
-        "obsidian-sync-mcp": "./dist/main.js"
+        "obsidian-sync-mcp": "dist/main.js"
     },
     "files": [
         "dist/",
