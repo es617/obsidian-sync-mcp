@@ -6,7 +6,7 @@ import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectF
 import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
 import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
-import type { ReadyEntry, MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
+import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo } from "./vault-backend.js";
 
