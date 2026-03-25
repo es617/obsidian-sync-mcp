@@ -119,9 +119,21 @@ Your Mac
 
 For a fresh setup with everything in the cloud. One Fly.io app runs both CouchDB and the MCP server. A persistent volume keeps your data.
 
-Requires [flyctl](https://fly.io/docs/flyctl/install/) and a Fly.io account.
+Requires [flyctl](https://fly.io/docs/flyctl/install/) and a Fly.io account:
 
-### Setup script
+```bash
+curl -L https://fly.io/install.sh | sh
+export PATH="$HOME/.fly/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+fly auth login
+```
+
+### Deploy button
+
+[![Deploy on Fly](https://fly.io/button/button.svg)](https://fly.io/launch?repo=https://github.com/es617/obsidian-sync-mcp&ref=main)
+
+After deploy, go to your app's **Secrets** page in the Fly.io dashboard. Paste the contents of [`.env.example`](https://github.com/es617/obsidian-sync-mcp/blob/main/.env.example), fill in your passwords, and click **Deploy secrets**.
+
+### Setup script (recommended)
 
 ```bash
 git clone https://github.com/es617/obsidian-sync-mcp.git
