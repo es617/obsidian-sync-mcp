@@ -15,7 +15,7 @@ services:
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?Set COUCHDB_PASSWORD in .env}
     volumes:
       - couchdb_data:/opt/couchdb/data
-      - ./deploy/couchdb-init.ini:/opt/couchdb/etc/local.d/livesync.ini
+      - ./deploy/mcp-with-db/couchdb-init.ini:/opt/couchdb/etc/local.d/livesync.ini
 
   mcp:
     image: ghcr.io/es617/obsidian-sync-mcp:latest

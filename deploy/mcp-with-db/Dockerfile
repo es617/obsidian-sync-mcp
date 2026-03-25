@@ -1,4 +1,4 @@
-# Combined CouchDB + MCP server for Fly.io deployment
+# CouchDB + MCP server — full self-contained deployment
 # Uses the pre-built MCP server image from ghcr.io
 
 ARG MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:latest
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # CouchDB config
-COPY deploy/couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
+COPY couchdb-init.ini /opt/couchdb/etc/local.d/livesync.ini
 
 # MCP server (from published image)
 WORKDIR /app
@@ -29,7 +29,7 @@ COPY --from=mcp /app/node_modules/ node_modules/
 COPY --from=mcp /app/dist/ dist/
 
 # Startup
-COPY deploy/entrypoint.sh /app/entrypoint.sh
+COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8787

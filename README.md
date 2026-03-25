@@ -127,12 +127,6 @@ export PATH="$HOME/.fly/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
 fly auth login
 ```
 
-### Deploy button
-
-[![Deploy on Fly](https://fly.io/button/button.svg)](https://fly.io/launch?repo=https://github.com/es617/obsidian-sync-mcp&ref=main)
-
-After deploy, go to your app's **Secrets** page in the Fly.io dashboard. Paste the contents of [`.env.example`](https://github.com/es617/obsidian-sync-mcp/blob/main/.env.example), fill in your passwords, and click **Deploy secrets**.
-
 ### Setup script (recommended)
 
 ```bash
@@ -184,7 +178,7 @@ Obsidian + LiveSync    Remote MCP agents
 | 1GB persistent volume | ~$0.15/month |
 | **Total** | **~$3-4/month** |
 
-Comparable to Obsidian Sync ($4/month) and you own the data.
+As of March 2026, Fly.io [may waive charges under $5/month](https://community.fly.io/t/bill-clarification-under-5-usd-of-usage-bill-charges-are-waived/26366), which could make this effectively free with a shared IPv4. Either way, cheaper than Obsidian Sync ($4/month) and you own the data.
 
 ---
 

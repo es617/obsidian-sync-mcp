@@ -1,9 +1,8 @@
-# Fly.io configuration for obsidian-sync-mcp
-# fly launch will generate a unique app name
+# CouchDB + MCP server — full self-contained deployment
+
 primary_region = 'iad'
 
 [build]
-  dockerfile = 'Dockerfile.fly'
 
 [[mounts]]
   source = 'couchdb_data'
@@ -33,4 +32,3 @@ primary_region = 'iad'
   memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 512
