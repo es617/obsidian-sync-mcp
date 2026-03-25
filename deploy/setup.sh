@@ -109,14 +109,19 @@ else
 fi
 fly secrets set $SECRETS
 
-# Create volume (full deploy only)
-if [ "$DEPLOY_TYPE" != "2" ]; then
-    REGION=$(grep "primary_region" fly.toml | sed "s/.*= *['\"]*//" | sed "s/['\"].*//")
+# Create volume for persistent data
+REGION=$(grep "primary_region" fly.toml | sed "s/.*= *['\"]*//" | sed "s/['\"].*//")
+if [ "$DEPLOY_TYPE" = "2" ]; then
+    fly volumes create mcp_data --size 1 --region "$REGION" -y || true
+else
     fly volumes create couchdb_data --size 1 --region "$REGION" -y || true
 fi
 
 # Deploy
 fly deploy
+
+# Ensure single machine (auth state is in-memory, multiple machines break OAuth)
+fly scale count 1 -y 2>/dev/null || true
 
 echo ""
 echo "=== Setup Complete ==="

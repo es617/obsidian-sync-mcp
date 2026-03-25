@@ -5,6 +5,8 @@
 ARG MCP_IMAGE=ghcr.io/es617/obsidian-sync-mcp:latest
 FROM ${MCP_IMAGE}
 
+ENV DATA_DIR=/data
+
 EXPOSE 8787
 
 CMD ["node", "dist/main.js"]
