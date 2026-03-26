@@ -198,7 +198,7 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | `search_vault` | Full-text search across all notes. Filter by tag or date, optionally include content snippets. |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
-| `get_note_metadata` | Get frontmatter, tags, links, size, and timestamps without reading the full content |
+| `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, and timestamps — navigate the knowledge graph |
 
 Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) (`obsidian://open?vault=...&file=...`) that works on Mac and iOS.
 

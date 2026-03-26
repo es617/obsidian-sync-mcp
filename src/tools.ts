@@ -297,7 +297,7 @@ export function registerTools(
     server.addTool({
         name: "get_note_metadata",
         description:
-            "Get metadata about a note without reading its full content. Returns frontmatter properties, tags (both frontmatter and inline #tags), internal links ([[wikilinks]] and markdown links), file size, and timestamps.",
+            "Get metadata about a note without reading its full content. Returns frontmatter, tags, outgoing links, backlinks (notes that link to this one), size, and timestamps. Use this to navigate the knowledge graph.",
         parameters: z.object({
             path: z.string().describe("Vault-relative path to the note, e.g. 'projects/my-project.md'"),
         }),
@@ -323,7 +323,11 @@ export function registerTools(
                 lines.push(`\nTags: ${meta.tags.map((t) => `#${t}`).join(", ")}`);
             }
             if (meta.links.length > 0) {
-                lines.push(`\nLinks: ${meta.links.join(", ")}`);
+                lines.push(`\nOutgoing links: ${meta.links.join(", ")}`);
+            }
+            const backlinks = searchIndex.getBacklinks(path);
+            if (backlinks.length > 0) {
+                lines.push(`\nBacklinks: ${backlinks.join(", ")}`);
             }
             lines.push(`\n[Open in Obsidian](${deepLink})`);
             return lines.join("\n");

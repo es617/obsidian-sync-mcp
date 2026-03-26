@@ -113,6 +113,52 @@ describe("SearchIndex", () => {
         idx.update("note.md", "---\ntags: [new]\n---\n", 200);
         assert.deepEqual(idx.getTags("note.md"), ["new"]);
     });
+
+    it("extracts outgoing links", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "See [[b]] and [[folder/c]]", 100);
+        assert.deepEqual(idx.getLinks("a.md"), ["b", "folder/c"]);
+    });
+
+    it("builds backlinks from wikilinks", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[b]]", 100);
+        idx.update("c.md", "Also links to [[b]]", 200);
+        const backlinks = idx.getBacklinks("b.md");
+        assert.ok(backlinks.includes("a.md"));
+        assert.ok(backlinks.includes("c.md"));
+    });
+
+    it("matches backlinks by filename without extension", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[Project X]]", 100);
+        const backlinks = idx.getBacklinks("Project X.md");
+        assert.deepEqual(backlinks, ["a.md"]);
+    });
+
+    it("matches backlinks by full path", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[projects/todo]]", 100);
+        const backlinks = idx.getBacklinks("projects/todo.md");
+        assert.deepEqual(backlinks, ["a.md"]);
+    });
+
+    it("clears backlinks when source is removed", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[b]]", 100);
+        assert.deepEqual(idx.getBacklinks("b.md"), ["a.md"]);
+        idx.remove("a.md");
+        assert.deepEqual(idx.getBacklinks("b.md"), []);
+    });
+
+    it("updates backlinks when source content changes", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[b]]", 100);
+        assert.deepEqual(idx.getBacklinks("b.md"), ["a.md"]);
+        idx.update("a.md", "Now links to [[c]]", 200);
+        assert.deepEqual(idx.getBacklinks("b.md"), []);
+        assert.deepEqual(idx.getBacklinks("c.md"), ["a.md"]);
+    });
 });
 
 describe("SearchIndex persistence", () => {
@@ -121,7 +167,7 @@ describe("SearchIndex persistence", () => {
 
         const idx1 = new SearchIndex(path);
         idx1.update("note1.md", "---\ntags: [foo]\n---\nHello world", 100);
-        idx1.update("note2.md", "Goodbye world", 200);
+        idx1.update("note2.md", "Goodbye world, see [[note1]]", 200);
         await idx1.saveToDisk();
 
         const idx2 = new SearchIndex(path);
@@ -136,6 +182,9 @@ describe("SearchIndex persistence", () => {
 
         assert.deepEqual(idx2.getTags("note1.md"), ["foo"]);
         assert.deepEqual(idx2.getTags("note2.md"), []);
+
+        // Backlinks survive persistence
+        assert.deepEqual(idx2.getBacklinks("note1.md"), ["note2.md"]);
     });
 
     it("saves and loads encrypted when passphrase set", async () => {

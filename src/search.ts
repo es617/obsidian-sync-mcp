@@ -36,6 +36,8 @@ export class SearchIndex {
     private index: FlexSearch.Document<{ path: string; content: string }>;
     private mtimes = new Map<string, number>();
     private tags = new Map<string, string[]>();
+    private links = new Map<string, string[]>();
+    private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
     private persistPath: string | null;
     private passphrase: string | null;
@@ -65,6 +67,14 @@ export class SearchIndex {
             for (const [path, t] of Object.entries(data.tags ?? {})) {
                 this.tags.set(path, t as string[]);
             }
+            for (const [path, l] of Object.entries(data.links ?? {})) {
+                const targets = l as string[];
+                this.links.set(path, targets);
+                for (const target of targets) {
+                    if (!this.backlinks.has(target)) this.backlinks.set(target, new Set());
+                    this.backlinks.get(target)!.add(path);
+                }
+            }
             console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes). Index rebuild needed.`);
             return this.knownPaths.size > 0;
         } catch {
@@ -80,6 +90,7 @@ export class SearchIndex {
             let data = JSON.stringify({
                 mtimes: Object.fromEntries(this.mtimes),
                 tags: Object.fromEntries(this.tags),
+                links: Object.fromEntries(this.links),
             });
             if (this.passphrase) {
                 data = encrypt(data, this.passphrase);
@@ -96,6 +107,7 @@ export class SearchIndex {
     update(path: string, content: string, mtime?: number): void {
         if (this.knownPaths.has(path)) {
             this.index.remove(path);
+            this.clearBacklinks(path);
         }
         this.index.add({ path, content });
         this.knownPaths.add(path);
@@ -106,6 +118,15 @@ export class SearchIndex {
         } else {
             this.tags.delete(path);
         }
+        if (parsed.links.length > 0) {
+            this.links.set(path, parsed.links);
+            for (const target of parsed.links) {
+                if (!this.backlinks.has(target)) this.backlinks.set(target, new Set());
+                this.backlinks.get(target)!.add(path);
+            }
+        } else {
+            this.links.delete(path);
+        }
     }
 
     /** Remove a note from the index. */
@@ -115,7 +136,20 @@ export class SearchIndex {
             this.knownPaths.delete(path);
             this.mtimes.delete(path);
             this.tags.delete(path);
+            this.clearBacklinks(path);
         }
+    }
+
+    /** Remove all backlink entries where path is the source. */
+    private clearBacklinks(path: string): void {
+        const oldLinks = this.links.get(path);
+        if (oldLinks) {
+            for (const target of oldLinks) {
+                this.backlinks.get(target)?.delete(path);
+                if (this.backlinks.get(target)?.size === 0) this.backlinks.delete(target);
+            }
+        }
+        this.links.delete(path);
     }
 
     /** Search for a query. Returns matching paths (caller fetches content for snippets). */
@@ -162,6 +196,28 @@ export class SearchIndex {
     /** Get tags for a path. */
     getTags(path: string): string[] {
         return this.tags.get(path) ?? [];
+    }
+
+    /** Get outgoing links for a path. */
+    getLinks(path: string): string[] {
+        return this.links.get(path) ?? [];
+    }
+
+    /** Get backlinks for a path (notes that link to it). Matches by full path or filename. */
+    getBacklinks(path: string): string[] {
+        const results = new Set<string>();
+        // Match by exact link target (e.g. "folder/note" or "folder/note.md")
+        const withMd = path.endsWith(".md") ? path : path + ".md";
+        const withoutMd = path.endsWith(".md") ? path.slice(0, -3) : path;
+        const nameOnly = withoutMd.includes("/") ? withoutMd.slice(withoutMd.lastIndexOf("/") + 1) : withoutMd;
+
+        for (const target of [withMd, withoutMd, nameOnly]) {
+            const sources = this.backlinks.get(target);
+            if (sources) {
+                for (const s of sources) results.add(s);
+            }
+        }
+        return [...results].sort();
     }
 
     /** List all tags across the vault with counts. */
