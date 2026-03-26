@@ -1,6 +1,6 @@
 {
     "name": "obsidian-sync-mcp",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Give any AI agent access to your Obsidian vault over MCP",
     "type": "module",
     "license": "MIT",
@@ -33,7 +33,7 @@
         "start": "node dist/main.js",
         "dev": "tsx src/main.ts",
         "test": "node --import tsx --test 'src/**/*.test.ts'",
-        "test:e2e": "bash test/e2e.sh"
+        "test:e2e": "node --import tsx --test test/e2e.test.ts"
     },
     "dependencies": {
         "diff-match-patch": "^1.0.5",
