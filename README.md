@@ -242,15 +242,16 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `VAULT_PATH` | Filesystem mode | — | Path to your Obsidian vault directory |
 | `COUCHDB_URL` | CouchDB mode | — | CouchDB server URL |
 | `COUCHDB_USER` | CouchDB mode | `admin` | CouchDB username |
-| `COUCHDB_PASSWORD` | CouchDB mode | `password` | CouchDB password |
+| `COUCHDB_PASSWORD` | CouchDB mode | — | CouchDB password (required) |
 | `COUCHDB_DATABASE` | CouchDB mode | `obsidian` | CouchDB database name |
 | `COUCHDB_PASSPHRASE` | CouchDB mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
-| `VAULT_NAME` | Both | `MyVault` | Vault name for Obsidian deep links |
+| `VAULT_NAME` | Both | `MyVault` | Vault name (used for deep links and index storage) |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for authentication |
 | `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |
 | `PORT` | Optional | `8787` | HTTP port |
 | `HOST` | Optional | `0.0.0.0` | Bind address (`127.0.0.1` to restrict to localhost) |
 | `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (search index, auth tokens) |
+| `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync) |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 
 Set `VAULT_PATH` for filesystem mode or `COUCHDB_URL` for CouchDB mode.
