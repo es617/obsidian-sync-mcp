@@ -22,5 +22,7 @@ export interface VaultBackend {
     getMetadata(path: string): Promise<NoteInfo | null>;
     listNotes(folder?: string): Promise<string[]>;
     listNotesWithMtime(folder?: string): Promise<NoteListing[]>;
-    watchChanges?(callback: (path: string, content: string | null, mtime?: number) => void): void;
+    watchChanges?(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void;
+    /** Catch up on changes since a sequence. Returns the new sequence. CouchDB only. */
+    catchUp?(since: string, callback: (path: string, content: string | null, mtime?: number) => void): Promise<string>;
 }

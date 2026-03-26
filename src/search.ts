@@ -41,6 +41,7 @@ export class SearchIndex {
     private knownPaths = new Set<string>();
     private flexSearchReady = false;
     private saving = false;
+    private _since: string = "";
     private persistPath: string | null;
     private passphrase: string | null;
 
@@ -78,6 +79,7 @@ export class SearchIndex {
                     this.backlinks.get(key)!.add(path);
                 }
             }
+            if (data.since) this._since = data.since;
             // Restore FlexSearch tokenized index
             if (data.flexsearch && data.flexsearch.length > 0) {
                 for (const { key, value } of data.flexsearch) {
@@ -108,6 +110,7 @@ export class SearchIndex {
                 tags: Object.fromEntries(this.tags),
                 links: Object.fromEntries(this.links),
                 flexsearch: flexChunks,
+                since: this._since,
             });
             if (this.passphrase) {
                 data = encrypt(data, this.passphrase);
@@ -252,6 +255,22 @@ export class SearchIndex {
         return [...counts.entries()]
             .map(([tag, count]) => ({ tag, count }))
             .sort((a, b) => b.count - a.count);
+    }
+
+    /** Clear all index data (for full rebuild after DB nuke). */
+    clear(): void {
+        const paths = Array.from(this.knownPaths);
+        for (const p of paths) this.remove(p);
+        this._since = "";
+        this.flexSearchReady = false;
+    }
+
+    get since(): string {
+        return this._since;
+    }
+
+    set since(value: string) {
+        this._since = value;
     }
 
     get size(): number {

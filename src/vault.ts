@@ -46,23 +46,45 @@ export class Vault implements VaultBackend {
         await this.manipulator.close();
     }
 
-    watchChanges(callback: (path: string, content: string | null, mtime?: number) => void): void {
+    private static mdFilter(meta: any): boolean {
+        return (meta.path ?? "").endsWith(".md");
+    }
+
+    private static docToChange(doc: any, callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void, seq?: string | number) {
+        const path = doc.path ?? "";
+        if (!path.endsWith(".md")) return;
+        if (doc.deleted) {
+            callback(path, null, undefined, seq);
+        } else {
+            const content = "data" in doc && Array.isArray(doc.data) ? doc.data.join("") : null;
+            callback(path, content, doc.mtime, seq);
+        }
+    }
+
+    async catchUp(since: string, callback: (path: string, content: string | null, mtime?: number) => void): Promise<string> {
+        // Use PouchDB _changes with same selector as beginWatch (not followUpdates
+        // which relies on a "replicate/pull" filter that may not exist on the DB).
+        const db = this.manipulator.liveSyncLocalDB.localDatabase;
+        const result = await db.changes({
+            include_docs: true,
+            since,
+            selector: { type: { $ne: "leaf" } },
+            live: false,
+        });
+        for (const change of result.results) {
+            if (!change.doc) continue;
+            const doc = await this.manipulator.getByMeta(change.doc as any).catch(() => null);
+            if (doc) Vault.docToChange(doc, callback);
+        }
+        this.manipulator.since = String(result.last_seq);
+        return String(result.last_seq);
+    }
+
+    watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void {
+        // catchUp already set this.manipulator.since to the right point
         this.manipulator.beginWatch(
-            (doc) => {
-                const path = doc.path ?? "";
-                if (!path.endsWith(".md")) return;
-                if (doc.deleted) {
-                    callback(path, null);
-                } else {
-                    const content = "data" in doc && Array.isArray(doc.data) ? doc.data.join("") : null;
-                    callback(path, content, doc.mtime);
-                }
-            },
-            (meta) => {
-                // Only interested in markdown files
-                const path = meta.path ?? "";
-                return path.endsWith(".md");
-            },
+            (doc, seq) => Vault.docToChange(doc, callback, seq),
+            Vault.mdFilter,
         );
     }
 

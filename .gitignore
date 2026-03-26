@@ -3,7 +3,6 @@ dist/
 .env
 *.log
 CLAUDE.md
-TODO.md
 .claude/
-scripts/review.sh
 Dockerfile.dev.fly
+.DS_Store

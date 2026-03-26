@@ -3,9 +3,21 @@ import { join } from "path";
 import { timingSafeEqual, createHash } from "crypto";
 import { watch } from "fs";
 import { stat } from "fs/promises";
+import { setGlobalLogFunction, LEVEL_INFO } from "octagonal-wheels/common/logger";
 import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
 import { registerTools } from "./tools.js";
+
+// Suppress livesync-commonlib logs that expose vault file paths in production.
+// Set LOG_LEVEL=debug to see all library logs during development.
+const debugLogging = process.env.LOG_LEVEL === "debug";
+setGlobalLogFunction((message, level = LEVEL_INFO) => {
+    if (level < LEVEL_INFO) return;
+    if (!debugLogging && typeof message === "string") {
+        if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
+    }
+    console.log(message);
+});
 
 // --- Configuration from environment ---
 const VAULT_PATH = process.env.VAULT_PATH; // Local mode: path to vault directory
@@ -57,40 +69,84 @@ const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
 // Load persisted index (metadata + FlexSearch) from disk, then sync with vault
 const hadPersistedIndex = await searchIndex.loadFromDisk();
+if (debugLogging && hadPersistedIndex) {
+    console.log(`[debug] Persisted index: ${searchIndex.size} notes, FlexSearch ready: ${!searchIndex.needsRebuild}, since: ${searchIndex.since || "(none)"}`);
+}
 const start = performance.now();
-const notesWithMtime = await vault.listNotesWithMtime();
 
-if (hadPersistedIndex && !searchIndex.needsRebuild && notesWithMtime.length > 0) {
-    // Incremental sync: diff mtimes, only read changed/new notes
-    const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
-
-    // Remove notes deleted while MCP was down (also handles DB nuke)
-    const stale = searchIndex.listPaths().filter((p) => !vaultPaths.has(p));
-    for (const p of stale) searchIndex.remove(p);
-
-    // Read only changed and new notes
-    const toRead = notesWithMtime.filter((n) => n.mtime > searchIndex.getMtime(n.path));
-    if (toRead.length > 0 || stale.length > 0) {
-        for (const { path, mtime } of toRead) {
-            const content = await vault.readNote(path);
-            if (content) searchIndex.update(path, content, mtime);
+if (COUCHDB_URL && vault.catchUp) {
+    // CouchDB mode: use _changes feed to catch up from persisted sequence
+    const changeCallback = (path: string, content: string | null, mtime?: number) => {
+        if (content) {
+            searchIndex.update(path, content, mtime);
+        } else {
+            searchIndex.remove(path);
         }
-        console.log(`Search index synced in ${((performance.now() - start) / 1000).toFixed(1)}s: ${toRead.length} updated, ${stale.length} removed, ${notesWithMtime.length - toRead.length - stale.length} unchanged.`);
+    };
+
+    let since = searchIndex.since || "0";
+    if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
+    let changes = 0;
+    try {
+        const countingCallback = (path: string, content: string | null, mtime?: number) => {
+            changes++;
+            if (debugLogging) console.log(`[debug] Change: ${path} ${content ? "(update)" : "(delete)"}`);
+            changeCallback(path, content, mtime);
+        };
+        const newSince = await vault.catchUp(since, countingCallback);
+        searchIndex.since = newSince;
+    } catch (err) {
+        // Invalid since (DB nuked/recreated) — clear index and rebuild from scratch
+        console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
+        searchIndex.clear();
+        changes = 0;
+        const newSince = await vault.catchUp("0", (path, content, mtime) => {
+            changes++;
+            changeCallback(path, content, mtime);
+        });
+        searchIndex.since = newSince;
+    }
+    if (changes > 0) {
+        console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
     } else {
         console.log(`Search index up to date (${searchIndex.size} notes).`);
     }
-} else if (notesWithMtime.length > 0) {
-    // Full rebuild: no persisted index or FlexSearch data missing
-    console.log(`Building search index (${notesWithMtime.length} notes)...`);
-    for (let i = 0; i < notesWithMtime.length; i++) {
-        const { path, mtime } = notesWithMtime[i];
-        const content = await vault.readNote(path);
-        if (content) searchIndex.update(path, content, mtime);
-        if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
-            console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
+} else if (VAULT_PATH) {
+    // Local mode: diff mtimes against filesystem
+    const notesWithMtime = await vault.listNotesWithMtime();
+    if (debugLogging) console.log(`[debug] Vault has ${notesWithMtime.length} notes`);
+
+    if (hadPersistedIndex && !searchIndex.needsRebuild && notesWithMtime.length > 0) {
+        const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
+        const stale = searchIndex.listPaths().filter((p) => !vaultPaths.has(p));
+        for (const p of stale) {
+            if (debugLogging) console.log(`[debug] Removing stale: ${p}`);
+            searchIndex.remove(p);
         }
+        const toRead = notesWithMtime.filter((n) => n.mtime > searchIndex.getMtime(n.path));
+        if (toRead.length > 0 || stale.length > 0) {
+            for (const { path, mtime } of toRead) {
+                if (debugLogging) console.log(`[debug] Reading changed: ${path}`);
+                const content = await vault.readNote(path);
+                if (content) searchIndex.update(path, content, mtime);
+            }
+            console.log(`Search index synced in ${((performance.now() - start) / 1000).toFixed(1)}s: ${toRead.length} updated, ${stale.length} removed, ${notesWithMtime.length - toRead.length - stale.length} unchanged.`);
+        } else {
+            console.log(`Search index up to date (${searchIndex.size} notes).`);
+        }
+    } else if (notesWithMtime.length > 0) {
+        if (debugLogging) console.log(`[debug] Full rebuild (persisted: ${hadPersistedIndex}, flexsearch ready: ${!searchIndex.needsRebuild})`);
+        console.log(`Building search index (${notesWithMtime.length} notes)...`);
+        for (let i = 0; i < notesWithMtime.length; i++) {
+            const { path, mtime } = notesWithMtime[i];
+            const content = await vault.readNote(path);
+            if (content) searchIndex.update(path, content, mtime);
+            if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
+                console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
+            }
+        }
+        console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
     }
-    console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
 }
 
 // --- Watch for external changes ---
@@ -126,12 +182,15 @@ if (VAULT_PATH) {
     console.log("Watching vault for external changes.");
 } else if (COUCHDB_URL && vault.watchChanges) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates
-    vault.watchChanges((path: string, content: string | null, mtime?: number) => {
+    vault.watchChanges((path: string, content: string | null, mtime?: number, seq?: string | number) => {
         if (content) {
+            if (debugLogging) console.log(`[debug] CouchDB change: ${path} (mtime: ${mtime})`);
             searchIndex.update(path, content, mtime);
         } else {
+            if (debugLogging) console.log(`[debug] CouchDB delete: ${path}`);
             searchIndex.remove(path);
         }
+        if (seq) searchIndex.since = String(seq);
     });
     console.log("Watching CouchDB for LiveSync changes.");
 }
@@ -177,6 +236,22 @@ if (AUTH_TOKEN) {
     const tokenPath = join(dataDir, "auth-tokens.json");
     auth = mountPasswordAuth(server.getApp(), BASE_URL, AUTH_TOKEN, tokenPath);
     await auth.loadTokens();
+}
+
+// --- Debug endpoint (LOG_LEVEL=debug only) ---
+if (debugLogging) {
+    const app = server.getApp();
+    app.get("/debug/index", (c) => {
+        const notes = searchIndex.listWithMtime();
+        const tags = searchIndex.listAllTags();
+        return c.json({
+            notes: notes.length,
+            paths: notes.map((n) => ({ path: n.path, mtime: new Date(n.mtime).toISOString() })),
+            tags,
+            flexSearchReady: !searchIndex.needsRebuild,
+        });
+    });
+    console.log("[debug] Debug endpoint available at /debug/index");
 }
 
 // --- Tools ---

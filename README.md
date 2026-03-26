@@ -55,11 +55,15 @@ docker run -p 8787:8787 \
   -e COUCHDB_URL=https://your-couchdb:5984 \
   -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=yourpassword \
   -e COUCHDB_DATABASE=obsidian -e VAULT_NAME=MyVault \
+  -e COUCHDB_PASSPHRASE=your-encryption-passphrase \
   -e MCP_AUTH_TOKEN=yourpassword \
+  -e BASE_URL=https://your-server-url \
   ghcr.io/es617/obsidian-sync-mcp:latest
 ```
 
-Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io) or `http://your-server:8787/mcp` (Docker).
+Set `COUCHDB_PASSPHRASE` if you use E2E encryption in LiveSync. Set `BASE_URL` to your public URL (required for OAuth callbacks when agents connect over HTTPS).
+
+Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io) or `https://your-server:8787/mcp` (Docker behind HTTPS).
 
 See [Cost](#cost-flyio) for Fly.io pricing.
 
@@ -158,9 +162,12 @@ COUCHDB_URL=http://localhost:5984 \
 COUCHDB_USER=admin \
 COUCHDB_PASSWORD=yourpassword \
 COUCHDB_DATABASE=obsidian \
+COUCHDB_PASSPHRASE=your-encryption-passphrase \
 VAULT_NAME=MyVault \
 npx obsidian-sync-mcp
 ```
+
+Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync.
 
 **Or with Docker:**
 
