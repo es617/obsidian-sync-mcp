@@ -100,6 +100,40 @@ export function registerTools(
     });
 
     server.addTool({
+        name: "list_folders",
+        description:
+            "List all folders in the vault. Use this to discover folder names before writing or listing notes. Returns the folder tree with note counts.",
+        parameters: z.object({}),
+        execute: async () => {
+            let paths = searchIndex.listPaths();
+            if (paths.length === 0) {
+                paths = await vault.listNotes();
+            }
+            const folders = new Map<string, number>();
+            for (const p of paths) {
+                const lastSlash = p.lastIndexOf("/");
+                if (lastSlash === -1) {
+                    folders.set("(root)", (folders.get("(root)") ?? 0) + 1);
+                } else {
+                    const folder = p.slice(0, lastSlash);
+                    folders.set(folder, (folders.get(folder) ?? 0) + 1);
+                    // Ensure all parent folders appear in the list
+                    let parent = folder;
+                    while (parent.includes("/")) {
+                        parent = parent.slice(0, parent.lastIndexOf("/"));
+                        if (!folders.has(parent)) folders.set(parent, 0);
+                    }
+                }
+            }
+            if (folders.size === 0) {
+                return "Vault is empty.";
+            }
+            const sorted = [...folders.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+            return sorted.map(([f, count]) => `- ${f} (${count} notes)`).join("\n");
+        },
+    });
+
+    server.addTool({
         name: "search_vault",
         description: "Full-text search across all notes (matches words, not substrings). Returns matching paths. Use modified_after to search only recent notes. Set include_snippets=true to include surrounding content for each match.",
         parameters: z.object({
