@@ -64,7 +64,7 @@ console.log("Vault ready.");
 
 // --- Per-vault data directory ---
 const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
-const vaultId = createHash("sha256").update(VAULT_PATH ?? COUCHDB_URL ?? "default").digest("hex").slice(0, 12);
+const vaultId = createHash("sha256").update(VAULT_NAME).digest("hex").slice(0, 12);
 const dataDir = join(baseDataDir, vaultId);
 
 // --- Search index ---
