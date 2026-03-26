@@ -14,7 +14,7 @@ const debugLogging = process.env.LOG_LEVEL === "debug";
 setGlobalLogFunction((message, level = LEVEL_INFO) => {
     if (level < LEVEL_INFO) return;
     if (!debugLogging && typeof message === "string") {
-        if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
+        if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge|No replicator|\[ReplicatorService\]):/.test(message)) return;
     }
     console.log(message);
 });
