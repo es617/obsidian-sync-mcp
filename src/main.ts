@@ -163,7 +163,12 @@ if (AUTH_TOKEN) {
     };
     console.log("Auth enabled (password-gated OAuth).");
 } else {
-    console.log("Auth disabled (set MCP_AUTH_TOKEN to enable).");
+    const host = process.env.HOST ?? "0.0.0.0";
+    if (host === "0.0.0.0") {
+        console.warn("WARNING: No authentication and listening on all interfaces. Set MCP_AUTH_TOKEN or HOST=127.0.0.1.");
+    } else {
+        console.log("Auth disabled (set MCP_AUTH_TOKEN to enable).");
+    }
 }
 
 const server = new FastMCP(serverOptions);

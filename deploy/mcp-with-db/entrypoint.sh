@@ -44,6 +44,11 @@ LIVESYNC_USER=${LIVESYNC_USER:-}
 LIVESYNC_PASS=${LIVESYNC_PASSWORD:-}
 
 if [ -n "$LIVESYNC_USER" ] && [ -n "$LIVESYNC_PASS" ]; then
+    # Reject control characters in credentials (prevents JSON injection)
+    if printf '%s%s' "$LIVESYNC_USER" "$LIVESYNC_PASS" | grep -qP '[\x00-\x1f]'; then
+        echo "ERROR: LIVESYNC_USER/PASSWORD contains control characters"
+        exit 1
+    fi
     echo "Setting up LiveSync user: $LIVESYNC_USER"
     curl -s -o /dev/null -u "$ADMIN_USER:$ADMIN_PASS" -X PUT "http://localhost:5984/_users" 2>/dev/null || true
 

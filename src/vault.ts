@@ -67,7 +67,7 @@ export class Vault implements VaultBackend {
     }
 
     private validatePath(path: string): void {
-        if (!path || path.includes("\0") || path.includes("..") || path.length > 1000) {
+        if (!path || path.startsWith("/") || path.includes("\0") || path.includes("..") || path.length > 1000) {
             throw new Error("Invalid path");
         }
     }
@@ -134,6 +134,7 @@ export class Vault implements VaultBackend {
     }
 
     async listNotesWithMtime(folder?: string): Promise<NoteListing[]> {
+        if (folder && !folder.endsWith("/")) folder += "/";
         const results: NoteListing[] = [];
         for await (const doc of this.manipulator.enumerateAllNormalDocs({ metaOnly: true })) {
             const entry = doc as MetaEntry;

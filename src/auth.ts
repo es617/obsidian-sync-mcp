@@ -123,7 +123,12 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         if (redirectUris.length === 0) {
             return c.json({ error: "invalid_client_metadata", error_description: "redirect_uris required" }, 400);
         }
-        if (redirectUris.some((u: any) => typeof u !== "string" || u.length > 2048)) {
+        const safeUri = (u: any) => {
+            if (typeof u !== "string" || u.length > 2048) return false;
+            const lower = u.toLowerCase();
+            return !lower.startsWith("javascript:") && !lower.startsWith("data:") && !lower.startsWith("file:");
+        };
+        if (redirectUris.some((u: any) => !safeUri(u))) {
             return c.json({ error: "invalid_client_metadata", error_description: "invalid redirect_uri" }, 400);
         }
 
@@ -217,7 +222,9 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         if (Date.now() < lockedUntil) {
             const waitSec = Math.ceil((lockedUntil - Date.now()) / 1000);
             console.warn(`Auth: locked out, ${waitSec}s remaining`);
-            return c.html(renderPasswordPage(code, expectedCsrf, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
+            const newCsrf = randomBytes(32).toString("hex");
+            csrfTokens.set(code, newCsrf);
+            return c.html(renderPasswordPage(code, newCsrf, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
         }
 
         const a = Buffer.from(submittedPassword);
@@ -226,15 +233,19 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             failedAttempts++;
             console.warn(`Auth: failed attempt ${failedAttempts} total`);
 
+            // Rotate CSRF token on each failed attempt
+            const newCsrf = randomBytes(32).toString("hex");
+            csrfTokens.set(code, newCsrf);
+
             if (failedAttempts >= MAX_FAILED_BEFORE_LOCKOUT) {
                 lockoutCount++;
                 const lockoutMs = BASE_LOCKOUT_MS * Math.pow(2, lockoutCount - 1);
                 lockedUntil = Date.now() + lockoutMs;
                 console.warn(`Auth: lockout #${lockoutCount}, ${lockoutMs / 1000}s`);
-                return c.html(renderPasswordPage(code, expectedCsrf, `Too many attempts. Try again in ${Math.ceil(lockoutMs / 1000)} seconds.`), 429);
+                return c.html(renderPasswordPage(code, newCsrf, `Too many attempts. Try again in ${Math.ceil(lockoutMs / 1000)} seconds.`), 429);
             }
 
-            return c.html(renderPasswordPage(code, expectedCsrf, "Wrong password."), 401);
+            return c.html(renderPasswordPage(code, newCsrf, "Wrong password."), 401);
         }
 
         // Password correct — reset everything
@@ -394,14 +405,15 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
                 const now = Date.now();
                 for (const [k, v] of Object.entries(data.tokens ?? {})) {
                     const record = v as TokenRecord;
-                    if (record.expiresAt > now) tokens.set(k, record);
+                    if (record.accessToken && record.refreshToken && record.expiresAt > now) tokens.set(k, record);
                 }
                 for (const [k, v] of Object.entries(data.refreshTokens ?? {})) {
                     const record = v as TokenRecord;
-                    if (record.refreshExpiresAt > now) refreshTokens.set(k, record);
+                    if (record.accessToken && record.refreshToken && record.refreshExpiresAt > now) refreshTokens.set(k, record);
                 }
                 for (const [k, v] of Object.entries(data.clients ?? {})) {
-                    clients.set(k, v as RegisteredClient);
+                    const client = v as RegisteredClient;
+                    if (client.clientId && client.redirectUris) clients.set(k, client);
                 }
                 console.log(`Auth tokens loaded from disk (${tokens.size} sessions).`);
                 return tokens.size > 0;

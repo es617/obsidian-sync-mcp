@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.0
+
+### Features
+- New `edit_note` tool — append, prepend (after frontmatter), or replace exact text without rewriting the whole note
+- New `list_folders` tool — lists all folders with note counts so the agent can discover folder names
+- New `list_tags` tool — lists all tags with counts, sorted by frequency
+- `list_notes` and `search_vault` now support `tag` filter parameter
+- `get_note_metadata` now returns backlinks (notes that link to this one) for knowledge graph navigation
+- `list_notes` now includes modification timestamps, `sort_by`, `modified_after`, and `limit` parameters
+- `search_vault` now supports `modified_after` filter and optional `include_snippets`
+- Agent can answer "read my latest note", "notes I changed today", "search only recent notes"
+
+### Security
+- Search index no longer stores note content on disk — only paths + mtimes persisted
+- Persisted search metadata encrypted at rest when `COUCHDB_PASSPHRASE` is set (AES-256-CBC)
+- Content snippets fetched on demand from vault, not cached
+- E2E encryption no longer undermined by plaintext index on disk
+- CouchDB vault rejects `..` and absolute paths (path traversal hardening)
+- Block `javascript:`, `data:`, `file:` redirect URI schemes in OAuth registration
+- Verify `client_id` at token exchange (defense-in-depth on top of PKCE)
+- HTML-escape `code` and `csrf` values in OAuth form
+- CSRF token rotated on each failed password attempt
+- Validate `COUCHDB_DATABASE` name and LiveSync credentials in deploy entrypoint
+- Validate auth token structure when loading from disk
+- File watcher reads through vault.readNote() (symlink protection)
+- Warn when server has no authentication and listens on all interfaces
+- `MCP_REFRESH_DAYS` falls back to default (14) when set to a non-numeric value
+
+### Changes
+- `search_vault` returns paths by default (not snippets) — set `include_snippets=true` for content
+- Full search index (FlexSearch + metadata) persisted to disk and restored on cold start
+- Cold start diffs mtimes and only reads changed notes from vault instead of full rebuild
+- Survives Fly.io suspend/resume (in-memory) and cold restarts (disk)
+- Backlinks are case-insensitive (matches Obsidian behavior)
+- `.obsidian/` folder excluded from indexing and file watcher
+- File watcher debounced (100ms per path) to coalesce rapid Obsidian saves
+- `list_notes` default limit lowered from 500 to 100
+- Improved tool descriptions with concrete examples for agents
+
+### Fixes
+- `list_notes` and `search_vault` folder filter matches correctly without trailing slash
+- CouchDB vault folder filter normalized to match local vault behavior
+- `modified_after` returns clear error on invalid date format instead of empty results
+
 ## 0.3.0
 
 - Restructured deploy into `deploy/mcp-only` and `deploy/mcp-with-db`

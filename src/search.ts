@@ -98,7 +98,7 @@ export class SearchIndex {
         this.saving = true;
         try {
             await mkdir(dirname(this.persistPath), { recursive: true });
-            // Export FlexSearch tokenized index
+            // Export FlexSearch tokenized index (sync callback — verified by persistence round-trip test)
             const flexChunks: Array<{ key: string; value: string }> = [];
             this.index.export((key: string, value: string) => {
                 if (value !== undefined) flexChunks.push({ key, value });

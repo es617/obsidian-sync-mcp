@@ -83,6 +83,7 @@ export function registerTools(
             }
             if (modified_after) {
                 const cutoff = new Date(modified_after).getTime();
+                if (isNaN(cutoff)) return `Invalid date format: ${modified_after}. Use ISO format like '2026-03-25'.`;
                 notes = notes.filter((n) => n.mtime >= cutoff);
             }
             if (notes.length === 0) {
@@ -179,6 +180,7 @@ export function registerTools(
             }
             if (modified_after) {
                 const cutoff = new Date(modified_after).getTime();
+                if (isNaN(cutoff)) return `Invalid date format: ${modified_after}. Use ISO format like '2026-03-25'.`;
                 paths = paths.filter((p) => searchIndex.getMtime(p) >= cutoff);
             }
             if (paths.length === 0) {
