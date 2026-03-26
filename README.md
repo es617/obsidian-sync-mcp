@@ -190,7 +190,8 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | Tool | Description |
 |---|---|
 | `read_note` | Read a note's markdown content by path |
-| `write_note` | Create or overwrite a note (preserves creation time on updates) |
+| `write_note` | Create or overwrite a note (replaces entire content) |
+| `edit_note` | Edit a note without rewriting it — append, prepend (after frontmatter), or replace exact text |
 | `list_notes` | List notes with timestamps. Filter by folder or date, sort by name or modified, limit results. |
 | `search_vault` | Full-text search across all notes. Filter by date, optionally include content snippets. |
 | `delete_note` | Delete a note |
@@ -199,7 +200,7 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 
 Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) (`obsidian://open?vault=...&file=...`) that works on Mac and iOS.
 
-> "List all my notes in the projects/ folder, then read the one about the MCP server."
+> "Add a bullet point to my daily note." "Find my notes about the MCP server and fix the typo in the second one."
 
 ---
 

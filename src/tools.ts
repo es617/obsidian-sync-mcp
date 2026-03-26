@@ -31,7 +31,7 @@ export function registerTools(
     server.addTool({
         name: "write_note",
         description:
-            "Write or update a note in the Obsidian vault. Creates the note if it doesn't exist, overwrites if it does.",
+            "Write or update a note in the Obsidian vault. Creates the note if it doesn't exist. Replaces the entire content if it does — read first if you need to preserve existing content.",
         parameters: z.object({
             path: z.string().describe("Vault-relative path to the note, e.g. 'daily/2026-03-23.md'"),
             content: z.string().describe("Full markdown content for the note"),
@@ -49,12 +49,12 @@ export function registerTools(
 
     server.addTool({
         name: "list_notes",
-        description: "List markdown notes in the vault with modification timestamps. Use sort_by='modified' to find recently changed notes. Use modified_after to filter by date.",
+        description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(modified_after='2026-03-25', sort_by='modified') for today's changes. list_notes(folder='daily') for a specific folder. Returns up to 100 notes by default.",
         parameters: z.object({
             folder: z
                 .string()
                 .optional()
-                .describe("Folder to filter by, e.g. 'daily/' or 'projects/'. Omit for all notes."),
+                .describe("Folder to filter by, e.g. 'daily' or 'projects'. Omit for all notes."),
             sort_by: z
                 .enum(["name", "modified"])
                 .optional()
@@ -66,7 +66,7 @@ export function registerTools(
             limit: z
                 .number()
                 .optional()
-                .describe("Max number of notes to return. Default 500."),
+                .describe("Max number of notes to return. Default 100."),
         }),
         execute: async ({ folder, sort_by, modified_after, limit }) => {
             // Use search index (works with encrypted vaults), fall back to vault
@@ -84,7 +84,7 @@ export function registerTools(
             if (sort_by === "modified") {
                 notes.sort((a, b) => b.mtime - a.mtime);
             }
-            const cap = limit ?? 500;
+            const cap = limit ?? 100;
             const total = notes.length;
             const capped = notes.slice(0, cap);
             const lines = capped.map((n) => {
@@ -101,7 +101,7 @@ export function registerTools(
 
     server.addTool({
         name: "search_vault",
-        description: "Search for a text query across all notes in the vault. Returns matching paths. Use modified_after to filter by date. Set include_snippets=true for content snippets.",
+        description: "Full-text search across all notes (matches words, not substrings). Returns matching paths. Use modified_after to search only recent notes. Set include_snippets=true to include surrounding content for each match.",
         parameters: z.object({
             query: z.string().describe("Text to search for (case-insensitive)"),
             modified_after: z
@@ -134,6 +134,67 @@ export function registerTools(
                 }
             }
             return lines.join(include_snippets ? "\n\n" : "\n");
+        },
+    });
+
+    server.addTool({
+        name: "edit_note",
+        description:
+            "Edit a note without rewriting it. Use 'append' (default) to add content to the end, 'prepend' to add after frontmatter, or 'replace' to swap old_text with new content. For replace, the old_text must match exactly once.",
+        parameters: z.object({
+            path: z.string().describe("Vault-relative path to the note, e.g. 'daily/2026-03-25.md'"),
+            content: z.string().describe("Text to append, prepend, or use as replacement for old_text"),
+            operation: z
+                .enum(["append", "prepend", "replace"])
+                .optional()
+                .describe("'append' (default): add to end. 'prepend': add after frontmatter. 'replace': swap old_text with content."),
+            old_text: z
+                .string()
+                .optional()
+                .describe("Required for replace operation. Exact text to find and replace. Must match exactly once."),
+        }),
+        execute: async ({ path, content: newContent, operation, old_text }) => {
+            const existing = await vault.readNote(path);
+            if (existing === null) {
+                return `Note not found: ${path}`;
+            }
+
+            let updated: string;
+            const op = operation ?? "append";
+
+            if (op === "replace") {
+                if (!old_text) {
+                    return "old_text is required for replace operation.";
+                }
+                const idx = existing.indexOf(old_text);
+                if (idx === -1) {
+                    return "old_text not found in note.";
+                }
+                if (existing.indexOf(old_text, idx + 1) !== -1) {
+                    return "old_text matches multiple times. Provide a longer, unique string.";
+                }
+                updated = existing.slice(0, idx) + newContent + existing.slice(idx + old_text.length);
+            } else if (op === "prepend") {
+                // Insert after frontmatter if present
+                const fmMatch = existing.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+                if (fmMatch) {
+                    const afterFm = fmMatch[0].length;
+                    updated = existing.slice(0, afterFm) + newContent + "\n" + existing.slice(afterFm);
+                } else {
+                    updated = newContent + "\n" + existing;
+                }
+            } else {
+                // append
+                updated = existing.endsWith("\n") ? existing + newContent : existing + "\n" + newContent;
+            }
+
+            const ok = await vault.writeNote(path, updated);
+            if (!ok) {
+                return `Failed to edit note: ${path}`;
+            }
+            searchIndex.update(path, updated, Date.now());
+            const deepLink = makeDeepLink(vaultName, path);
+            return `Note edited (${op}): ${path}\n[Open in Obsidian](${deepLink})`;
         },
     });
 
