@@ -16,6 +16,7 @@ export interface VaultConfig {
     couchdbPassword: string;
     database: string;
     passphrase?: string;
+    obfuscatePaths?: boolean;
 }
 
 export class Vault implements VaultBackend {
@@ -28,7 +29,7 @@ export class Vault implements VaultBackend {
             password: config.couchdbPassword,
             database: config.database,
             passphrase: config.passphrase,
-            obfuscatePassphrase: config.passphrase,
+            obfuscatePassphrase: config.obfuscatePaths ? config.passphrase : undefined,
             useEden: false,
             enableCompression: false,
             handleFilenameCaseSensitive: false,

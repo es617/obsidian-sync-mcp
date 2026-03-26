@@ -64,6 +64,11 @@ if [ "$DEPLOY_TYPE" = "2" ]; then
     printf "LiveSync passphrase (leave blank if none): "
     read -rs PASSPHRASE
     echo
+    if [ -n "$PASSPHRASE" ]; then
+        printf "Is 'Obfuscate Properties' enabled in LiveSync? (y/N): "
+        read -r OBFUSCATE_PROPERTIES
+        OBFUSCATE_PROPERTIES=$(echo "$OBFUSCATE_PROPERTIES" | tr '[:upper:]' '[:lower:]')
+    fi
 else
     # Full deploy: generate credentials
     COUCHDB_PASSWORD=$(openssl rand -hex 16)
@@ -76,6 +81,11 @@ else
     printf "LiveSync passphrase (leave blank if none): "
     read -rs PASSPHRASE
     echo
+    if [ -n "$PASSPHRASE" ]; then
+        printf "Is 'Obfuscate Properties' enabled in LiveSync? (y/N): "
+        read -r OBFUSCATE_PROPERTIES
+        OBFUSCATE_PROPERTIES=$(echo "$OBFUSCATE_PROPERTIES" | tr '[:upper:]' '[:lower:]')
+    fi
 fi
 
 echo ""
@@ -104,7 +114,8 @@ fly secrets set \
     ${COUCHDB_URL:+"COUCHDB_URL=$COUCHDB_URL"} \
     ${LIVESYNC_PASSWORD:+"LIVESYNC_USER=livesync"} \
     ${LIVESYNC_PASSWORD:+"LIVESYNC_PASSWORD=$LIVESYNC_PASSWORD"} \
-    ${PASSPHRASE:+"COUCHDB_PASSPHRASE=$PASSPHRASE"}
+    ${PASSPHRASE:+"COUCHDB_PASSPHRASE=$PASSPHRASE"} \
+    $([ "$OBFUSCATE_PROPERTIES" = "y" ] && echo "COUCHDB_OBFUSCATE_PROPERTIES=true")
 
 # Create volume for persistent data
 REGION=$(grep "primary_region" fly.toml | sed "s/.*= *['\"]*//" | sed "s/['\"].*//")

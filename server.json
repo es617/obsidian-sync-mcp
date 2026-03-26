@@ -60,6 +60,13 @@
           "name": "COUCHDB_PASSPHRASE"
         },
         {
+          "description": "Set to 'true' if 'Obfuscate Properties' is enabled in LiveSync (obfuscates file paths, sizes, dates)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "COUCHDB_OBFUSCATE_PROPERTIES"
+        },
+        {
           "description": "Vault name for deep links and index storage",
           "isRequired": false,
           "format": "string",

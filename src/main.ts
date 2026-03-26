@@ -14,7 +14,8 @@ const debugLogging = process.env.LOG_LEVEL === "debug";
 setGlobalLogFunction((message, level = LEVEL_INFO) => {
     if (level < LEVEL_INFO) return;
     if (!debugLogging && typeof message === "string") {
-        if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge|No replicator|\[ReplicatorService\]):/.test(message)) return;
+        if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
+        if (message.includes("replicator") || message.includes("Replicator") || message.includes("ReplicatorService")) return;
     }
     console.log(message);
 });
@@ -26,6 +27,7 @@ const COUCHDB_USER = process.env.COUCHDB_USER ?? "admin";
 const COUCHDB_PASSWORD = process.env.COUCHDB_PASSWORD;
 const COUCHDB_DATABASE = process.env.COUCHDB_DATABASE ?? "obsidian";
 const COUCHDB_PASSPHRASE = process.env.COUCHDB_PASSPHRASE || undefined;
+const COUCHDB_OBFUSCATE_PROPERTIES = process.env.COUCHDB_OBFUSCATE_PROPERTIES === "true";
 const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
 const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
@@ -52,6 +54,7 @@ if (VAULT_PATH) {
         couchdbPassword: COUCHDB_PASSWORD,
         database: COUCHDB_DATABASE,
         passphrase: COUCHDB_PASSPHRASE,
+        obfuscatePaths: COUCHDB_OBFUSCATE_PROPERTIES,
     });
     console.log(`Remote mode: ${COUCHDB_URL}`);
 } else {
