@@ -38,7 +38,7 @@ Both modes expose the same MCP tools over HTTP, so any MCP-compatible agent can 
 
 You already have LiveSync and CouchDB on an always-on server. You just need the MCP server deployed alongside it.
 
-**Using Fly.io setup script:**
+**Using Fly.io setup script** (macOS/Linux, or WSL on Windows):
 
 ```bash
 git clone https://github.com/es617/obsidian-sync-mcp.git
@@ -77,7 +77,7 @@ fly auth login
 
 Starting fresh — no LiveSync yet. Deploy CouchDB and MCP together, then set up LiveSync in Obsidian.
 
-**Using Fly.io setup script:**
+**Using Fly.io setup script** (macOS/Linux, or WSL on Windows):
 
 ```bash
 git clone https://github.com/es617/obsidian-sync-mcp.git
@@ -281,6 +281,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 - **Text only.** Binary attachments are not exposed through MCP tools.
 - **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
 - **Node 22+ required.**
+- **Setup script requires bash.** The `deploy/setup.sh` script works on macOS and Linux. On Windows, use WSL or Git Bash.
 
 ---
 
