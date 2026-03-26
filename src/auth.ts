@@ -56,6 +56,7 @@ export interface AuthHandle {
     validateToken: (auth: string | undefined) => boolean;
     saveTokens: () => Promise<void>;
     loadTokens: () => Promise<boolean>;
+    cleanup: () => void;
 }
 
 export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, persistPath?: string): AuthHandle {
@@ -238,7 +239,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             csrfTokens.set(code, newCsrf);
 
             if (failedAttempts >= MAX_FAILED_BEFORE_LOCKOUT) {
-                lockoutCount++;
+                lockoutCount = Math.min(lockoutCount + 1, 10);
                 const lockoutMs = BASE_LOCKOUT_MS * Math.pow(2, lockoutCount - 1);
                 lockedUntil = Date.now() + lockoutMs;
                 console.warn(`Auth: lockout #${lockoutCount}, ${lockoutMs / 1000}s`);
@@ -394,6 +395,19 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
                 console.log(`Auth tokens saved to disk (${tokens.size} sessions).`);
             } catch (err) {
                 console.error("Failed to save auth tokens:", err);
+            }
+        },
+
+        cleanup(): void {
+            const now = Date.now();
+            for (const [k, r] of tokens) { if (r.expiresAt <= now) tokens.delete(k); }
+            for (const [k, r] of refreshTokens) { if (r.refreshExpiresAt <= now) refreshTokens.delete(k); }
+            // Evict clients with no active tokens or refresh tokens
+            const activeClientIds = new Set<string>();
+            for (const r of tokens.values()) activeClientIds.add(r.clientId);
+            for (const r of refreshTokens.values()) activeClientIds.add(r.clientId);
+            for (const [k, c] of clients) {
+                if (!activeClientIds.has(c.clientId)) clients.delete(k);
             }
         },
 

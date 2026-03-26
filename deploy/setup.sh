@@ -53,7 +53,8 @@ if [ "$DEPLOY_TYPE" = "2" ]; then
     read -r COUCHDB_USER
     COUCHDB_USER="${COUCHDB_USER:-admin}"
     printf "CouchDB password: "
-    read -r COUCHDB_PASSWORD
+    read -rs COUCHDB_PASSWORD
+    echo
     printf "CouchDB database [obsidian]: "
     read -r COUCHDB_DATABASE
     COUCHDB_DATABASE="${COUCHDB_DATABASE:-obsidian}"
@@ -61,7 +62,8 @@ if [ "$DEPLOY_TYPE" = "2" ]; then
     echo ""
     echo "If you use E2E encryption in LiveSync, enter your passphrase."
     printf "LiveSync passphrase (leave blank if none): "
-    read -r PASSPHRASE
+    read -rs PASSPHRASE
+    echo
 else
     # Full deploy: generate credentials
     COUCHDB_PASSWORD=$(openssl rand -hex 16)
@@ -72,7 +74,8 @@ else
     echo ""
     echo "If you use E2E encryption in LiveSync, enter your passphrase."
     printf "LiveSync passphrase (leave blank if none): "
-    read -r PASSPHRASE
+    read -rs PASSPHRASE
+    echo
 fi
 
 echo ""
@@ -90,24 +93,18 @@ APP_NAME=$(grep "^app " fly.toml | sed "s/app = ['\"]*//" | sed "s/['\"]//g" | t
 fly ips allocate-v4 --shared 2>/dev/null || true
 fly ips allocate-v6 2>/dev/null || true
 
-# Set secrets
-if [ "$DEPLOY_TYPE" = "2" ]; then
-    SECRETS="COUCHDB_URL=$COUCHDB_URL COUCHDB_USER=$COUCHDB_USER COUCHDB_PASSWORD=$COUCHDB_PASSWORD COUCHDB_DATABASE=$COUCHDB_DATABASE"
-    SECRETS="$SECRETS MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN VAULT_NAME=$VAULT_NAME"
-    SECRETS="$SECRETS BASE_URL=https://${APP_NAME}.fly.dev"
-    if [ -n "$PASSPHRASE" ]; then
-        SECRETS="$SECRETS COUCHDB_PASSPHRASE=$PASSPHRASE"
-    fi
-else
-    SECRETS="COUCHDB_USER=$COUCHDB_USER COUCHDB_PASSWORD=$COUCHDB_PASSWORD COUCHDB_DATABASE=$COUCHDB_DATABASE"
-    SECRETS="$SECRETS LIVESYNC_USER=livesync LIVESYNC_PASSWORD=$LIVESYNC_PASSWORD"
-    SECRETS="$SECRETS MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN VAULT_NAME=$VAULT_NAME"
-    SECRETS="$SECRETS BASE_URL=https://${APP_NAME}.fly.dev"
-    if [ -n "$PASSPHRASE" ]; then
-        SECRETS="$SECRETS COUCHDB_PASSPHRASE=$PASSPHRASE"
-    fi
-fi
-fly secrets set $SECRETS
+# Set secrets (each value quoted to handle spaces in passphrases/vault names)
+fly secrets set \
+    "COUCHDB_USER=$COUCHDB_USER" \
+    "COUCHDB_PASSWORD=$COUCHDB_PASSWORD" \
+    "COUCHDB_DATABASE=$COUCHDB_DATABASE" \
+    "MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN" \
+    "VAULT_NAME=$VAULT_NAME" \
+    "BASE_URL=https://${APP_NAME}.fly.dev" \
+    ${COUCHDB_URL:+"COUCHDB_URL=$COUCHDB_URL"} \
+    ${LIVESYNC_PASSWORD:+"LIVESYNC_USER=livesync"} \
+    ${LIVESYNC_PASSWORD:+"LIVESYNC_PASSWORD=$LIVESYNC_PASSWORD"} \
+    ${PASSPHRASE:+"COUCHDB_PASSPHRASE=$PASSPHRASE"}
 
 # Create volume for persistent data
 REGION=$(grep "primary_region" fly.toml | sed "s/.*= *['\"]*//" | sed "s/['\"].*//")

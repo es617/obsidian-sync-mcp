@@ -19,16 +19,18 @@ const MAX_RESULTS = 50;
 function encrypt(text: string, passphrase: string): string {
     const salt = randomBytes(16);
     const key = scryptSync(passphrase, salt, 32);
-    const iv = randomBytes(16);
-    const cipher = createCipheriv("aes-256-cbc", key, iv);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
     const encrypted = Buffer.concat([cipher.update(text, "utf-8"), cipher.final()]);
-    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + encrypted.toString("hex");
+    const tag = (cipher as any).getAuthTag() as Buffer;
+    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + tag.toString("hex") + ":" + encrypted.toString("hex");
 }
 
 function decrypt(data: string, passphrase: string): string {
-    const [saltHex, ivHex, encryptedHex] = data.split(":");
+    const [saltHex, ivHex, tagHex, encryptedHex] = data.split(":");
     const key = scryptSync(passphrase, Buffer.from(saltHex, "hex"), 32);
-    const decipher = createDecipheriv("aes-256-cbc", key, Buffer.from(ivHex, "hex"));
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
+    (decipher as any).setAuthTag(Buffer.from(tagHex, "hex"));
     return Buffer.concat([decipher.update(Buffer.from(encryptedHex, "hex")), decipher.final()]).toString("utf-8");
 }
 

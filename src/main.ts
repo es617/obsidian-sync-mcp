@@ -23,7 +23,7 @@ setGlobalLogFunction((message, level = LEVEL_INFO) => {
 const VAULT_PATH = process.env.VAULT_PATH; // Local mode: path to vault directory
 const COUCHDB_URL = process.env.COUCHDB_URL;
 const COUCHDB_USER = process.env.COUCHDB_USER ?? "admin";
-const COUCHDB_PASSWORD = process.env.COUCHDB_PASSWORD ?? "password";
+const COUCHDB_PASSWORD = process.env.COUCHDB_PASSWORD;
 const COUCHDB_DATABASE = process.env.COUCHDB_DATABASE ?? "obsidian";
 const COUCHDB_PASSPHRASE = process.env.COUCHDB_PASSPHRASE || undefined;
 const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
@@ -41,6 +41,10 @@ if (VAULT_PATH) {
     vault = new LocalVault(VAULT_PATH);
     console.log(`Local mode: ${VAULT_PATH}`);
 } else if (COUCHDB_URL) {
+    if (!COUCHDB_PASSWORD) {
+        console.error("COUCHDB_PASSWORD is required in remote mode.");
+        process.exit(1);
+    }
     const { Vault } = await import("./vault.js");
     vault = new Vault({
         couchdbUrl: COUCHDB_URL,
@@ -238,22 +242,6 @@ if (AUTH_TOKEN) {
     await auth.loadTokens();
 }
 
-// --- Debug endpoint (LOG_LEVEL=debug only) ---
-if (debugLogging) {
-    const app = server.getApp();
-    app.get("/debug/index", (c) => {
-        const notes = searchIndex.listWithMtime();
-        const tags = searchIndex.listAllTags();
-        return c.json({
-            notes: notes.length,
-            paths: notes.map((n) => ({ path: n.path, mtime: new Date(n.mtime).toISOString() })),
-            tags,
-            flexSearchReady: !searchIndex.needsRebuild,
-        });
-    });
-    console.log("[debug] Debug endpoint available at /debug/index");
-}
-
 // --- Tools ---
 registerTools(server, vault, searchIndex, VAULT_NAME);
 
@@ -272,7 +260,10 @@ process.on("SIGINT", shutdown);
 // --- Periodic save (every 5 minutes) ---
 setInterval(async () => {
     await searchIndex.saveToDisk();
-    if (auth) await auth.saveTokens();
+    if (auth) {
+        auth.cleanup();
+        await auth.saveTokens();
+    }
 }, 5 * 60 * 1000).unref();
 
 // --- Start server ---

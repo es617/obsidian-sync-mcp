@@ -14,7 +14,7 @@
 
 ### Security
 - Search index no longer stores note content on disk — only paths + mtimes persisted
-- Persisted search metadata encrypted at rest when `COUCHDB_PASSPHRASE` is set (AES-256-CBC)
+- Persisted search metadata encrypted at rest when `COUCHDB_PASSPHRASE` is set (AES-256-GCM)
 - Content snippets fetched on demand from vault, not cached
 - E2E encryption no longer undermined by plaintext index on disk
 - CouchDB vault rejects `..` and absolute paths (path traversal hardening)
@@ -26,23 +26,33 @@
 - Validate auth token structure when loading from disk
 - File watcher reads through vault.readNote() (symlink protection)
 - Warn when server has no authentication and listens on all interfaces
+- Require `COUCHDB_PASSWORD` in remote mode (no more default password)
+- Periodic cleanup of expired tokens and unused OAuth clients
+- Suppress password/passphrase echo in setup script, quote secrets for spaces
 - `MCP_REFRESH_DAYS` falls back to default (14) when set to a non-numeric value
+- Cap lockout backoff at ~85 minutes (prevents permanent lockout)
 
 ### Changes
 - `search_vault` returns paths by default (not snippets) — set `include_snippets=true` for content
 - Full search index (FlexSearch + metadata) persisted to disk and restored on cold start
-- Cold start diffs mtimes and only reads changed notes from vault instead of full rebuild
+- CouchDB mode uses `_changes` feed with persisted `since` for incremental startup (no full rebuild)
+- Local mode uses mtime diff for incremental startup
 - Survives Fly.io suspend/resume (in-memory) and cold restarts (disk)
 - Backlinks are case-insensitive (matches Obsidian behavior)
 - `.obsidian/` folder excluded from indexing and file watcher
 - File watcher debounced (100ms per path) to coalesce rapid Obsidian saves
 - `list_notes` default limit lowered from 500 to 100
 - Improved tool descriptions with concrete examples for agents
+- Suppress livesync-commonlib logs that expose file paths (`LOG_LEVEL=debug` to re-enable)
+- Updated livesync-commonlib to latest upstream
+- E2E tests rewritten in TypeScript with cold restart test
 
 ### Fixes
 - `list_notes` and `search_vault` folder filter matches correctly without trailing slash
 - CouchDB vault folder filter normalized to match local vault behavior
 - `modified_after` returns clear error on invalid date format instead of empty results
+- Guard against concurrent index saves
+- Search snippets now work for multi-word queries where words aren't adjacent
 
 ## 0.3.0
 
