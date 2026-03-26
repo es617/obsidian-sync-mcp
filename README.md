@@ -193,8 +193,9 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | `write_note` | Create or overwrite a note (replaces entire content) |
 | `edit_note` | Edit a note without rewriting it — append, prepend (after frontmatter), or replace exact text |
 | `list_folders` | List all folders in the vault with note counts — use to discover folder names |
-| `list_notes` | List notes with timestamps. Filter by folder or date, sort by name or modified, limit results. |
-| `search_vault` | Full-text search across all notes. Filter by date, optionally include content snippets. |
+| `list_tags` | List all tags in the vault with counts — use to discover tags before filtering |
+| `list_notes` | List notes with timestamps. Filter by folder, tag, or date. Sort by name or modified. |
+| `search_vault` | Full-text search across all notes. Filter by tag or date, optionally include content snippets. |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
 | `get_note_metadata` | Get frontmatter, tags, links, size, and timestamps without reading the full content |

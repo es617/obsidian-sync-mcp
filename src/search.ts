@@ -12,6 +12,7 @@ import FlexSearch from "flexsearch";
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
+import { parseFrontmatterAndLinks } from "./parse.js";
 
 const MAX_RESULTS = 50;
 
@@ -34,6 +35,7 @@ function decrypt(data: string, passphrase: string): string {
 export class SearchIndex {
     private index: FlexSearch.Document<{ path: string; content: string }>;
     private mtimes = new Map<string, number>();
+    private tags = new Map<string, string[]>();
     private knownPaths = new Set<string>();
     private persistPath: string | null;
     private passphrase: string | null;
@@ -60,6 +62,9 @@ export class SearchIndex {
                 this.mtimes.set(path, mtime as number);
                 this.knownPaths.add(path);
             }
+            for (const [path, t] of Object.entries(data.tags ?? {})) {
+                this.tags.set(path, t as string[]);
+            }
             console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes). Index rebuild needed.`);
             return this.knownPaths.size > 0;
         } catch {
@@ -74,6 +79,7 @@ export class SearchIndex {
             await mkdir(dirname(this.persistPath), { recursive: true });
             let data = JSON.stringify({
                 mtimes: Object.fromEntries(this.mtimes),
+                tags: Object.fromEntries(this.tags),
             });
             if (this.passphrase) {
                 data = encrypt(data, this.passphrase);
@@ -94,6 +100,12 @@ export class SearchIndex {
         this.index.add({ path, content });
         this.knownPaths.add(path);
         if (mtime !== undefined) this.mtimes.set(path, mtime);
+        const parsed = parseFrontmatterAndLinks(content);
+        if (parsed.tags.length > 0) {
+            this.tags.set(path, parsed.tags);
+        } else {
+            this.tags.delete(path);
+        }
     }
 
     /** Remove a note from the index. */
@@ -102,6 +114,7 @@ export class SearchIndex {
             this.index.remove(path);
             this.knownPaths.delete(path);
             this.mtimes.delete(path);
+            this.tags.delete(path);
         }
     }
 
@@ -144,6 +157,24 @@ export class SearchIndex {
     /** Get mtime for a path. */
     getMtime(path: string): number {
         return this.mtimes.get(path) ?? 0;
+    }
+
+    /** Get tags for a path. */
+    getTags(path: string): string[] {
+        return this.tags.get(path) ?? [];
+    }
+
+    /** List all tags across the vault with counts. */
+    listAllTags(): Array<{ tag: string; count: number }> {
+        const counts = new Map<string, number>();
+        for (const tags of this.tags.values()) {
+            for (const t of tags) {
+                counts.set(t, (counts.get(t) ?? 0) + 1);
+            }
+        }
+        return [...counts.entries()]
+            .map(([tag, count]) => ({ tag, count }))
+            .sort((a, b) => b.count - a.count);
     }
 
     get size(): number {

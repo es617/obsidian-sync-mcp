@@ -76,14 +76,51 @@ describe("SearchIndex", () => {
         assert.equal(notes.length, 1);
         assert.equal(notes[0].mtime, 1234567890);
     });
+
+    it("extracts and retrieves tags from content", () => {
+        const idx = new SearchIndex();
+        idx.update("tagged.md", "---\ntags: [project, urgent]\n---\n\nSome #inline content", 100);
+        const tags = idx.getTags("tagged.md");
+        assert.ok(tags.includes("project"));
+        assert.ok(tags.includes("urgent"));
+        assert.ok(tags.includes("inline"));
+    });
+
+    it("lists all tags with counts", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "---\ntags: [project, urgent]\n---\n", 100);
+        idx.update("b.md", "---\ntags: [project]\n---\n", 200);
+        idx.update("c.md", "No tags here", 300);
+        const allTags = idx.listAllTags();
+        assert.equal(allTags[0].tag, "project");
+        assert.equal(allTags[0].count, 2);
+        assert.equal(allTags[1].tag, "urgent");
+        assert.equal(allTags[1].count, 1);
+    });
+
+    it("clears tags on remove", () => {
+        const idx = new SearchIndex();
+        idx.update("tagged.md", "---\ntags: [foo]\n---\n", 100);
+        assert.deepEqual(idx.getTags("tagged.md"), ["foo"]);
+        idx.remove("tagged.md");
+        assert.deepEqual(idx.getTags("tagged.md"), []);
+    });
+
+    it("updates tags when content changes", () => {
+        const idx = new SearchIndex();
+        idx.update("note.md", "---\ntags: [old]\n---\n", 100);
+        assert.deepEqual(idx.getTags("note.md"), ["old"]);
+        idx.update("note.md", "---\ntags: [new]\n---\n", 200);
+        assert.deepEqual(idx.getTags("note.md"), ["new"]);
+    });
 });
 
 describe("SearchIndex persistence", () => {
-    it("saves and loads mtimes from disk", async () => {
+    it("saves and loads mtimes and tags from disk", async () => {
         const path = join(tmpDir, "index.json");
 
         const idx1 = new SearchIndex(path);
-        idx1.update("note1.md", "Hello world", 100);
+        idx1.update("note1.md", "---\ntags: [foo]\n---\nHello world", 100);
         idx1.update("note2.md", "Goodbye world", 200);
         await idx1.saveToDisk();
 
@@ -96,6 +133,9 @@ describe("SearchIndex persistence", () => {
         assert.equal(notes.length, 2);
         assert.ok(notes.some((n) => n.path === "note1.md" && n.mtime === 100));
         assert.ok(notes.some((n) => n.path === "note2.md" && n.mtime === 200));
+
+        assert.deepEqual(idx2.getTags("note1.md"), ["foo"]);
+        assert.deepEqual(idx2.getTags("note2.md"), []);
     });
 
     it("saves and loads encrypted when passphrase set", async () => {

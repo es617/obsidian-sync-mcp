@@ -49,12 +49,16 @@ export function registerTools(
 
     server.addTool({
         name: "list_notes",
-        description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(modified_after='2026-03-25', sort_by='modified') for today's changes. list_notes(folder='daily') for a specific folder. Returns up to 100 notes by default.",
+        description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(modified_after='2026-03-25', sort_by='modified') for today's changes. list_notes(folder='daily') for a specific folder. list_notes(tag='project') for notes with a specific tag. Returns up to 100 notes by default.",
         parameters: z.object({
             folder: z
                 .string()
                 .optional()
                 .describe("Folder to filter by, e.g. 'daily' or 'projects'. Omit for all notes."),
+            tag: z
+                .string()
+                .optional()
+                .describe("Filter by tag, e.g. 'project' or 'daily'. Use list_tags to discover available tags."),
             sort_by: z
                 .enum(["name", "modified"])
                 .optional()
@@ -68,11 +72,14 @@ export function registerTools(
                 .optional()
                 .describe("Max number of notes to return. Default 100."),
         }),
-        execute: async ({ folder, sort_by, modified_after, limit }) => {
+        execute: async ({ folder, tag, sort_by, modified_after, limit }) => {
             // Use search index (works with encrypted vaults), fall back to vault
             let notes = searchIndex.listWithMtime(folder);
             if (notes.length === 0) {
                 notes = await vault.listNotesWithMtime(folder);
+            }
+            if (tag) {
+                notes = notes.filter((n) => searchIndex.getTags(n.path).includes(tag));
             }
             if (modified_after) {
                 const cutoff = new Date(modified_after).getTime();
@@ -134,10 +141,28 @@ export function registerTools(
     });
 
     server.addTool({
+        name: "list_tags",
+        description:
+            "List all tags used in the vault, sorted by frequency. Use this to discover tags before filtering with list_notes or search_vault.",
+        parameters: z.object({}),
+        execute: async () => {
+            const tags = searchIndex.listAllTags();
+            if (tags.length === 0) {
+                return "No tags found in the vault.";
+            }
+            return tags.map(({ tag, count }) => `- #${tag} (${count} notes)`).join("\n");
+        },
+    });
+
+    server.addTool({
         name: "search_vault",
-        description: "Full-text search across all notes (matches words, not substrings). Returns matching paths. Use modified_after to search only recent notes. Set include_snippets=true to include surrounding content for each match.",
+        description: "Full-text search across all notes (matches words, not substrings). Returns matching paths. Use modified_after to search only recent notes. Use tag to filter by tag. Set include_snippets=true to include surrounding content for each match.",
         parameters: z.object({
             query: z.string().describe("Text to search for (case-insensitive)"),
+            tag: z
+                .string()
+                .optional()
+                .describe("Filter results by tag, e.g. 'project'. Use list_tags to discover available tags."),
             modified_after: z
                 .string()
                 .optional()
@@ -147,8 +172,11 @@ export function registerTools(
                 .optional()
                 .describe("Fetch content snippets for each result. Default false (paths only)."),
         }),
-        execute: async ({ query, modified_after, include_snippets }) => {
+        execute: async ({ query, tag, modified_after, include_snippets }) => {
             let paths = searchIndex.search(query);
+            if (tag) {
+                paths = paths.filter((p) => searchIndex.getTags(p).includes(tag));
+            }
             if (modified_after) {
                 const cutoff = new Date(modified_after).getTime();
                 paths = paths.filter((p) => searchIndex.getMtime(p) >= cutoff);
