@@ -1,11 +1,11 @@
 /**
  * Full-text search index backed by FlexSearch.
  *
- * - Builds in-memory index on startup from all notes
  * - Updates incrementally on write/delete/move
- * - Persists paths + mtimes to disk (encrypted if passphrase is set)
- * - FlexSearch tokenized index is in memory only (rebuilt on cold start)
- * - Survives suspend/resume (memory preserved)
+ * - Persists everything to disk (encrypted if passphrase is set):
+ *   metadata (mtimes, tags, links) + FlexSearch tokenized index
+ * - Cold start loads from disk, diffs mtimes, reads only changed notes
+ * - Survives suspend/resume (memory preserved) and cold restarts (disk)
  */
 
 import FlexSearch from "flexsearch";
@@ -39,6 +39,7 @@ export class SearchIndex {
     private links = new Map<string, string[]>();
     private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
+    private flexSearchReady = false;
     private persistPath: string | null;
     private passphrase: string | null;
 
@@ -51,7 +52,7 @@ export class SearchIndex {
         });
     }
 
-    /** Load paths + mtimes from disk. FlexSearch index needs rebuild after this. */
+    /** Load full index from disk (metadata + FlexSearch). */
     async loadFromDisk(): Promise<boolean> {
         if (!this.persistPath) return false;
         try {
@@ -75,31 +76,44 @@ export class SearchIndex {
                     this.backlinks.get(target)!.add(path);
                 }
             }
-            console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes). Index rebuild needed.`);
+            // Restore FlexSearch tokenized index
+            if (data.flexsearch && data.flexsearch.length > 0) {
+                for (const { key, value } of data.flexsearch) {
+                    this.index.import(key, value);
+                }
+                this.flexSearchReady = true;
+            }
+            console.log(`Search index loaded from disk (${this.knownPaths.size} notes${this.flexSearchReady ? "" : ", text index needs rebuild"}).`);
             return this.knownPaths.size > 0;
         } catch {
             return false;
         }
     }
 
-    /** Save paths + mtimes to disk. Encrypted if passphrase is set. */
+    /** Save full index to disk (metadata + FlexSearch). Encrypted if passphrase is set. */
     async saveToDisk(): Promise<void> {
         if (!this.persistPath) return;
         try {
             await mkdir(dirname(this.persistPath), { recursive: true });
+            // Export FlexSearch tokenized index
+            const flexChunks: Array<{ key: string; value: string }> = [];
+            this.index.export((key: string, value: string) => {
+                if (value !== undefined) flexChunks.push({ key, value });
+            });
             let data = JSON.stringify({
                 mtimes: Object.fromEntries(this.mtimes),
                 tags: Object.fromEntries(this.tags),
                 links: Object.fromEntries(this.links),
+                flexsearch: flexChunks,
             });
             if (this.passphrase) {
                 data = encrypt(data, this.passphrase);
             }
             await writeFile(this.persistPath, data, { encoding: "utf-8", mode: 0o600 });
             await chmod(this.persistPath, 0o600);
-            console.log(`Search metadata saved to disk (${this.knownPaths.size} notes${this.passphrase ? ", encrypted" : ""}).`);
+            console.log(`Search index saved to disk (${this.knownPaths.size} notes${this.passphrase ? ", encrypted" : ""}).`);
         } catch (err) {
-            console.error("Failed to save search metadata:", err);
+            console.error("Failed to save search index:", err);
         }
     }
 
@@ -111,6 +125,7 @@ export class SearchIndex {
         }
         this.index.add({ path, content });
         this.knownPaths.add(path);
+        this.flexSearchReady = true;
         if (mtime !== undefined) this.mtimes.set(path, mtime);
         const parsed = parseFrontmatterAndLinks(content);
         if (parsed.tags.length > 0) {
@@ -183,9 +198,9 @@ export class SearchIndex {
         return entries.sort((a, b) => a.path.localeCompare(b.path));
     }
 
-    /** Whether the FlexSearch index needs rebuilding (has metadata but no indexed content). */
+    /** Whether the FlexSearch index needs rebuilding (has metadata but no text index). */
     get needsRebuild(): boolean {
-        return this.knownPaths.size > 0 && this.index.search("a", { limit: 1 }).length === 0;
+        return this.knownPaths.size > 0 && !this.flexSearchReady;
     }
 
     /** Get mtime for a path. */

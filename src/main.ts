@@ -55,11 +55,32 @@ const dataDir = join(baseDataDir, vaultId);
 const indexPath = join(dataDir, "search-index.json");
 const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
-// Load metadata (paths + mtimes) from disk, then rebuild FlexSearch index
-await searchIndex.loadFromDisk();
+// Load persisted index (metadata + FlexSearch) from disk, then sync with vault
+const hadPersistedIndex = await searchIndex.loadFromDisk();
 const start = performance.now();
 const notesWithMtime = await vault.listNotesWithMtime();
-if (notesWithMtime.length > 0) {
+
+if (hadPersistedIndex && !searchIndex.needsRebuild && notesWithMtime.length > 0) {
+    // Incremental sync: diff mtimes, only read changed/new notes
+    const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
+
+    // Remove notes deleted while MCP was down (also handles DB nuke)
+    const stale = searchIndex.listPaths().filter((p) => !vaultPaths.has(p));
+    for (const p of stale) searchIndex.remove(p);
+
+    // Read only changed and new notes
+    const toRead = notesWithMtime.filter((n) => n.mtime > searchIndex.getMtime(n.path));
+    if (toRead.length > 0 || stale.length > 0) {
+        for (const { path, mtime } of toRead) {
+            const content = await vault.readNote(path);
+            if (content) searchIndex.update(path, content, mtime);
+        }
+        console.log(`Search index synced in ${((performance.now() - start) / 1000).toFixed(1)}s: ${toRead.length} updated, ${stale.length} removed, ${notesWithMtime.length - toRead.length - stale.length} unchanged.`);
+    } else {
+        console.log(`Search index up to date (${searchIndex.size} notes).`);
+    }
+} else if (notesWithMtime.length > 0) {
+    // Full rebuild: no persisted index or FlexSearch data missing
     console.log(`Building search index (${notesWithMtime.length} notes)...`);
     for (let i = 0; i < notesWithMtime.length; i++) {
         const { path, mtime } = notesWithMtime[i];
