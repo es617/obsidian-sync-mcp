@@ -97,10 +97,19 @@ if (hadPersistedIndex && !searchIndex.needsRebuild && notesWithMtime.length > 0)
 let fsWatcher: ReturnType<typeof watch> | null = null;
 if (VAULT_PATH) {
     // Local mode: watch filesystem for changes from Obsidian
-    fsWatcher = watch(VAULT_PATH, { recursive: true }, async (event, filename) => {
+    const pending = new Map<string, ReturnType<typeof setTimeout>>();
+    fsWatcher = watch(VAULT_PATH, { recursive: true }, (event, filename) => {
         if (!filename || !filename.endsWith(".md")) return;
-        // Normalize path separators
         const notePath = filename.replace(/\\/g, "/");
+        if (notePath.startsWith(".obsidian/") || notePath.includes("/.obsidian/")) return;
+
+        // Debounce: coalesce rapid events for the same file (Obsidian fires 2-3 per save)
+        if (pending.has(notePath)) clearTimeout(pending.get(notePath)!);
+        pending.set(notePath, setTimeout(() => handleFileChange(notePath), 100));
+    });
+
+    async function handleFileChange(notePath: string) {
+        pending.delete(notePath);
         try {
             const content = await vault.readNote(notePath);
             if (content !== null) {
@@ -113,7 +122,7 @@ if (VAULT_PATH) {
             // File deleted or path blocked by safePath
             searchIndex.remove(notePath);
         }
-    });
+    }
     console.log("Watching vault for external changes.");
 } else if (COUCHDB_URL && vault.watchChanges) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates

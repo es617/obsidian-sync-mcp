@@ -151,6 +151,13 @@ describe("SearchIndex", () => {
         assert.deepEqual(idx.getBacklinks("b.md"), []);
     });
 
+    it("matches backlinks case-insensitively", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "Links to [[welcome]]", 100);
+        const backlinks = idx.getBacklinks("Welcome.md");
+        assert.deepEqual(backlinks, ["a.md"]);
+    });
+
     it("updates backlinks when source content changes", () => {
         const idx = new SearchIndex();
         idx.update("a.md", "Links to [[b]]", 100);

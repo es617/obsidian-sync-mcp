@@ -40,6 +40,7 @@ export class SearchIndex {
     private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
     private flexSearchReady = false;
+    private saving = false;
     private persistPath: string | null;
     private passphrase: string | null;
 
@@ -72,8 +73,9 @@ export class SearchIndex {
                 const targets = l as string[];
                 this.links.set(path, targets);
                 for (const target of targets) {
-                    if (!this.backlinks.has(target)) this.backlinks.set(target, new Set());
-                    this.backlinks.get(target)!.add(path);
+                    const key = target.toLowerCase();
+                    if (!this.backlinks.has(key)) this.backlinks.set(key, new Set());
+                    this.backlinks.get(key)!.add(path);
                 }
             }
             // Restore FlexSearch tokenized index
@@ -92,7 +94,8 @@ export class SearchIndex {
 
     /** Save full index to disk (metadata + FlexSearch). Encrypted if passphrase is set. */
     async saveToDisk(): Promise<void> {
-        if (!this.persistPath) return;
+        if (!this.persistPath || this.saving) return;
+        this.saving = true;
         try {
             await mkdir(dirname(this.persistPath), { recursive: true });
             // Export FlexSearch tokenized index
@@ -114,6 +117,8 @@ export class SearchIndex {
             console.log(`Search index saved to disk (${this.knownPaths.size} notes${this.passphrase ? ", encrypted" : ""}).`);
         } catch (err) {
             console.error("Failed to save search index:", err);
+        } finally {
+            this.saving = false;
         }
     }
 
@@ -136,8 +141,9 @@ export class SearchIndex {
         if (parsed.links.length > 0) {
             this.links.set(path, parsed.links);
             for (const target of parsed.links) {
-                if (!this.backlinks.has(target)) this.backlinks.set(target, new Set());
-                this.backlinks.get(target)!.add(path);
+                const key = target.toLowerCase();
+                if (!this.backlinks.has(key)) this.backlinks.set(key, new Set());
+                this.backlinks.get(key)!.add(path);
             }
         } else {
             this.links.delete(path);
@@ -160,8 +166,9 @@ export class SearchIndex {
         const oldLinks = this.links.get(path);
         if (oldLinks) {
             for (const target of oldLinks) {
-                this.backlinks.get(target)?.delete(path);
-                if (this.backlinks.get(target)?.size === 0) this.backlinks.delete(target);
+                const key = target.toLowerCase();
+                this.backlinks.get(key)?.delete(path);
+                if (this.backlinks.get(key)?.size === 0) this.backlinks.delete(key);
             }
         }
         this.links.delete(path);
@@ -218,12 +225,11 @@ export class SearchIndex {
         return this.links.get(path) ?? [];
     }
 
-    /** Get backlinks for a path (notes that link to it). Matches by full path or filename. */
+    /** Get backlinks for a path (notes that link to it). Case-insensitive, matches by full path or filename. */
     getBacklinks(path: string): string[] {
         const results = new Set<string>();
-        // Match by exact link target (e.g. "folder/note" or "folder/note.md")
-        const withMd = path.endsWith(".md") ? path : path + ".md";
-        const withoutMd = path.endsWith(".md") ? path.slice(0, -3) : path;
+        const withMd = (path.endsWith(".md") ? path : path + ".md").toLowerCase();
+        const withoutMd = (path.endsWith(".md") ? path.slice(0, -3) : path).toLowerCase();
         const nameOnly = withoutMd.includes("/") ? withoutMd.slice(withoutMd.lastIndexOf("/") + 1) : withoutMd;
 
         for (const target of [withMd, withoutMd, nameOnly]) {
