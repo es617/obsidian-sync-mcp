@@ -271,4 +271,9 @@ server.start({
     transportType: "httpStream",
     httpStream: { port: PORT, endpoint: "/mcp", host: process.env.HOST ?? "0.0.0.0" },
 });
-console.log(`MCP server listening on port ${PORT}`);
+console.log(`obsidian-sync-mcp v${process.env.npm_package_version ?? "unknown"} listening on port ${PORT}`);
+
+// Prevent unhandled rejections from crashing the server (e.g. decryption failures in watcher)
+process.on("unhandledRejection", (err) => {
+    console.error("Unhandled rejection:", err);
+});
