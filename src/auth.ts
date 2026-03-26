@@ -260,6 +260,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
 
         if (grantType === "authorization_code") {
             const code = body["code"] as string;
+            const clientId = body["client_id"] as string;
             const codeVerifier = body["code_verifier"] as string;
             const redirectUri = body["redirect_uri"] as string;
 
@@ -267,6 +268,11 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             if (!pending || Date.now() - pending.createdAt > PENDING_TTL_MS) {
                 if (pending) pendingAuths.delete(code);
                 return c.json({ error: "invalid_grant" }, 400);
+            }
+
+            // Verify client_id matches the original request
+            if (clientId !== pending.clientId) {
+                return c.json({ error: "invalid_grant", error_description: "client_id mismatch" }, 400);
             }
 
             // Verify redirect_uri matches the original request
@@ -421,8 +427,8 @@ function renderPasswordPage(code: string, csrf: string, error?: string): string 
   <h1>Obsidian Sync MCP</h1>
   ${error ? `<p class="error">${error.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>` : "<p>Enter the server password to authorize access to your vault.</p>"}
   <form method="POST" action="/oauth/approve" autocomplete="on">
-    <input type="hidden" name="code" value="${code}">
-    <input type="hidden" name="csrf" value="${csrf}">
+    <input type="hidden" name="code" value="${code.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">
+    <input type="hidden" name="csrf" value="${csrf.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">
     <input type="text" name="username" id="username" value="obsidian-sync-mcp" autocomplete="username" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none">
     <input type="password" name="password" id="password" placeholder="Password" autocomplete="current-password" autofocus required>
     <br><button type="submit">Authorize</button>

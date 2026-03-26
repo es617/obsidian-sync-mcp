@@ -78,6 +78,7 @@ async function completeOAuthFlow(app: Hono, password: string) {
         body: new URLSearchParams({
             grant_type: "authorization_code",
             code: authCode,
+            client_id: client.client_id,
             code_verifier: pkce.verifier,
             redirect_uri: "https://app.example.com/callback",
         }).toString(),
@@ -299,7 +300,33 @@ describe("Token Exchange", () => {
             body: new URLSearchParams({
                 grant_type: "authorization_code",
                 code: authCode,
+                client_id: client.client_id,
                 code_verifier: "wrong-verifier",
+                redirect_uri: "https://app.example.com/callback",
+            }).toString(),
+        });
+        assert.equal(tokenResp.status, 400);
+        const body = (await tokenResp.json()) as any;
+        assert.equal(body.error, "invalid_grant");
+    });
+
+    it("rejects wrong client_id at token exchange", async () => {
+        const { app } = setup();
+        const pkce = generatePKCE();
+        const client = await registerClient(app);
+        const { fields } = await getAuthorizePage(app, client.client_id, pkce.challenge);
+        const approveResp = await submitPassword(app, fields.code, fields.csrf, "test-password");
+        const location = approveResp.headers.get("location")!;
+        const authCode = new URL(location).searchParams.get("code")!;
+
+        const tokenResp = await app.request("/oauth/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+                grant_type: "authorization_code",
+                code: authCode,
+                client_id: "wrong-client-id",
+                code_verifier: pkce.verifier,
                 redirect_uri: "https://app.example.com/callback",
             }).toString(),
         });
@@ -324,6 +351,7 @@ describe("Token Exchange", () => {
             body: new URLSearchParams({
                 grant_type: "authorization_code",
                 code: authCode,
+                client_id: client.client_id,
                 code_verifier: pkce.verifier,
                 redirect_uri: "https://app.example.com/callback",
             }).toString(),
@@ -337,6 +365,7 @@ describe("Token Exchange", () => {
             body: new URLSearchParams({
                 grant_type: "authorization_code",
                 code: authCode,
+                client_id: client.client_id,
                 code_verifier: pkce.verifier,
                 redirect_uri: "https://app.example.com/callback",
             }).toString(),

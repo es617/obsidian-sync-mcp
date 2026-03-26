@@ -2,7 +2,7 @@ import { FastMCP } from "fastmcp";
 import { join } from "path";
 import { timingSafeEqual, createHash } from "crypto";
 import { watch } from "fs";
-import { readFile, stat } from "fs/promises";
+import { stat } from "fs/promises";
 import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
 import { registerTools } from "./tools.js";
@@ -81,11 +81,15 @@ if (VAULT_PATH) {
         // Normalize path separators
         const notePath = filename.replace(/\\/g, "/");
         try {
-            const fullPath = join(VAULT_PATH!, notePath);
-            const [content, s] = await Promise.all([readFile(fullPath, "utf-8"), stat(fullPath)]);
-            searchIndex.update(notePath, content, s.mtimeMs);
+            const content = await vault.readNote(notePath);
+            if (content !== null) {
+                const s = await stat(join(VAULT_PATH!, notePath));
+                searchIndex.update(notePath, content, s.mtimeMs);
+            } else {
+                searchIndex.remove(notePath);
+            }
         } catch {
-            // File deleted
+            // File deleted or path blocked by safePath
             searchIndex.remove(notePath);
         }
     });
