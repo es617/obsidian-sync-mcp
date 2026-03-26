@@ -52,6 +52,7 @@ The script asks for your CouchDB connection details, vault name, and encryption 
 
 ```bash
 docker run -p 8787:8787 \
+  -v mcp-data:/data -e DATA_DIR=/data \
   -e COUCHDB_URL=https://your-couchdb:5984 \
   -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=yourpassword \
   -e COUCHDB_DATABASE=obsidian -e VAULT_NAME=MyVault \
@@ -173,6 +174,7 @@ Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync.
 
 ```bash
 docker run -p 8787:8787 \
+  -v mcp-data:/data -e DATA_DIR=/data \
   -e VAULT_PATH=/vault -v ~/Documents/MyVault:/vault \
   -e VAULT_NAME=MyVault \
   ghcr.io/es617/obsidian-sync-mcp:latest
