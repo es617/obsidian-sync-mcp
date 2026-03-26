@@ -6,12 +6,12 @@
     "url": "https://github.com/es617/obsidian-sync-mcp.git",
     "source": "github"
   },
-  "version": "0.4.1",
+  "version": "0.4.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "obsidian-sync-mcp",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:8787/mcp"

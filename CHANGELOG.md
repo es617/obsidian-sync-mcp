@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2
+
+### Features
+- New `COUCHDB_OBFUSCATE_PROPERTIES` env var for vaults with "Obfuscate Properties" enabled in LiveSync
+- Setup script asks about property obfuscation when passphrase is set
+
+### Fixes
+- Fix reading/writing notes in vaults with property obfuscation enabled (path obfuscation regression in livesync-commonlib service refactor)
+- Suppress replicator service logs in production
+
 ## 0.4.1
 
 ### Fixes
