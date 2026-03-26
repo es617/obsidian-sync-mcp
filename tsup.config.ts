@@ -1,9 +1,18 @@
 import { defineConfig } from "tsup";
 import path from "path";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import type { Plugin } from "esbuild";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
+
+function resolveWithExtensions(base: string, rel: string): string | null {
+    const full = path.join(base, rel);
+    // Try exact, then .ts, then /index.ts
+    for (const candidate of [full, full + ".ts", path.join(full, "index.ts")]) {
+        if (existsSync(candidate)) return candidate;
+    }
+    return null;
+}
 
 const livesyncAliases: Plugin = {
     name: "livesync-aliases",
@@ -12,25 +21,32 @@ const livesyncAliases: Plugin = {
         const stubs = path.resolve("src/stubs");
 
         // Redirect bgWorker to mock (no web workers in Node)
-        build.onResolve({ filter: /bgWorker/ }, (args) => {
+        build.onResolve({ filter: /bgWorker/ }, () => {
             return { path: path.join(libSrc, "worker/bgWorker.mock.ts") };
         });
 
         // Redirect pouchdb-browser to pouchdb-http (no IndexedDB in Node)
-        build.onResolve({ filter: /pouchdb-browser/ }, (args) => {
+        build.onResolve({ filter: /pouchdb-browser/ }, () => {
             return { path: path.join(libSrc, "pouchdb/pouchdb-http.ts") };
         });
 
-        // Resolve @lib/ paths
+        // Stub out svelte (UI components we don't need in Node)
+        build.onResolve({ filter: /^svelte/ }, () => {
+            return { path: path.join(stubs, "svelte.ts") };
+        });
+
+        // Resolve @lib/ paths (livesync-commonlib source)
         build.onResolve({ filter: /^@lib\// }, (args) => {
-            const resolved = args.path.replace(/^@lib\//, "");
-            return { path: path.join(libSrc, resolved) };
+            const rel = args.path.replace(/^@lib\//, "");
+            const resolved = resolveWithExtensions(libSrc, rel);
+            if (resolved) return { path: resolved };
         });
 
         // Resolve @/ paths to stubs
         build.onResolve({ filter: /^@\// }, (args) => {
-            const resolved = args.path.replace(/^@\//, "");
-            return { path: path.join(stubs, resolved) };
+            const rel = args.path.replace(/^@\//, "");
+            const resolved = resolveWithExtensions(stubs, rel);
+            if (resolved) return { path: resolved };
         });
     },
 };
