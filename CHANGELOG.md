@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+### Fixes
+- Catch decryption errors in CouchDB watcher instead of crashing (wrong passphrase skips the doc)
+- Fix DirectFileManipulator initialization bugs in latest livesync-commonlib (addLog handler, settings, database service registration)
+- Print version at startup for easier debugging
+- Add global unhandled rejection handler as safety net
+- Add Docker volume to README examples for index persistence
+
 ## 0.4.0
 
 ### Features

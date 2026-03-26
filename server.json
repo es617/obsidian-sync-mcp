@@ -1,0 +1,93 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.es617/obsidian-sync-mcp",
+  "description": "Give any AI agent access to your Obsidian vault — read, write, search, and navigate notes. Works with local vault files or remotely via Self-hosted LiveSync and CouchDB.",
+  "repository": {
+    "url": "https://github.com/es617/obsidian-sync-mcp.git",
+    "source": "github"
+  },
+  "version": "0.4.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "obsidian-sync-mcp",
+      "version": "0.4.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:8787/mcp"
+      },
+      "environmentVariables": [
+        {
+          "description": "Path to your Obsidian vault directory (filesystem mode)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "VAULT_PATH"
+        },
+        {
+          "description": "CouchDB server URL (CouchDB mode)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "COUCHDB_URL"
+        },
+        {
+          "description": "CouchDB username",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "COUCHDB_USER"
+        },
+        {
+          "description": "CouchDB password (required in CouchDB mode)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "COUCHDB_PASSWORD"
+        },
+        {
+          "description": "CouchDB database name",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "COUCHDB_DATABASE"
+        },
+        {
+          "description": "LiveSync E2E encryption passphrase (must match plugin setting)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "COUCHDB_PASSPHRASE"
+        },
+        {
+          "description": "Vault name for deep links and index storage",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "VAULT_NAME"
+        },
+        {
+          "description": "Password for OAuth authentication",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "MCP_AUTH_TOKEN"
+        },
+        {
+          "description": "Public URL for OAuth callbacks (required when using a tunnel)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "BASE_URL"
+        },
+        {
+          "description": "HTTP port",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "PORT"
+        }
+      ]
+    }
+  ]
+}
