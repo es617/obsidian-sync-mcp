@@ -67,7 +67,7 @@ export function registerTools(
                 .string()
                 .optional()
                 .describe("Only include notes modified after this ISO date, e.g. '2026-03-25' or '2026-03-25T10:00'."),
-            limit: z
+            limit: z.coerce
                 .number()
                 .optional()
                 .describe("Max number of notes to return. Default 100."),
@@ -168,7 +168,7 @@ export function registerTools(
                 .string()
                 .optional()
                 .describe("Only include notes modified after this ISO date, e.g. '2026-03-25'."),
-            include_snippets: z
+            include_snippets: z.coerce
                 .boolean()
                 .optional()
                 .describe("Fetch content snippets for each result. Default false (paths only)."),
