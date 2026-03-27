@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+### Changes
+- Add `mcpName` field to package.json for MCP registry publishing
+
 ## 0.4.3
 
 ### Fixes
