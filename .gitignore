@@ -6,3 +6,4 @@ CLAUDE.md
 .claude/
 Dockerfile.dev.fly
 .DS_Store
+.mcpregistry*
