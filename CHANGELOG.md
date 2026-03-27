@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+
+### Fixes
+- Coerce `limit` and `include_snippets` params from string to number/boolean (Anthropic proxy sends all values as strings)
+- Add tool call logging with args and execution time (`LOG_LEVEL=debug`)
+
 ## 0.4.2
 
 ### Features
