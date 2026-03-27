@@ -5,12 +5,26 @@ import { extractSnippet } from "./parse.js";
 import type { VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 
+const debugLogging = process.env.LOG_LEVEL === "debug";
+
 export function registerTools(
     server: FastMCP,
     vault: VaultBackend,
     searchIndex: SearchIndex,
     vaultName: string,
 ) {
+    const _addTool = server.addTool.bind(server);
+    server.addTool = (tool: any) => {
+        const original = tool.execute;
+        tool.execute = async (args: any, ctx: any) => {
+            if (debugLogging) console.log(`[tool] ${tool.name}(${JSON.stringify(args)})`);
+            const start = performance.now();
+            const result = await original(args, ctx);
+            if (debugLogging) console.log(`[tool] ${tool.name} → ${((performance.now() - start)).toFixed(0)}ms`);
+            return result;
+        };
+        return _addTool(tool);
+    };
     server.addTool({
         name: "read_note",
         description:
