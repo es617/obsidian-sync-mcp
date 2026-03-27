@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.es617/obsidian-sync-mcp",
-  "description": "Give any AI agent access to your Obsidian vault — read, write, search, and navigate notes. Works with local vault files or remotely via Self-hosted LiveSync and CouchDB.",
+  "description": "Give AI agents access to your Obsidian vault via local files or Self-hosted LiveSync.",
   "repository": {
     "url": "https://github.com/es617/obsidian-sync-mcp.git",
     "source": "github"
