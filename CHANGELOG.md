@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.8
+
+### Fixes
+- Stop persisting FlexSearch index (was 53MB, caused OOM on load). Only metadata persisted now.
+- FlexSearch rebuilt from vault on every cold start
+- Clear library chunk cache between catch-up batches
+- Cap Node.js heap to 256MB in mcp-with-db deploy
+- Remove stale entries from persisted metadata on filesystem restart
+
 ## 0.4.7
 
 ### Fixes

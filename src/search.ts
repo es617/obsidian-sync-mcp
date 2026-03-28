@@ -41,7 +41,6 @@ export class SearchIndex {
     private links = new Map<string, string[]>();
     private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
-    private flexSearchReady = false;
     private saving = false;
     private _since: string = "";
     private persistPath: string | null;
@@ -56,7 +55,7 @@ export class SearchIndex {
         });
     }
 
-    /** Load full index from disk (metadata + FlexSearch). */
+    /** Load metadata from disk (FlexSearch rebuilt on startup from vault). */
     async loadFromDisk(): Promise<boolean> {
         if (!this.persistPath) return false;
         try {
@@ -82,36 +81,23 @@ export class SearchIndex {
                 }
             }
             if (data.since) this._since = data.since;
-            // Restore FlexSearch tokenized index
-            if (data.flexsearch && data.flexsearch.length > 0) {
-                for (const { key, value } of data.flexsearch) {
-                    this.index.import(key, value);
-                }
-                this.flexSearchReady = true;
-            }
-            console.log(`Search index loaded from disk (${this.knownPaths.size} notes${this.flexSearchReady ? "" : ", text index needs rebuild"}).`);
+            console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes, since: ${this._since ? "yes" : "none"}).`);
             return this.knownPaths.size > 0;
         } catch {
             return false;
         }
     }
 
-    /** Save full index to disk (metadata + FlexSearch). Encrypted if passphrase is set. */
+    /** Save metadata to disk (no FlexSearch — rebuilt on startup). Encrypted if passphrase is set. */
     async saveToDisk(): Promise<void> {
         if (!this.persistPath || this.saving) return;
         this.saving = true;
         try {
             await mkdir(dirname(this.persistPath), { recursive: true });
-            // Export FlexSearch tokenized index (sync callback — verified by persistence round-trip test)
-            const flexChunks: Array<{ key: string; value: string }> = [];
-            this.index.export((key: string, value: string) => {
-                if (value !== undefined) flexChunks.push({ key, value });
-            });
             let data = JSON.stringify({
                 mtimes: Object.fromEntries(this.mtimes),
                 tags: Object.fromEntries(this.tags),
                 links: Object.fromEntries(this.links),
-                flexsearch: flexChunks,
                 since: this._since,
             });
             if (this.passphrase) {
@@ -135,7 +121,6 @@ export class SearchIndex {
         }
         this.index.add({ path, content });
         this.knownPaths.add(path);
-        this.flexSearchReady = true;
         if (mtime !== undefined) this.mtimes.set(path, mtime);
         const parsed = parseFrontmatterAndLinks(content);
         if (parsed.tags.length > 0) {
@@ -210,11 +195,6 @@ export class SearchIndex {
         return entries.sort((a, b) => a.path.localeCompare(b.path));
     }
 
-    /** Whether the FlexSearch index needs rebuilding (has metadata but no text index). */
-    get needsRebuild(): boolean {
-        return this.knownPaths.size > 0 && !this.flexSearchReady;
-    }
-
     /** Get mtime for a path. */
     getMtime(path: string): number {
         return this.mtimes.get(path) ?? 0;
@@ -264,7 +244,6 @@ export class SearchIndex {
         const paths = Array.from(this.knownPaths);
         for (const p of paths) this.remove(p);
         this._since = "";
-        this.flexSearchReady = false;
     }
 
     get since(): string {

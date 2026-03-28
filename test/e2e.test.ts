@@ -270,10 +270,10 @@ describe("E2E: cold restart with persisted index", () => {
         await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault" });
         const restartLogs = serverLogs;
 
-        // Should have done incremental sync, not full rebuild
+        // Should rebuild search index from vault files
         assert.ok(
-            restartLogs.includes("Search index synced") || restartLogs.includes("Search index loaded"),
-            "Should load persisted index on restart",
+            restartLogs.includes("Search index built") || restartLogs.includes("Search metadata loaded"),
+            "Should rebuild index on restart",
         );
 
         // New note should be searchable

@@ -74,10 +74,10 @@ const dataDir = join(baseDataDir, vaultId);
 const indexPath = join(dataDir, "search-index.json");
 const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
-// Load persisted index (metadata + FlexSearch) from disk, then sync with vault
+// Load persisted metadata from disk (FlexSearch rebuilt from vault on every startup)
 const hadPersistedIndex = await searchIndex.loadFromDisk();
 if (debugLogging && hadPersistedIndex) {
-    console.log(`[debug] Persisted index: ${searchIndex.size} notes, FlexSearch ready: ${!searchIndex.needsRebuild}, since: ${searchIndex.since || "(none)"}`);
+    console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
 }
 const start = performance.now();
 
@@ -124,30 +124,15 @@ if (COUCHDB_URL && vault.catchUp) {
         console.log(`Search index up to date (${searchIndex.size} notes).`);
     }
 } else if (VAULT_PATH) {
-    // Local mode: diff mtimes against filesystem
+    // Local mode: read all notes to build FlexSearch index
     const notesWithMtime = await vault.listNotesWithMtime();
     if (debugLogging) console.log(`[debug] Vault has ${notesWithMtime.length} notes`);
-
-    if (hadPersistedIndex && !searchIndex.needsRebuild && notesWithMtime.length > 0) {
+    if (notesWithMtime.length > 0) {
+        // Remove stale entries (deleted while MCP was down)
         const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
-        const stale = searchIndex.listPaths().filter((p) => !vaultPaths.has(p));
-        for (const p of stale) {
-            if (debugLogging) console.log(`[debug] Removing stale: ${p}`);
-            searchIndex.remove(p);
+        for (const p of searchIndex.listPaths()) {
+            if (!vaultPaths.has(p)) searchIndex.remove(p);
         }
-        const toRead = notesWithMtime.filter((n) => n.mtime > searchIndex.getMtime(n.path));
-        if (toRead.length > 0 || stale.length > 0) {
-            for (const { path, mtime } of toRead) {
-                if (debugLogging) console.log(`[debug] Reading changed: ${path}`);
-                const content = await vault.readNote(path);
-                if (content) searchIndex.update(path, content, mtime);
-            }
-            console.log(`Search index synced in ${((performance.now() - start) / 1000).toFixed(1)}s: ${toRead.length} updated, ${stale.length} removed, ${notesWithMtime.length - toRead.length - stale.length} unchanged.`);
-        } else {
-            console.log(`Search index up to date (${searchIndex.size} notes).`);
-        }
-    } else if (notesWithMtime.length > 0) {
-        if (debugLogging) console.log(`[debug] Full rebuild (persisted: ${hadPersistedIndex}, flexsearch ready: ${!searchIndex.needsRebuild})`);
         console.log(`Building search index (${notesWithMtime.length} notes)...`);
         for (let i = 0; i < notesWithMtime.length; i++) {
             const { path, mtime } = notesWithMtime[i];

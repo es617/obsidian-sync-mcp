@@ -193,11 +193,9 @@ describe("SearchIndex persistence", () => {
         // Backlinks survive persistence
         assert.deepEqual(idx2.getBacklinks("note1.md"), ["note2.md"]);
 
-        // FlexSearch text index survives persistence
-        assert.ok(!idx2.needsRebuild, "FlexSearch should be restored from disk");
+        // FlexSearch is not persisted — rebuilt on startup from vault
         const results = idx2.search("Hello");
-        assert.equal(results.length, 1);
-        assert.equal(results[0], "note1.md");
+        assert.equal(results.length, 0, "FlexSearch should be empty after load (rebuilt from vault)");
     });
 
     it("saves and loads encrypted when passphrase set", async () => {
