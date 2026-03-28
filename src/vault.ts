@@ -7,6 +7,7 @@ import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src
 import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
+import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 
@@ -21,8 +22,10 @@ export interface VaultConfig {
 
 export class Vault implements VaultBackend {
     private manipulator: DirectFileManipulator;
+    private passphrase: string | undefined;
 
     constructor(config: VaultConfig) {
+        this.passphrase = config.passphrase;
         const opts: DirectFileManipulatorOptions = {
             url: config.couchdbUrl,
             username: config.couchdbUser,
@@ -84,7 +87,17 @@ export class Vault implements VaultBackend {
 
             for (const change of result.results) {
                 if (!change.doc) continue;
-                const doc = await this.manipulator.getByMeta(change.doc as any).catch(() => null);
+                const meta = change.doc as any;
+                // Skip chunks and system docs
+                if (meta.type === "leaf" || meta.type === "versioninfo") continue;
+                if (meta._id?.startsWith("h:") || meta._id?.startsWith("_")) continue;
+                // Decrypt path to check .md BEFORE fetching chunks (avoids loading large attachments)
+                let path = meta.path ?? "";
+                if (isPathProbablyObfuscated(path) && this.passphrase) {
+                    try { path = await decrypt(path, this.passphrase, false); } catch { continue; }
+                }
+                if (!path.endsWith(".md") && !meta.deleted) continue;
+                const doc = await this.manipulator.getByMeta(meta).catch(() => null);
                 if (doc) Vault.docToChange(doc, callback);
             }
 

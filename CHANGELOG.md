@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6
+
+### Fixes
+- Skip non-markdown attachments during catch-up by decrypting path before fetching chunks
+- Prevents loading large binary files (PDFs, images) into memory during initial index build
+
 ## 0.4.5
 
 ### Fixes
