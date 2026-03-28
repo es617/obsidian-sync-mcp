@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7
+
+### Fixes
+- Clear library chunk cache between batches during catch-up (prevents unbounded memory growth)
+- Cap Node.js heap to 256MB in mcp-with-db deploy (leaves room for CouchDB in 512MB container)
+
 ## 0.4.6
 
 ### Fixes

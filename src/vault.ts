@@ -104,6 +104,9 @@ export class Vault implements VaultBackend {
             totalProcessed += result.results.length;
             currentSince = String(result.last_seq);
 
+            // Release chunk cache between batches to prevent memory growth
+            this.manipulator.liveSyncLocalDB.clearCaches();
+
             // Save checkpoint after each batch so crashes don't restart from zero
             if (onBatch && result.results.length > 0) {
                 await onBatch(currentSince, totalProcessed);
