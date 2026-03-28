@@ -156,11 +156,11 @@ if [ "$DEPLOY_TYPE" != "2" ]; then
     echo "Some maintenance operations in the plugin require admin credentials."
 
     # Generate Setup URIs for easy Obsidian configuration
-    SETUP_SCRIPT="$(dirname "$0")/generate-setup-uri.mjs"
+    SETUP_SCRIPT="$(dirname "$0")/../generate-setup-uri.mjs"
     URI_PASS=$(hostname="https://${APP_NAME}.fly.dev:5984" \
         username="$COUCHDB_USER" password="$COUCHDB_PASSWORD" \
         database="$COUCHDB_DATABASE" passphrase="$PASSPHRASE" \
-        node "$SETUP_SCRIPT" 2>/dev/null) && {
+        node "$SETUP_SCRIPT") && {
         URI_PASSPHRASE=$(echo "$URI_PASS" | head -1 | sed 's/URI Passphrase: //')
         ADMIN_URI=$(echo "$URI_PASS" | tail -1)
 
@@ -172,12 +172,12 @@ if [ "$DEPLOY_TYPE" != "2" ]; then
         echo "--- Admin (full access — recommended) ---"
         echo "$ADMIN_URI"
 
-        if [ -n "$LIVESYNC_USER" ] && [ -n "$LIVESYNC_PASSWORD" ]; then
+        if [ -n "$LIVESYNC_PASSWORD" ]; then
             LS_URI=$(hostname="https://${APP_NAME}.fly.dev:5984" \
-                username="$LIVESYNC_USER" password="$LIVESYNC_PASSWORD" \
+                username="livesync" password="$LIVESYNC_PASSWORD" \
                 database="$COUCHDB_DATABASE" passphrase="$PASSPHRASE" \
                 uri_passphrase="$URI_PASSPHRASE" \
-                node "$SETUP_SCRIPT" 2>/dev/null | tail -1)
+                node "$SETUP_SCRIPT" | tail -1)
             echo ""
             echo "--- LiveSync user (limited access) ---"
             echo "$LS_URI"
@@ -186,5 +186,5 @@ if [ "$DEPLOY_TYPE" != "2" ]; then
         echo ""
         echo "To set up Obsidian: copy a URI, then in Obsidian:"
         echo "  Command palette → 'Use the copied setup URI' → enter the passphrase"
-    } || echo "(Setup URI generation requires Node.js 22+)"
+    } || echo "(Setup URI generation failed — check Node.js is installed)"
 fi
