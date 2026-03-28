@@ -154,4 +154,37 @@ if [ "$DEPLOY_TYPE" != "2" ]; then
     echo "Note: The LiveSync user has limited permissions (sync and vault access only)."
     echo "You may see a 'not admin' warning in LiveSync — sync works fine."
     echo "Some maintenance operations in the plugin require admin credentials."
+
+    # Generate Setup URIs for easy Obsidian configuration
+    SETUP_SCRIPT="$(dirname "$0")/generate-setup-uri.mjs"
+    URI_PASS=$(hostname="https://${APP_NAME}.fly.dev:5984" \
+        username="$COUCHDB_USER" password="$COUCHDB_PASSWORD" \
+        database="$COUCHDB_DATABASE" passphrase="$PASSPHRASE" \
+        node "$SETUP_SCRIPT" 2>/dev/null) && {
+        URI_PASSPHRASE=$(echo "$URI_PASS" | head -1 | sed 's/URI Passphrase: //')
+        ADMIN_URI=$(echo "$URI_PASS" | tail -1)
+
+        echo ""
+        echo "=== LiveSync Setup URI ==="
+        echo "URI Passphrase: $URI_PASSPHRASE"
+        echo "(Save this — needed to import the URI on each device.)"
+        echo ""
+        echo "--- Admin (full access — recommended) ---"
+        echo "$ADMIN_URI"
+
+        if [ -n "$LIVESYNC_USER" ] && [ -n "$LIVESYNC_PASSWORD" ]; then
+            LS_URI=$(hostname="https://${APP_NAME}.fly.dev:5984" \
+                username="$LIVESYNC_USER" password="$LIVESYNC_PASSWORD" \
+                database="$COUCHDB_DATABASE" passphrase="$PASSPHRASE" \
+                uri_passphrase="$URI_PASSPHRASE" \
+                node "$SETUP_SCRIPT" 2>/dev/null | tail -1)
+            echo ""
+            echo "--- LiveSync user (limited access) ---"
+            echo "$LS_URI"
+        fi
+
+        echo ""
+        echo "To set up Obsidian: copy a URI, then in Obsidian:"
+        echo "  Command palette → 'Use the copied setup URI' → enter the passphrase"
+    } || echo "(Setup URI generation requires Node.js 22+)"
 fi

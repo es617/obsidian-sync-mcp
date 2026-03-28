@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+### Features
+- Setup script generates LiveSync Setup URIs (admin + livesync user) for one-paste Obsidian configuration
+- Correct LiveSync client settings (chunk size, sync mode, obfuscation) baked into URI — prevents config mismatches between devices
+
+### Fixes
+- Add missing `[httpd] enable_cors = true` to CouchDB config (fixes mobile sync)
+- Add `max_age = 3600` to CORS config
+
 ## 0.5.0
 
 ### Breaking Changes
