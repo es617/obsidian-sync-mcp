@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+### Fixes
+- Fix OOM crash on first startup with large vaults — paginate `_changes` catch-up in batches of 50
+- Save index checkpoint after each batch so crashes resume from last progress, not from zero
+
 ## 0.4.4
 
 ### Changes
