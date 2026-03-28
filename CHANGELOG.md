@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.10
+
+### Fixes
+- Remove Node.js heap cap (256MB too small for large encrypted vaults with FlexSearch)
+
 ## 0.4.9
 
 ### Fixes

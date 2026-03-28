@@ -85,4 +85,4 @@ trap "kill $COUCH_PID 2>/dev/null" EXIT
 export COUCHDB_URL="${COUCHDB_URL:-http://localhost:5984}"
 export DATA_DIR="${DATA_DIR:-/opt/couchdb/data/.mcp}"
 echo "Starting MCP server..."
-node --max-old-space-size=256 /app/dist/main.js
+node /app/dist/main.js
