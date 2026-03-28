@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.9
+
+### Fixes
+- Start server before indexing — tools available immediately, search fills in progressively
+- Fixes health check timeout loop on Fly.io with large vaults
+
 ## 0.4.8
 
 ### Fixes

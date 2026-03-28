@@ -74,77 +74,80 @@ const dataDir = join(baseDataDir, vaultId);
 const indexPath = join(dataDir, "search-index.json");
 const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
-// Load persisted metadata from disk (FlexSearch rebuilt from vault on every startup)
-const hadPersistedIndex = await searchIndex.loadFromDisk();
-if (debugLogging && hadPersistedIndex) {
+// Load persisted metadata from disk (FlexSearch rebuilt from vault in background)
+await searchIndex.loadFromDisk();
+if (debugLogging) {
     console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
 }
-const start = performance.now();
 
-if (COUCHDB_URL && vault.catchUp) {
-    // CouchDB mode: use _changes feed to catch up from persisted sequence
-    const changeCallback = (path: string, content: string | null, mtime?: number) => {
-        if (content) {
-            searchIndex.update(path, content, mtime);
-        } else {
-            searchIndex.remove(path);
-        }
-    };
+// Rebuild FlexSearch index in background (server starts immediately, search fills in progressively)
+async function rebuildIndex() {
+    const start = performance.now();
 
-    let since = searchIndex.since || "0";
-    if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
-    let changes = 0;
-    const onBatch = async (batchSince: string, processed: number) => {
-        searchIndex.since = batchSince;
-        await searchIndex.saveToDisk();
-        console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
-    };
-    try {
-        const countingCallback = (path: string, content: string | null, mtime?: number) => {
-            changes++;
-            if (debugLogging) console.log(`[debug] Change: ${path} ${content ? "(update)" : "(delete)"}`);
-            changeCallback(path, content, mtime);
-        };
-        const newSince = await vault.catchUp(since, countingCallback, onBatch);
-        searchIndex.since = newSince;
-    } catch (err) {
-        // Invalid since (DB nuked/recreated) — clear index and rebuild from scratch
-        console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
-        searchIndex.clear();
-        changes = 0;
-        const newSince = await vault.catchUp("0", (path, content, mtime) => {
-            changes++;
-            changeCallback(path, content, mtime);
-        }, onBatch);
-        searchIndex.since = newSince;
-    }
-    if (changes > 0) {
-        console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
-    } else {
-        console.log(`Search index up to date (${searchIndex.size} notes).`);
-    }
-} else if (VAULT_PATH) {
-    // Local mode: read all notes to build FlexSearch index
-    const notesWithMtime = await vault.listNotesWithMtime();
-    if (debugLogging) console.log(`[debug] Vault has ${notesWithMtime.length} notes`);
-    if (notesWithMtime.length > 0) {
-        // Remove stale entries (deleted while MCP was down)
-        const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
-        for (const p of searchIndex.listPaths()) {
-            if (!vaultPaths.has(p)) searchIndex.remove(p);
-        }
-        console.log(`Building search index (${notesWithMtime.length} notes)...`);
-        for (let i = 0; i < notesWithMtime.length; i++) {
-            const { path, mtime } = notesWithMtime[i];
-            const content = await vault.readNote(path);
-            if (content) searchIndex.update(path, content, mtime);
-            if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
-                console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
+    if (COUCHDB_URL && vault.catchUp) {
+        const changeCallback = (path: string, content: string | null, mtime?: number) => {
+            if (content) {
+                searchIndex.update(path, content, mtime);
+            } else {
+                searchIndex.remove(path);
             }
+        };
+
+        let since = searchIndex.since || "0";
+        if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
+        let changes = 0;
+        const onBatch = async (batchSince: string, processed: number) => {
+            searchIndex.since = batchSince;
+            await searchIndex.saveToDisk();
+            console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
+        };
+        try {
+            const countingCallback = (path: string, content: string | null, mtime?: number) => {
+                changes++;
+                if (debugLogging) console.log(`[debug] Change: ${path} ${content ? "(update)" : "(delete)"}`);
+                changeCallback(path, content, mtime);
+            };
+            const newSince = await vault.catchUp(since, countingCallback, onBatch);
+            searchIndex.since = newSince;
+        } catch (err) {
+            console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
+            searchIndex.clear();
+            changes = 0;
+            const newSince = await vault.catchUp("0", (path, content, mtime) => {
+                changes++;
+                changeCallback(path, content, mtime);
+            }, onBatch);
+            searchIndex.since = newSince;
         }
-        console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+        if (changes > 0) {
+            console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
+        } else {
+            console.log(`Search index up to date (${searchIndex.size} notes).`);
+        }
+    } else if (VAULT_PATH) {
+        const notesWithMtime = await vault.listNotesWithMtime();
+        if (debugLogging) console.log(`[debug] Vault has ${notesWithMtime.length} notes`);
+        if (notesWithMtime.length > 0) {
+            const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
+            for (const p of searchIndex.listPaths()) {
+                if (!vaultPaths.has(p)) searchIndex.remove(p);
+            }
+            console.log(`Building search index (${notesWithMtime.length} notes)...`);
+            for (let i = 0; i < notesWithMtime.length; i++) {
+                const { path, mtime } = notesWithMtime[i];
+                const content = await vault.readNote(path);
+                if (content) searchIndex.update(path, content, mtime);
+                if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
+                    console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
+                }
+            }
+            console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+        }
     }
+    await searchIndex.saveToDisk();
 }
+// Fire and forget — server starts while index builds
+rebuildIndex().catch((err) => console.error("Index rebuild failed:", err));
 
 // --- Watch for external changes ---
 let fsWatcher: ReturnType<typeof watch> | null = null;
