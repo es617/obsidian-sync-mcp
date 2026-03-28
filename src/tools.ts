@@ -1,7 +1,6 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
-import { extractSnippet } from "./parse.js";
 import type { VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 
@@ -63,12 +62,16 @@ export function registerTools(
 
     server.addTool({
         name: "list_notes",
-        description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(modified_after='2026-03-25', sort_by='modified') for today's changes. list_notes(folder='daily') for a specific folder. list_notes(tag='project') for notes with a specific tag. Returns up to 100 notes by default.",
+        description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(name='meeting') to find notes by name. list_notes(folder='daily') for a specific folder. list_notes(tag='project') for notes with a specific tag. Returns up to 100 notes by default.",
         parameters: z.object({
             folder: z
                 .string()
                 .optional()
                 .describe("Folder to filter by, e.g. 'daily' or 'projects'. Omit for all notes."),
+            name: z
+                .string()
+                .optional()
+                .describe("Filter by name (case-insensitive substring match on path), e.g. 'meeting' or 'project-x'."),
             tag: z
                 .string()
                 .optional()
@@ -86,11 +89,15 @@ export function registerTools(
                 .optional()
                 .describe("Max number of notes to return. Default 100."),
         }),
-        execute: async ({ folder, tag, sort_by, modified_after, limit }) => {
+        execute: async ({ folder, name, tag, sort_by, modified_after, limit }) => {
             // Use search index (works with encrypted vaults), fall back to vault
             let notes = searchIndex.listWithMtime(folder);
             if (notes.length === 0) {
                 notes = await vault.listNotesWithMtime(folder);
+            }
+            if (name) {
+                const lower = name.toLowerCase();
+                notes = notes.filter((n) => n.path.toLowerCase().includes(lower));
             }
             if (tag) {
                 notes = notes.filter((n) => searchIndex.getTags(n.path).includes(tag));
@@ -158,7 +165,7 @@ export function registerTools(
     server.addTool({
         name: "list_tags",
         description:
-            "List all tags used in the vault, sorted by frequency. Use this to discover tags before filtering with list_notes or search_vault.",
+            "List all tags used in the vault, sorted by frequency. Use this to discover tags before filtering with list_notes.",
         parameters: z.object({}),
         execute: async () => {
             const tags = searchIndex.listAllTags();
@@ -169,51 +176,7 @@ export function registerTools(
         },
     });
 
-    server.addTool({
-        name: "search_vault",
-        description: "Full-text search across all notes (matches words, not substrings). Returns matching paths. Use modified_after to search only recent notes. Use tag to filter by tag. Set include_snippets=true to include surrounding content for each match.",
-        parameters: z.object({
-            query: z.string().describe("Text to search for (case-insensitive)"),
-            tag: z
-                .string()
-                .optional()
-                .describe("Filter results by tag, e.g. 'project'. Use list_tags to discover available tags."),
-            modified_after: z
-                .string()
-                .optional()
-                .describe("Only include notes modified after this ISO date, e.g. '2026-03-25'."),
-            include_snippets: z.coerce
-                .boolean()
-                .optional()
-                .describe("Fetch content snippets for each result. Default false (paths only)."),
-        }),
-        execute: async ({ query, tag, modified_after, include_snippets }) => {
-            let paths = searchIndex.search(query);
-            if (tag) {
-                paths = paths.filter((p) => searchIndex.getTags(p).includes(tag));
-            }
-            if (modified_after) {
-                const cutoff = new Date(modified_after).getTime();
-                if (isNaN(cutoff)) return `Invalid date format: ${modified_after}. Use ISO format like '2026-03-25'.`;
-                paths = paths.filter((p) => searchIndex.getMtime(p) >= cutoff);
-            }
-            if (paths.length === 0) {
-                return `No results for: ${query}`;
-            }
-            const lines: string[] = [];
-            for (const path of paths) {
-                const deepLink = makeDeepLink(vaultName, path);
-                if (include_snippets) {
-                    const content = await vault.readNote(path);
-                    const snippet = content ? extractSnippet(content, query) : "";
-                    lines.push(`### [${path}](${deepLink})\n\`\`\`\n${snippet}\n\`\`\``);
-                } else {
-                    lines.push(`- [${path}](${deepLink})`);
-                }
-            }
-            return lines.join(include_snippets ? "\n\n" : "\n");
-        },
-    });
+
 
     server.addTool({
         name: "edit_note",

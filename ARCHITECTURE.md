@@ -33,7 +33,7 @@ The MCP server sits between CouchDB (or the local filesystem) and AI agents. It 
 A single `SearchIndex` class manages all indexed data in memory:
 
 ```
-FlexSearch Document index ─── full-text tokenized search (forward tokenizer)
+(no full-text search — metadata only)
 knownPaths: Set<string>   ─── all indexed note paths
 mtimes: Map<path, number> ─── modification timestamps
 tags: Map<path, string[]> ─── extracted from frontmatter + inline #tags
@@ -45,7 +45,7 @@ since: string             ─── CouchDB _changes sequence (CouchDB mode only
 ### Persistence
 
 Everything is serialized to a single JSON file at `DATA_DIR/<vault-hash>/search-index.json`:
-- FlexSearch tokenized index (via export/import API)
+- No full-text index (removed FlexSearch for memory efficiency)
 - Metadata (mtimes, tags, links, since)
 - Encrypted with AES-256-GCM when `COUCHDB_PASSPHRASE` is set
 - Saved every 5 minutes + on graceful shutdown
@@ -69,7 +69,7 @@ Start live _changes watcher (since: current)
 **Filesystem mode:**
 ```
 Load persisted index from disk
-  ↓ (has FlexSearch data?)
+  ↓
 Diff mtimes against filesystem
   → remove stale entries (deleted files)
   → read only changed/new files
@@ -169,6 +169,5 @@ livesync-commonlib is a Deno-style TypeScript library compiled for Node via tsup
 
 - **livesync-commonlib** (git submodule) — CouchDB document handling, chunk reassembly, E2E encryption
 - **FastMCP** — MCP server framework
-- **FlexSearch** — full-text search engine
 - **Hono** — HTTP framework (used by FastMCP, we add OAuth routes)
 - **PouchDB** — CouchDB client (transitive via livesync-commonlib)

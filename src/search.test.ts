@@ -16,48 +16,6 @@ after(async () => {
 });
 
 describe("SearchIndex", () => {
-    it("indexes and searches notes", () => {
-        const idx = new SearchIndex();
-        idx.update("hello.md", "The quick brown fox jumps over the lazy dog");
-        idx.update("world.md", "Lorem ipsum dolor sit amet");
-
-        const results = idx.search("quick brown");
-        assert.equal(results.length, 1);
-        assert.equal(results[0], "hello.md");
-    });
-
-    it("returns empty for no match", () => {
-        const idx = new SearchIndex();
-        idx.update("note.md", "Some content here");
-        assert.deepEqual(idx.search("nonexistent_xyz"), []);
-    });
-
-    it("updates existing note", () => {
-        const idx = new SearchIndex();
-        idx.update("note.md", "old content with keyword alpha");
-        idx.update("note.md", "new content with keyword beta");
-
-        assert.equal(idx.search("alpha").length, 0);
-        assert.equal(idx.search("beta").length, 1);
-    });
-
-    it("removes a note", () => {
-        const idx = new SearchIndex();
-        idx.update("note.md", "searchable content");
-        idx.remove("note.md");
-        assert.deepEqual(idx.search("searchable"), []);
-        assert.equal(idx.size, 0);
-    });
-
-    it("caps results at 50", () => {
-        const idx = new SearchIndex();
-        for (let i = 0; i < 100; i++) {
-            idx.update(`note-${i}.md`, `findme content number ${i}`);
-        }
-        const results = idx.search("findme");
-        assert.ok(results.length <= 50);
-    });
-
     it("tracks size correctly", () => {
         const idx = new SearchIndex();
         assert.equal(idx.size, 0);
@@ -193,9 +151,7 @@ describe("SearchIndex persistence", () => {
         // Backlinks survive persistence
         assert.deepEqual(idx2.getBacklinks("note1.md"), ["note2.md"]);
 
-        // FlexSearch is not persisted — rebuilt on startup from vault
-        const results = idx2.search("Hello");
-        assert.equal(results.length, 0, "FlexSearch should be empty after load (rebuilt from vault)");
+        // Metadata survives persistence (no FlexSearch)
     });
 
     it("saves and loads encrypted when passphrase set", async () => {

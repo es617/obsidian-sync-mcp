@@ -53,7 +53,6 @@ tags: [smoke-test, reference]
 Reference material for [[test-smoke/project]].
 
 CouchDB uses a _changes feed for real-time sync. Compaction removes old revisions.
-FlexSearch provides full-text search with forward tokenization.
 """)
 
 write_note(path='test-smoke/daily.md', content="""---
@@ -86,26 +85,16 @@ list_tags()
 
 ---
 
-### 4. Search
+### 4. Name and tag filtering
 
 ```
-search_vault(query='FlexSearch')
-search_vault(query='CouchDB compaction', include_snippets=true)
-```
-
-**Expected**: First search finds `test-smoke/notes.md`. Second search returns snippet with matching text.
-
----
-
-### 5. Tag filtering
-
-```
+list_notes(name='notes')
 list_notes(tag='smoke-test')
 list_notes(tag='reference')
-search_vault(query='project', tag='daily')
+list_notes(tag='daily', folder='test-smoke')
 ```
 
-**Expected**: First returns all 3 test notes. Second returns only `test-smoke/notes.md`. Third finds `test-smoke/daily.md` (has #daily tag and mentions "project").
+**Expected**: First finds notes with "notes" in path. Second returns all 3 test notes. Third returns only `test-smoke/notes.md`. Fourth finds `test-smoke/daily.md`.
 
 ---
 

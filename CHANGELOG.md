@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0
+
+### Breaking Changes
+- Remove `search_vault` tool and FlexSearch dependency — full-text search caused OOM on large encrypted vaults
+- `list_notes` gains `name` parameter (case-insensitive substring match on path) as replacement for finding notes
+
+### Changes
+- Metadata index only: paths, mtimes, tags, links, backlinks (no full-text content indexing)
+- Dramatically reduced memory usage — works on 512MB containers with any vault size
+- Faster startup — no FlexSearch rebuild needed
+
 ## 0.4.10
 
 ### Fixes

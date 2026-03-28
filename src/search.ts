@@ -1,20 +1,16 @@
 /**
- * Full-text search index backed by FlexSearch.
+ * Metadata index for vault notes.
  *
- * - Updates incrementally on write/delete/move
- * - Persists everything to disk (encrypted if passphrase is set):
- *   metadata (mtimes, tags, links) + FlexSearch tokenized index
- * - Cold start loads from disk, diffs mtimes, reads only changed notes
- * - Survives suspend/resume (memory preserved) and cold restarts (disk)
+ * Tracks paths, mtimes, tags, links, and backlinks.
+ * Persists to disk (encrypted if passphrase is set).
+ * No full-text search — metadata only.
  */
 
-import FlexSearch from "flexsearch";
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { parseFrontmatterAndLinks } from "./parse.js";
 
-const MAX_RESULTS = 50;
 
 function encrypt(text: string, passphrase: string): string {
     const salt = randomBytes(16);
@@ -35,7 +31,6 @@ function decrypt(data: string, passphrase: string): string {
 }
 
 export class SearchIndex {
-    private index: FlexSearch.Document<{ path: string; content: string }>;
     private mtimes = new Map<string, number>();
     private tags = new Map<string, string[]>();
     private links = new Map<string, string[]>();
@@ -49,13 +44,9 @@ export class SearchIndex {
     constructor(persistPath?: string, passphrase?: string) {
         this.persistPath = persistPath ?? null;
         this.passphrase = passphrase ?? null;
-        this.index = new FlexSearch.Document({
-            document: { id: "path", index: ["content", "path"] },
-            tokenize: "forward",
-        });
     }
 
-    /** Load metadata from disk (FlexSearch rebuilt on startup from vault). */
+    /** Load metadata from disk. */
     async loadFromDisk(): Promise<boolean> {
         if (!this.persistPath) return false;
         try {
@@ -88,7 +79,7 @@ export class SearchIndex {
         }
     }
 
-    /** Save metadata to disk (no FlexSearch — rebuilt on startup). Encrypted if passphrase is set. */
+    /** Save metadata to disk. Encrypted if passphrase is set. */
     async saveToDisk(): Promise<void> {
         if (!this.persistPath || this.saving) return;
         this.saving = true;
@@ -116,10 +107,8 @@ export class SearchIndex {
     /** Add or update a note in the index. */
     update(path: string, content: string, mtime?: number): void {
         if (this.knownPaths.has(path)) {
-            this.index.remove(path);
             this.clearBacklinks(path);
         }
-        this.index.add({ path, content });
         this.knownPaths.add(path);
         if (mtime !== undefined) this.mtimes.set(path, mtime);
         const parsed = parseFrontmatterAndLinks(content);
@@ -143,7 +132,6 @@ export class SearchIndex {
     /** Remove a note from the index. */
     remove(path: string): void {
         if (this.knownPaths.has(path)) {
-            this.index.remove(path);
             this.knownPaths.delete(path);
             this.mtimes.delete(path);
             this.tags.delete(path);
@@ -162,22 +150,6 @@ export class SearchIndex {
             }
         }
         this.links.delete(path);
-    }
-
-    /** Search for a query. Returns matching paths (caller fetches content for snippets). */
-    search(query: string): string[] {
-        const results = this.index.search(query, { limit: MAX_RESULTS });
-
-        const paths = new Set<string>();
-        for (const result of results) {
-            if (result.result) {
-                for (const id of result.result) {
-                    paths.add(id as string);
-                }
-            }
-        }
-
-        return [...paths].slice(0, MAX_RESULTS);
     }
 
     /** List all indexed paths, optionally filtered by folder prefix. */

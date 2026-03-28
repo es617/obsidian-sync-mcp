@@ -74,13 +74,13 @@ const dataDir = join(baseDataDir, vaultId);
 const indexPath = join(dataDir, "search-index.json");
 const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
 
-// Load persisted metadata from disk (FlexSearch rebuilt from vault in background)
+// Load persisted metadata from disk
 await searchIndex.loadFromDisk();
 if (debugLogging) {
     console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
 }
 
-// Rebuild FlexSearch index in background (server starts immediately, search fills in progressively)
+// Sync metadata in background (server starts immediately)
 async function rebuildIndex() {
     const start = performance.now();
 

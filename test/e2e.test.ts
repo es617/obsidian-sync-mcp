@@ -189,18 +189,6 @@ describe("E2E: edit_note", () => {
     });
 });
 
-describe("E2E: search_vault", () => {
-    it("finds notes by content", async () => {
-        const text = await callTool("search_vault", { query: "Goodbye world" });
-        assert.ok(text.includes("Welcome.md"));
-    });
-
-    it("returns snippets when requested", async () => {
-        const text = await callTool("search_vault", { query: "Goodbye world", include_snippets: true });
-        assert.ok(text.includes("Goodbye world"));
-    });
-});
-
 describe("E2E: list_folders", () => {
     it("lists all folders with counts", async () => {
         const text = await callTool("list_folders");
@@ -276,20 +264,15 @@ describe("E2E: cold restart with persisted index", () => {
             "Should rebuild index on restart",
         );
 
-        // New note should be searchable
-        const searchNew = await callTool("search_vault", { query: "freshcontent" });
-        assert.ok(searchNew.includes("new-while-down.md"), "New note should be found");
+        // New note should be listed
+        const listNew = await callTool("list_notes", { name: "new-while-down" });
+        assert.ok(listNew.includes("new-while-down.md"), "New note should be found");
 
-        // Updated note should have new content
-        const searchUpdated = await callTool("search_vault", { query: "uniqueword" });
-        assert.ok(searchUpdated.includes("daily/2026-03-24.md"), "Updated note should be found");
+        // Updated note should be listed
+        const list = await callTool("list_notes");
+        assert.ok(list.includes("daily/2026-03-24.md"), "Updated note should be found");
 
         // Deleted note should be gone
-        const list = await callTool("list_notes");
         assert.ok(!list.includes("projects/test.md"), "Deleted note should not appear");
-
-        // Deleted note should not be in search results
-        const searchOld = await callTool("search_vault", { query: "Welcome" });
-        assert.ok(!searchOld.includes("projects/test.md"), "Deleted note should not appear in search");
     });
 });

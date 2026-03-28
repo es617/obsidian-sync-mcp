@@ -203,8 +203,7 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | `edit_note` | Edit a note without rewriting it — append, prepend (after frontmatter), or replace exact text |
 | `list_folders` | List all folders in the vault with note counts — use to discover folder names |
 | `list_tags` | List all tags in the vault with counts — use to discover tags before filtering |
-| `list_notes` | List notes with timestamps. Filter by folder, tag, or date. Sort by name or modified. |
-| `search_vault` | Full-text search across all notes. Filter by tag or date, optionally include content snippets. |
+| `list_notes` | List notes with timestamps. Filter by folder, name, tag, or date. Sort by name or modified. |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
 | `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, and timestamps — navigate the knowledge graph |
@@ -253,7 +252,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |
 | `PORT` | Optional | `8787` | HTTP port |
 | `HOST` | Optional | `0.0.0.0` | Bind address (`127.0.0.1` to restrict to localhost) |
-| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (search index, auth tokens) |
+| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (metadata index, auth tokens) |
 | `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync) |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 
@@ -331,6 +330,5 @@ MIT — see [LICENSE](https://github.com/es617/obsidian-sync-mcp/blob/main/LICEN
 - [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) by vrtmrz — the Obsidian plugin and CouchDB sync protocol
 - [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) by vrtmrz — the shared library for reading/writing the LiveSync document format
 - [FastMCP](https://github.com/punkpeye/fastmcp) — TypeScript MCP framework
-- [FlexSearch](https://github.com/nextapps-de/flexsearch) — full-text search engine
 - [CouchDB](https://couchdb.apache.org/) — document database
 - [Fly.io](https://fly.io/) — deployment platform
