@@ -62,23 +62,46 @@ export class Vault implements VaultBackend {
         }
     }
 
-    async catchUp(since: string, callback: (path: string, content: string | null, mtime?: number) => void): Promise<string> {
-        // Use PouchDB _changes with same selector as beginWatch (not followUpdates
-        // which relies on a "replicate/pull" filter that may not exist on the DB).
+    async catchUp(
+        since: string,
+        callback: (path: string, content: string | null, mtime?: number) => void,
+        onBatch?: (since: string, processed: number) => Promise<void>,
+    ): Promise<string> {
+        // Paginate _changes in batches to limit memory usage.
+        const BATCH_SIZE = 50;
         const db = this.manipulator.liveSyncLocalDB.localDatabase;
-        const result = await db.changes({
-            include_docs: true,
-            since,
-            selector: { type: { $ne: "leaf" } },
-            live: false,
-        });
-        for (const change of result.results) {
-            if (!change.doc) continue;
-            const doc = await this.manipulator.getByMeta(change.doc as any).catch(() => null);
-            if (doc) Vault.docToChange(doc, callback);
+        let currentSince = since;
+        let totalProcessed = 0;
+
+        while (true) {
+            const result = await db.changes({
+                include_docs: true,
+                since: currentSince,
+                selector: { type: { $ne: "leaf" } },
+                live: false,
+                limit: BATCH_SIZE,
+            });
+
+            for (const change of result.results) {
+                if (!change.doc) continue;
+                const doc = await this.manipulator.getByMeta(change.doc as any).catch(() => null);
+                if (doc) Vault.docToChange(doc, callback);
+            }
+
+            totalProcessed += result.results.length;
+            currentSince = String(result.last_seq);
+
+            // Save checkpoint after each batch so crashes don't restart from zero
+            if (onBatch && result.results.length > 0) {
+                await onBatch(currentSince, totalProcessed);
+            }
+
+            // No more changes
+            if (result.results.length < BATCH_SIZE) break;
         }
-        this.manipulator.since = String(result.last_seq);
-        return String(result.last_seq);
+
+        this.manipulator.since = currentSince;
+        return currentSince;
     }
 
     watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void {

@@ -24,5 +24,5 @@ export interface VaultBackend {
     listNotesWithMtime(folder?: string): Promise<NoteListing[]>;
     watchChanges?(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void;
     /** Catch up on changes since a sequence. Returns the new sequence. CouchDB only. */
-    catchUp?(since: string, callback: (path: string, content: string | null, mtime?: number) => void): Promise<string>;
+    catchUp?(since: string, callback: (path: string, content: string | null, mtime?: number) => void, onBatch?: (since: string, processed: number) => Promise<void>): Promise<string>;
 }

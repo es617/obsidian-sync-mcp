@@ -94,13 +94,18 @@ if (COUCHDB_URL && vault.catchUp) {
     let since = searchIndex.since || "0";
     if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
     let changes = 0;
+    const onBatch = async (batchSince: string, processed: number) => {
+        searchIndex.since = batchSince;
+        await searchIndex.saveToDisk();
+        console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
+    };
     try {
         const countingCallback = (path: string, content: string | null, mtime?: number) => {
             changes++;
             if (debugLogging) console.log(`[debug] Change: ${path} ${content ? "(update)" : "(delete)"}`);
             changeCallback(path, content, mtime);
         };
-        const newSince = await vault.catchUp(since, countingCallback);
+        const newSince = await vault.catchUp(since, countingCallback, onBatch);
         searchIndex.since = newSince;
     } catch (err) {
         // Invalid since (DB nuked/recreated) — clear index and rebuild from scratch
@@ -110,7 +115,7 @@ if (COUCHDB_URL && vault.catchUp) {
         const newSince = await vault.catchUp("0", (path, content, mtime) => {
             changes++;
             changeCallback(path, content, mtime);
-        });
+        }, onBatch);
         searchIndex.since = newSince;
     }
     if (changes > 0) {
