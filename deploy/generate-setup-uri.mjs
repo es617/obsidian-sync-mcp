@@ -43,6 +43,7 @@ const conf = {
     handleFilenameCaseSensitive: false,
     doNotUseFixedRevisionForChunks: true,
     usePluginSyncV2: true,
+    E2EEAlgorithm: "v2",
     settingVersion: 10,
     notifyThresholdOfRemoteStorageSize: 800,
 };

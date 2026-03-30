@@ -8,6 +8,7 @@ import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
+import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 
@@ -146,6 +147,10 @@ export class Vault implements VaultBackend {
 
     async writeNote(path: string, content: string): Promise<boolean> {
         this.validatePath(path);
+        // Clear cached PBKDF2 salt so we re-fetch from CouchDB before encrypting.
+        // Prevents stale salt after Obsidian "Overwrite remote" rebuilds (issue #686).
+        clearHandlers();
+
         // Preserve ctime if note already exists
         let ctime = Date.now();
         const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
@@ -163,6 +168,7 @@ export class Vault implements VaultBackend {
 
     async deleteNote(path: string): Promise<boolean> {
         this.validatePath(path);
+        clearHandlers();
         return await this.manipulator.delete(path);
     }
 

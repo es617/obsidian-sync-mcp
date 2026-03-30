@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+### Fixes
+- Fix HKDF decryption error after Obsidian "Overwrite remote" rebuild — MCP was caching a stale PBKDF2 salt, causing notes written by MCP to be unreadable by the LiveSync plugin
+- Clear encryption key cache before each write/delete to always use the current salt from CouchDB
+- Add `E2EEAlgorithm: "v2"` to generated Setup URIs
+
 ## 0.5.1
 
 ### Features
