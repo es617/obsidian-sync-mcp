@@ -32,6 +32,7 @@ const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
 const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
+const READ_ONLY = process.env.READ_ONLY === "true";
 
 // --- Initialize vault (local or remote) ---
 import type { VaultBackend } from "./vault-backend.js";
@@ -239,7 +240,7 @@ if (AUTH_TOKEN) {
 }
 
 // --- Tools ---
-registerTools(server, vault, searchIndex, VAULT_NAME);
+registerTools(server, vault, searchIndex, VAULT_NAME, READ_ONLY);
 
 // --- Graceful shutdown ---
 async function shutdown() {

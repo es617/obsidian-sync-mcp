@@ -6,12 +6,18 @@ import type { SearchIndex } from "./search.js";
 
 const debugLogging = process.env.LOG_LEVEL === "debug";
 
+const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as const;
+
 export function registerTools(
     server: FastMCP,
     vault: VaultBackend,
     searchIndex: SearchIndex,
     vaultName: string,
+    readOnly = false,
 ) {
+    if (readOnly) {
+        console.log(`READ_ONLY mode: write tools disabled (${WRITE_TOOLS.join(", ")}).`);
+    }
     const _addTool = server.addTool.bind(server);
     server.addTool = (tool: any) => {
         const original = tool.execute;
@@ -41,7 +47,7 @@ export function registerTools(
         },
     });
 
-    server.addTool({
+    if (!readOnly) server.addTool({
         name: "write_note",
         description:
             "Write or update a note in the Obsidian vault. Creates the note if it doesn't exist. Replaces the entire content if it does — read first if you need to preserve existing content.",
@@ -178,7 +184,7 @@ export function registerTools(
 
 
 
-    server.addTool({
+    if (!readOnly) server.addTool({
         name: "edit_note",
         description:
             "Edit a note without rewriting it. Use 'append' (default) to add content to the end, 'prepend' to add after frontmatter, or 'replace' to swap old_text with new content. For replace, the old_text must match exactly once.",
@@ -239,7 +245,7 @@ export function registerTools(
         },
     });
 
-    server.addTool({
+    if (!readOnly) server.addTool({
         name: "delete_note",
         description: "Delete a note from the Obsidian vault.",
         parameters: z.object({
@@ -252,7 +258,7 @@ export function registerTools(
         },
     });
 
-    server.addTool({
+    if (!readOnly) server.addTool({
         name: "move_note",
         description:
             "Move or rename a note. Use this to rename a note within the same folder, move it to a different folder, or both at once. Creates destination folders automatically.",
