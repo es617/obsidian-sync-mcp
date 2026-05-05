@@ -243,6 +243,27 @@ describe("E2E: delete_note", () => {
 
 // --- Restart Test ---
 
+describe("E2E: READ_ONLY mode", () => {
+    it("hides write tools and rejects write calls when READ_ONLY=true", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", READ_ONLY: "true" });
+        assert.ok(serverLogs.includes("READ_ONLY mode"), "should log READ_ONLY mode at startup");
+
+        const list = await mcpCall("tools/list", {});
+        const tools: string[] = (list?.result?.tools ?? []).map((t: any) => t.name);
+        for (const w of ["write_note", "edit_note", "delete_note", "move_note"]) {
+            assert.ok(!tools.includes(w), `${w} should not be registered in READ_ONLY mode`);
+        }
+        for (const r of ["read_note", "list_notes", "list_folders", "list_tags", "get_note_metadata"]) {
+            assert.ok(tools.includes(r), `${r} should remain available in READ_ONLY mode`);
+        }
+
+        const resp = await mcpCall("tools/call", { name: "write_note", arguments: { path: "blocked.md", content: "x" } });
+        assert.ok(resp?.error, "write_note call should return an error");
+        assert.ok(!existsSync(join(vaultDir, "blocked.md")), "no file should be created when write is blocked");
+    });
+});
+
 describe("E2E: cold restart with persisted index", () => {
     it("picks up changes and removes stale entries after restart", async () => {
         // Stop server (triggers saveToDisk)
