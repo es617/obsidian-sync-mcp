@@ -120,10 +120,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
+      # Node 20 (LTS) — Node 22.22.2's bundled npm is broken on GHA runners
+      # (nodejs/node#62425), causing both self-upgrade crashes and OIDC publish
+      # failures. Node 20's bundled npm self-upgrades cleanly.
       - uses: actions/setup-node@v5
         with:
-          node-version: "22"
+          node-version: "20"
           registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm run build
       - run: npm publish --provenance --access public
