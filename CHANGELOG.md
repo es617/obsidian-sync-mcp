@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+### Features
+- New `READ_ONLY=true` env var disables write tools (`write_note`, `edit_note`, `delete_note`, `move_note`) — useful when exposing the server to multiple AI clients (#1, #3)
+
+### Fixes
+- Bump axios (1.13.6 → 1.16.0) and other transitive deps to clear high-severity npm audit advisories (SSRF, prototype pollution)
+
 ## 0.5.2
 
 ### Fixes

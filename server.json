@@ -6,12 +6,12 @@
     "url": "https://github.com/es617/obsidian-sync-mcp.git",
     "source": "github"
   },
-  "version": "0.5.2",
+  "version": "0.5.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "obsidian-sync-mcp",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:8787/mcp"
@@ -93,6 +93,13 @@
           "format": "string",
           "isSecret": false,
           "name": "PORT"
+        },
+        {
+          "description": "Set to 'true' to disable all write tools (write_note, edit_note, delete_note, move_note). Useful when exposing the server to multiple AI clients.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "READ_ONLY"
         }
       ]
     }
