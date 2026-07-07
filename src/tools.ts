@@ -70,6 +70,7 @@ export function registerTools(
         name: "list_notes",
         description: "List markdown notes in the vault with modification timestamps. Examples: list_notes(sort_by='modified', limit=10) for 10 most recent notes. list_notes(name='meeting') to find notes by name. list_notes(folder='daily') for a specific folder. list_notes(tag='project') for notes with a specific tag. Returns up to 100 notes by default.",
         parameters: z.object({
+            excludeEmpty: z.boolean().optional(),
             folder: z
                 .string()
                 .optional()
@@ -95,12 +96,12 @@ export function registerTools(
                 .optional()
                 .describe("Max number of notes to return. Default 100."),
         }),
-        execute: async ({ folder, name, tag, sort_by, modified_after, limit }) => {
+        execute: async ({ excludeEmpty, folder, name, tag, sort_by, modified_after, limit }) => {
             // Use search index (works with encrypted vaults), fall back to vault
-            let notes = searchIndex.listWithMtime(folder);
-            if (notes.length === 0) {
-                notes = await vault.listNotesWithMtime(folder);
-            }
+            let notes =
+                excludeEmpty && searchIndex.listWithMtime(folder).length > 0 ?
+                    searchIndex.listWithMtime(folder)
+                : await vault.listNotesWithMtime(folder);
             if (name) {
                 const lower = name.toLowerCase();
                 notes = notes.filter((n) => n.path.toLowerCase().includes(lower));

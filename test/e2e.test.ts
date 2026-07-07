@@ -149,6 +149,20 @@ describe("E2E: list_notes", () => {
         assert.ok(text.includes("Welcome.md"));
         assert.ok(!text.includes("projects/test.md"));
     });
+
+    it("includes zero-byte notes by default", async () => {
+        await writeFile(join(vaultDir, "empty.md"), "");
+        const text = await callTool("list_notes");
+        assert.ok(text.includes("empty.md"));
+        await unlink(join(vaultDir, "empty.md"));
+    });
+
+    it("excludes zero-byte notes when exclude_empty is true", async () => {
+        await writeFile(join(vaultDir, "empty.md"), "");
+        const text = await callTool("list_notes", { excludeEmpty: true });
+        assert.ok(!text.includes("empty.md"));
+        await unlink(join(vaultDir, "empty.md"));
+    });
 });
 
 describe("E2E: read_note", () => {
@@ -190,6 +204,7 @@ describe("E2E: edit_note", () => {
         assert.ok(!read.includes("Hello world"));
     });
 });
+
 
 describe("E2E: list_folders", () => {
     it("lists all folders with counts", async () => {
