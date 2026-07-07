@@ -11,6 +11,7 @@ import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/e
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
+import { deriveContent } from "./index-sync.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -58,12 +59,9 @@ export class Vault implements VaultBackend {
     private static docToChange(doc: any, callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void, seq?: string | number) {
         const path = doc.path ?? "";
         if (!path.endsWith(".md")) return;
-        if (doc.deleted) {
-            callback(path, null, undefined, seq);
-        } else {
-            const content = "data" in doc && Array.isArray(doc.data) ? doc.data.join("") : null;
-            callback(path, content, doc.mtime, seq);
-        }
+        // null => deleted (remove); "" => existing empty note (index it, don't drop)
+        const content = deriveContent(doc);
+        callback(path, content, content === null ? undefined : doc.mtime, seq);
     }
 
     async catchUp(

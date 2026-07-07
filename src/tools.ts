@@ -273,7 +273,8 @@ export function registerTools(
                 return `Failed to move: ${from} → ${to}`;
             }
             searchIndex.remove(from);
-            if (content) searchIndex.update(to, content, Date.now());
+            // content === "" is an empty-but-present note: keep it indexed at the new path.
+            if (content !== null) searchIndex.update(to, content, Date.now());
             const deepLink = makeDeepLink(vaultName, to);
             return `Moved: ${from} → ${to}\n[Open in Obsidian](${deepLink})`;
         },

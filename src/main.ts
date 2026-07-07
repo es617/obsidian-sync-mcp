@@ -6,6 +6,7 @@ import { stat } from "fs/promises";
 import { setGlobalLogFunction, LEVEL_INFO } from "octagonal-wheels/common/logger";
 import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
+import { applyIndexChange } from "./index-sync.js";
 import { registerTools } from "./tools.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
@@ -111,11 +112,8 @@ async function rebuildIndex() {
 
     if (COUCHDB_URL && vault.catchUp) {
         const changeCallback = (path: string, content: string | null, mtime?: number) => {
-            if (content) {
-                searchIndex.update(path, content, mtime);
-            } else {
-                searchIndex.remove(path);
-            }
+            // content === "" is an empty-but-present note: index it, don't drop it.
+            applyIndexChange(searchIndex, path, content, mtime);
         };
 
         let since = searchIndex.since || "0";
@@ -129,7 +127,7 @@ async function rebuildIndex() {
         try {
             const countingCallback = (path: string, content: string | null, mtime?: number) => {
                 changes++;
-                if (debugLogging) console.log(`[debug] Change: ${path} ${content ? "(update)" : "(delete)"}`);
+                if (debugLogging) console.log(`[debug] Change: ${path} ${content !== null ? "(update)" : "(delete)"}`);
                 changeCallback(path, content, mtime);
             };
             const newSince = await vault.catchUp(since, countingCallback, onBatch);
@@ -161,7 +159,8 @@ async function rebuildIndex() {
             for (let i = 0; i < notesWithMtime.length; i++) {
                 const { path, mtime } = notesWithMtime[i];
                 const content = await vault.readNote(path);
-                if (content) searchIndex.update(path, content, mtime);
+                // Index empty notes too (content === ""); readNote returns null only if absent.
+                if (content !== null) searchIndex.update(path, content, mtime);
                 if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
                     console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
                 }
@@ -208,13 +207,9 @@ if (VAULT_PATH) {
 } else if (COUCHDB_URL && vault.watchChanges) {
     // Remote mode: watch CouchDB _changes feed for LiveSync updates
     vault.watchChanges((path: string, content: string | null, mtime?: number, seq?: string | number) => {
-        if (content) {
-            if (debugLogging) console.log(`[debug] CouchDB change: ${path} (mtime: ${mtime})`);
-            searchIndex.update(path, content, mtime);
-        } else {
-            if (debugLogging) console.log(`[debug] CouchDB delete: ${path}`);
-            searchIndex.remove(path);
-        }
+        if (debugLogging) console.log(`[debug] CouchDB ${content === null ? "delete" : "change"}: ${path}`);
+        // content === "" is an empty-but-present note: index it, don't drop it.
+        applyIndexChange(searchIndex, path, content, mtime);
         if (seq) searchIndex.since = String(seq);
     });
     console.log("Watching CouchDB for LiveSync changes.");
