@@ -124,6 +124,41 @@ describe("Dynamic Client Registration", () => {
         assert.ok(body.client_id);
         assert.ok(body.client_secret);
         assert.deepEqual(body.redirect_uris, ["https://x.com/cb"]);
+        assert.equal(body.token_endpoint_auth_method, "client_secret_post");
+    });
+
+    it("honors token_endpoint_auth_method: none — no client_secret issued", async () => {
+        const { app } = setup();
+        const resp = await app.request("/oauth/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                client_name: "test",
+                redirect_uris: ["https://x.com/cb"],
+                token_endpoint_auth_method: "none",
+            }),
+        });
+        assert.equal(resp.status, 201);
+        const body = (await resp.json()) as any;
+        assert.equal(body.token_endpoint_auth_method, "none");
+        assert.equal(body.client_secret, undefined);
+    });
+
+    it("falls back to client_secret_post for an unrecognized auth method", async () => {
+        const { app } = setup();
+        const resp = await app.request("/oauth/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                client_name: "test",
+                redirect_uris: ["https://x.com/cb"],
+                token_endpoint_auth_method: "client_secret_basic",
+            }),
+        });
+        assert.equal(resp.status, 201);
+        const body = (await resp.json()) as any;
+        assert.equal(body.token_endpoint_auth_method, "client_secret_post");
+        assert.ok(body.client_secret);
     });
 });
 

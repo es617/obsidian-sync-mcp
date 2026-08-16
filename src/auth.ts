@@ -38,7 +38,8 @@ interface TokenRecord {
 
 interface RegisteredClient {
     clientId: string;
-    clientSecret: string;
+    clientSecret?: string;
+    tokenEndpointAuthMethod: "client_secret_post" | "none";
     redirectUris: string[];
     clientName?: string;
     createdAt?: number;
@@ -170,12 +171,19 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         }
 
         const clientId = randomUUID();
-        const clientSecret = randomBytes(32).toString("hex");
+        // Honor the client's requested auth method (RFC 7591 §2). Only
+        // "client_secret_post" and "none" are advertised as supported, so
+        // anything else falls back to the confidential-client default rather
+        // than silently registering a method we don't understand.
+        const tokenEndpointAuthMethod: "client_secret_post" | "none" =
+            body.token_endpoint_auth_method === "none" ? "none" : "client_secret_post";
+        const clientSecret = tokenEndpointAuthMethod === "none" ? undefined : randomBytes(32).toString("hex");
         const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 256) : undefined;
 
         const client: RegisteredClient = {
             clientId,
             clientSecret,
+            tokenEndpointAuthMethod,
             redirectUris,
             clientName,
             createdAt: Date.now(),
@@ -183,12 +191,17 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         clients.set(clientId, client);
         await persist();
 
+        console.log(
+            `Auth: registered client_id=${clientId} redirect_uris=${JSON.stringify(redirectUris)} ` +
+            `requested_auth_method=${body.token_endpoint_auth_method ?? "(unspecified)"} (responding with ${tokenEndpointAuthMethod})`
+        );
+
         return c.json({
             client_id: clientId,
-            client_secret: clientSecret,
+            ...(clientSecret ? { client_secret: clientSecret } : {}),
             redirect_uris: client.redirectUris,
             client_name: client.clientName,
-            token_endpoint_auth_method: "client_secret_post",
+            token_endpoint_auth_method: tokenEndpointAuthMethod,
         }, 201);
     });
 
@@ -204,14 +217,20 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         // Validate redirect URI against registered client
         const client = clients.get(clientId);
         if (!client) {
+            console.warn(`Auth: /oauth/authorize unknown client_id=${JSON.stringify(clientId)}`);
             return c.text("Unknown client", 400);
         }
         if (!client.redirectUris.includes(redirectUri)) {
+            console.warn(
+                `Auth: /oauth/authorize redirect_uri mismatch. received=${JSON.stringify(redirectUri)} ` +
+                `registered=${JSON.stringify(client.redirectUris)}`
+            );
             return c.text("Invalid redirect URI", 400);
         }
 
         // Require S256 PKCE
         if (codeChallengeMethod !== "S256" || !codeChallenge) {
+            console.warn(`Auth: /oauth/authorize missing/unsupported PKCE. method=${JSON.stringify(codeChallengeMethod)} challenge_present=${!!codeChallenge}`);
             return c.text("PKCE with S256 is required", 400);
         }
 
@@ -230,6 +249,8 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             code,
             createdAt: Date.now(),
         });
+
+        console.log(`Auth: /oauth/authorize accepted client_id=${clientId} redirect_uri=${JSON.stringify(redirectUri)}`);
 
         const csrf = randomBytes(32).toString("hex");
         csrfTokens.set(code, csrf);
@@ -307,6 +328,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
     app.post("/oauth/token", async (c) => {
         const body = await c.req.parseBody();
         const grantType = body["grant_type"] as string;
+        console.log(`Auth: /oauth/token request grant_type=${JSON.stringify(grantType)}`);
 
         if (grantType === "authorization_code") {
             const code = body["code"] as string;
@@ -316,17 +338,27 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
 
             const pending = pendingAuths.get(code);
             if (!pending || Date.now() - pending.createdAt > PENDING_TTL_MS) {
+                console.warn(
+                    `Auth: /oauth/token invalid_grant. code_known=${!!pending} ` +
+                    `expired=${pending ? Date.now() - pending.createdAt > PENDING_TTL_MS : "n/a"}`
+                );
                 if (pending) pendingAuths.delete(code);
                 return c.json({ error: "invalid_grant" }, 400);
             }
 
             // Verify client_id matches the original request
             if (clientId !== pending.clientId) {
+                console.warn(
+                    `Auth: /oauth/token client_id mismatch. received=${JSON.stringify(clientId)} expected=${JSON.stringify(pending.clientId)}`
+                );
                 return c.json({ error: "invalid_grant", error_description: "client_id mismatch" }, 400);
             }
 
             // Verify redirect_uri matches the original request
             if (redirectUri !== pending.redirectUri) {
+                console.warn(
+                    `Auth: /oauth/token redirect_uri mismatch. received=${JSON.stringify(redirectUri)} expected=${JSON.stringify(pending.redirectUri)}`
+                );
                 return c.json({ error: "invalid_grant", error_description: "redirect_uri mismatch" }, 400);
             }
 
@@ -336,11 +368,13 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
                     .update(codeVerifier)
                     .digest("base64url");
                 if (expected !== pending.codeChallenge) {
+                    console.warn("Auth: /oauth/token PKCE verification failed");
                     return c.json({ error: "invalid_grant", error_description: "PKCE verification failed" }, 400);
                 }
             }
 
             pendingAuths.delete(code);
+            console.log(`Auth: /oauth/token issuing access token client_id=${pending.clientId}`);
 
             const accessToken = randomBytes(32).toString("hex");
             const refreshToken = randomBytes(32).toString("hex");
@@ -367,6 +401,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             const refreshToken = body["refresh_token"] as string;
             const old = refreshTokens.get(refreshToken);
             if (!old) {
+                console.warn("Auth: /oauth/token refresh_token unknown");
                 return c.json({ error: "invalid_grant" }, 400);
             }
 
@@ -402,6 +437,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             });
         }
 
+        console.warn(`Auth: /oauth/token unsupported_grant_type=${JSON.stringify(grantType)}`);
         return c.json({ error: "unsupported_grant_type" }, 400);
     });
 
