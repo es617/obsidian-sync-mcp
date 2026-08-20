@@ -193,7 +193,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
 
         console.log(
             `Auth: registered client_id=${clientId} redirect_uris=${JSON.stringify(redirectUris)} ` +
-            `requested_auth_method=${body.token_endpoint_auth_method ?? "(unspecified)"} (responding with ${tokenEndpointAuthMethod})`
+            `requested_auth_method=${JSON.stringify(body.token_endpoint_auth_method ?? "(unspecified)")} (responding with ${tokenEndpointAuthMethod})`
         );
 
         return c.json({
