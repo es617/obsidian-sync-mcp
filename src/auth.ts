@@ -91,8 +91,8 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         try {
             await mkdir(dirname(persistPath), { recursive: true });
             const now = Date.now();
-            const activeTokens = [...tokens.entries()].filter(([_, r]) => r.expiresAt > now);
-            const activeRefresh = [...refreshTokens.entries()].filter(([_, r]) => r.refreshExpiresAt > now);
+            const activeTokens = [...tokens.entries()].filter(([, r]) => r.expiresAt > now);
+            const activeRefresh = [...refreshTokens.entries()].filter(([, r]) => r.refreshExpiresAt > now);
             const data = JSON.stringify({
                 tokens: Object.fromEntries(activeTokens),
                 refreshTokens: Object.fromEntries(activeRefresh),
