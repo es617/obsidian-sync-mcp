@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.3
+
+### Fixes
+- `/oauth/register` now honors `token_endpoint_auth_method: "none"` (RFC 7591): public clients registering with `"none"` no longer receive an unused `client_secret`, and the registration response reports the method actually granted. Unrecognized methods still fall back to `client_secret_post`, matching the discovery metadata. Contributed by @ityakonbu (#14).
+- Diagnostic logging across the OAuth flow: every rejection branch of `/oauth/authorize` and `/oauth/token` (unknown client, redirect_uri mismatch, PKCE failure, expired code, unknown refresh token) now logs why, with received-vs-expected values, so failed connections are debuggable from server logs instead of being invisible. Attacker-controllable values are escaped before logging. Contributed by @ityakonbu (#14).
+
+### Changes
+- Docker images are now published multi-arch (linux/amd64 + linux/arm64), fixing "exec format error" on arm64 hosts such as Raspberry Pi. Contributed by @Poag (#15).
+
 ## 0.6.2
 
 ### Fixes
