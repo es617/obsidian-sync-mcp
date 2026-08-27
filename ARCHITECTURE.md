@@ -19,48 +19,81 @@ The MCP server sits between CouchDB (or the local filesystem) and AI agents. It 
 ### Filesystem mode (`VAULT_PATH`)
 - Reads `.md` files directly from a vault directory
 - File watcher (debounced, 100ms per path) detects external edits
-- Startup: loads persisted index, diffs mtimes against filesystem, reads only changed files
+- Startup: opens the SQLite index, diffs mtimes against filesystem, reads only changed files
 
 ### CouchDB mode (`COUCHDB_URL`)
 - Uses `DirectFileManipulator` from [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) to read/write CouchDB documents
 - Handles E2E encryption (decrypt on read, encrypt on write) when `COUCHDB_PASSPHRASE` is set
 - Handles chunk reassembly (large notes are split into chunks by LiveSync)
-- Startup: loads persisted index, catches up via CouchDB `_changes` feed from stored `since` sequence
+- Startup: opens the SQLite index and catches up via CouchDB `_changes` from its stored `since` sequence
 - Live watcher: `_changes` feed with `live: true` for real-time updates
 
-## Search Index (`src/search.ts`)
+## Search indexes (`src/search.ts`, `src/full-text-search.ts`)
 
-A single `SearchIndex` class manages all indexed data in memory:
+A `SearchIndex` facade uses in-memory maps only when `FULL_TEXT_SEARCH=false`.
+The default path keeps durable search and metadata in one SQLite database:
 
 ```
-(no full-text search — metadata only)
-knownPaths: Set<string>   ─── all indexed note paths
-mtimes: Map<path, number> ─── modification timestamps
-tags: Map<path, string[]> ─── extracted from frontmatter + inline #tags
-links: Map<path, string[]>── outgoing [[wikilinks]] and [markdown](links.md)
-backlinks: Map<target, Set<source>> ─── reverse link index (case-insensitive keys)
-since: string             ─── CouchDB _changes sequence (CouchDB mode only)
+notes         ─── path, mtime, content hash, title, normalized lookup fields
+note_aliases  ─── exact and prefix alias lookup
+note_tags     ─── exact tag filtering and counts
+note_links    ─── outgoing links plus indexed backlink targets
+chunks        ─── heading-level passages with hierarchy breadcrumbs
+index_meta    ─── CouchDB `since` checkpoint
+notes_fts     ─── compact metadata candidate lane
+chunks_fts    ─── one Porter-stemmed passage index
 ```
+
+Markdown is split at headings; oversized sections are divided at paragraph
+boundaries with no overlap. Search combines exact SQL title/alias/path matches,
+metadata FTS, and stemmed passage BM25 using reciprocal-rank fusion. Passage
+matches are grouped to one best chunk per note before the final limit, avoiding
+long-note result flooding. Bodies are not retained in the JavaScript heap.
+
+`FULL_TEXT_SEARCH=auto` (the default) and `true` enable FTS for every vault.
+When a CouchDB passphrase is configured, scrypt first makes passphrase guessing
+expensive and HKDF then derives a backend-specific index key. The database uses
+SQLCipher-compatible AES-256 encryption with authenticated pages. Local and
+unencrypted remote vaults use ordinary SQLite because their source notes are
+already plaintext at rest. `FULL_TEXT_SEARCH=false` disables the tool and all
+index persistence, leaving an existing SQLite file untouched.
 
 ### Persistence
 
-Everything is serialized to a single JSON file at `DATA_DIR/<vault-hash>/search-index.json`:
-- No full-text index (removed FlexSearch for memory efficiency)
-- Metadata (mtimes, tags, links, since)
-- Encrypted with AES-256-GCM when `COUCHDB_PASSPHRASE` is set
-- Saved every 5 minutes + on graceful shutdown
-- Concurrent saves guarded by a lock flag
+Search v2 is stored at
+`DATA_DIR/backends/<backend-hash>/full-text-index-v2.sqlite` with mode `0600`.
+The hash comes from the canonical filesystem root or the credential-free
+CouchDB URL plus database name—not `VAULT_NAME`. That opaque identity is also
+stored in SQLite and included in encrypted-index key derivation, preventing
+results or a CouchDB checkpoint from being reused for another backend.
+SQLite incrementally commits metadata and content; there is no JSON
+snapshot or five-minute search-index save timer. CouchDB changes and their
+sequence checkpoint commit in the same bounded transaction, with an event-loop
+yield between batches. An incompatible schema is renamed to a timestamped
+`.bak` file before a clean rebuild.
+
+SQLite uses `DELETE` journaling and in-memory temporary tables. Encrypted index
+rollback journals contain encrypted pages, and encrypted schema/identity backups
+remain encrypted. The database, live journal, migration outputs, and backups are
+covered by plaintext-marker and `0600` permission tests. Plaintext-to-encrypted
+re-keying cannot erase copies retained by external snapshots or backups.
+
+The old `full-text-index.sqlite` file and the prototype
+`DATA_DIR/<vault-name-hash>/full-text-index-v2.sqlite` are deliberately
+untouched. Because the prototype cannot prove its backend ownership, this
+release rebuilds once instead of importing it. OAuth tokens remain at their
+established path, so the search migration does not force reauthentication.
 
 ### Startup flow
 
 **CouchDB mode:**
 ```
-Load persisted index from disk
+Open v2 SQLite index
   ↓ (has since?)
 catchUp(since) via _changes feed
   → process updates (searchIndex.update)
   → process deletes (searchIndex.remove)
-  → store new since
+  → atomically commit updates and new since every batch
   ↓
 Start live _changes watcher (since: current)
   → updates since on each change
@@ -68,7 +101,7 @@ Start live _changes watcher (since: current)
 
 **Filesystem mode:**
 ```
-Load persisted index from disk
+Open v2 SQLite index
   ↓
 Diff mtimes against filesystem
   → remove stale entries (deleted files)
@@ -83,11 +116,19 @@ CouchDB: catchUp(since: "0") → replays all changes
 Filesystem: full scan of all .md files
 ```
 
+During a build or catch-up, every index-backed tool response (`search_notes`,
+`list_notes`, `list_folders`, `list_tags`, and backlinks from
+`get_note_metadata`) explicitly identifies incomplete or stale data.
+
 ### Fault tolerance
-- Wrong passphrase / corrupted index: `loadFromDisk` catches errors, falls back to full rebuild
+- Wrong passphrase: startup fails without deleting or overwriting the encrypted index
+- Incompatible schema: archive the old database as `.bak`, then rebuild from the vault
+- Backend identity missing/mismatch: archive the database as `.bak`, discard its checkpoint, and rebuild
 - DB nuked (invalid `since`): `catchUp` errors, clears index, rebuilds from `since: "0"`
 - Volume nuked: no persisted index, full rebuild; auth tokens lost (users re-authenticate)
-- Crash during save: concurrent save guard prevents corruption; next restart rebuilds
+- Crash during catch-up: the last committed SQLite checkpoint resumes the next run
+- Rollback: stop cleanly and start the previous image with the same vault and
+  `DATA_DIR`; the v2 file does not replace or remove the prior release's index
 
 ## Vault Backend (`src/vault-backend.ts`)
 
@@ -148,7 +189,7 @@ Agent connects → /oauth/authorize → password page → /oauth/approve
 | `list_notes` | index (fallback: vault) | — |
 | `list_folders` | index (fallback: vault) | — |
 | `list_tags` | index | — |
-| `search_vault` | index + vault (for snippets) | — |
+| `search_notes` | disk-backed FTS index | — |
 | `get_note_metadata` | vault + index (backlinks) | — |
 | `move_note` | vault | vault + index |
 | `delete_note` | — | vault + index |
@@ -171,3 +212,4 @@ livesync-commonlib is a Deno-style TypeScript library compiled for Node via tsup
 - **FastMCP** — MCP server framework
 - **Hono** — HTTP framework (used by FastMCP, we add OAuth routes)
 - **PouchDB** — CouchDB client (transitive via livesync-commonlib)
+- **better-sqlite3-multiple-ciphers** — synchronous FTS5 and SQLCipher-compatible encrypted index storage

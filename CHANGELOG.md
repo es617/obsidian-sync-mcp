@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- Harden the encrypted full-text index key derivation with scrypt before HKDF. Search v2 uses a separate encrypted file, preserving the prototype index for rollback.
+- Scope search storage, encryption keys, and CouchDB checkpoints to a stable backend identity instead of `VAULT_NAME`. Unverifiable name-scoped indexes are left intact and rebuilt once; an identity mismatch inside SQLite is archived before rebuilding.
+
+### Features
+- Restore optional full-text note search with heading-level chunks, exact title/alias/path lookup, stemmed BM25 passage search, reciprocal-rank fusion, grouped snippets, and folder/tag/date filters.
+- Consolidate note metadata, tags, links/backlinks, and the CouchDB checkpoint into the SQLite index. Batch checkpoints are atomic, indexing yields between commits, and search responses disclose partial-build status.
+- Make filesystem startup incremental: read only new or mtime-changed bodies, persist same-content mtime changes, and remove deleted entries even when the vault is empty.
+
+### Behavior changes
+- The JSON metadata snapshot (`search-index.json`) is no longer written or read. With `FULL_TEXT_SEARCH=false` there is now no persistence at all: metadata is rebuilt in memory on each startup, and CouchDB mode replays the full `_changes` feed from the beginning every restart.
+- All index-backed read tools label build, catch-up, and error responses as incomplete or stale, including listings, counts, search results, and backlinks.
+
 ## 0.6.3
 
 ### Fixes

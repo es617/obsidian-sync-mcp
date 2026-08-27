@@ -62,13 +62,38 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 - **E2E encryption supported** — when `COUCHDB_PASSPHRASE` is set, the server decrypts and encrypts vault data using the same scheme as Self-hosted LiveSync. Data is encrypted at rest in CouchDB.
 - **Text only** — binary attachments are not exposed through MCP tools, reducing the attack surface.
 - **Search result cap** — search results are limited to 50 matches, preventing large responses from exhausting memory or leaking excessive content.
-- **Search index encryption** — the persisted search metadata (paths and timestamps) is encrypted at rest using `COUCHDB_PASSPHRASE` when set. Note content is not persisted — only the FlexSearch tokenized index lives in memory (lost on full restart, rebuilt from vault). Content snippets are fetched on demand from the vault, not cached.
+- **Search content is persisted** — full-text search stores note paths, titles,
+  aliases, tags, links, modification times, content hashes, heading-level note
+  text, and the CouchDB checkpoint in SQLite. Treat the index as a derived copy
+  of the vault and include it in the same access-control and backup policy.
+- **Encrypted-vault indexes are encrypted** — when CouchDB mode uses
+  `COUCHDB_PASSPHRASE`, scrypt hardens the passphrase and HKDF derives a
+  backend-specific key for SQLCipher-compatible AES-256 page encryption. The
+  index key is distinct from LiveSync document keys and is never persisted.
+- **Local and unencrypted-vault indexes are plaintext by design** — filesystem
+  vaults and CouchDB vaults without a passphrase use ordinary SQLite because
+  their source notes are already plaintext at rest. Set `FULL_TEXT_SEARCH=false`
+  if any derived full-text persistence is unacceptable; metadata and search are
+  then rebuilt in memory and full-text search is not exposed.
+- **Private index artifacts** — the index database is created with mode `0600`,
+  temporary SQLite tables stay in memory, and rollback-journal pages remain
+  encrypted for encrypted indexes. Incompatible-schema and backend-mismatch
+  backups retain the source index's encryption. Tests inspect the database, an
+  active rollback journal, migration outputs, and encrypted schema backups for
+  plaintext note markers and owner-only permissions.
+- **Migration limitation** — upgrading an existing plaintext search index uses
+  an in-place SQLite re-key. The active files are encrypted and permissioned
+  before startup completes, but old filesystem snapshots, external backups, or
+  recoverable deleted blocks may still contain the former plaintext copy. Remove
+  those according to the storage provider's retention and secure-erasure model.
 
 ---
 
 ## Graceful shutdown
 
-- The server handles `SIGTERM` and `SIGINT` signals, cleanly closing the CouchDB connection before exiting. Prevents data corruption on container stop.
+- The server handles `SIGTERM` and `SIGINT`, rolls back any uncommitted search
+  batch, closes SQLite, saves OAuth state, and closes the CouchDB connection
+  before exiting.
 
 ---
 
