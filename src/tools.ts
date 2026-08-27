@@ -2,12 +2,30 @@ import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
 import type { VaultBackend } from "./vault-backend.js";
-import type { SearchIndex } from "./search.js";
+import type { SearchBuildStatus, SearchIndex } from "./search.js";
 import { isPathWritable } from "./write-scope.js";
 
 const debugLogging = process.env.LOG_LEVEL === "debug";
 
 const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as const;
+
+export function formatIndexStatusNotice(status: SearchBuildStatus): string {
+    if (status.state === "ready") return "";
+    if (status.state === "error") {
+        return "⚠ Search index update failed. Index-backed results, counts, and backlinks may be stale or incomplete.";
+    }
+    const progress = status.total && status.total > 0
+        ? ` (${Math.min(100, Math.round(status.processed / status.total * 100))}% complete)`
+        : status.processed > 0 ? ` (${status.processed} changes processed)` : "";
+    return status.state === "building"
+        ? `⚠ Search index is building${progress}. Index-backed results, counts, and backlinks are incomplete.`
+        : `⚠ Search index is catching up${progress}. Index-backed results, counts, and backlinks may omit recent changes.`;
+}
+
+function withIndexStatusNotice(value: string, searchIndex: SearchIndex): string {
+    const notice = formatIndexStatusNotice(searchIndex.status);
+    return notice ? `${notice}\n\n${value}` : value;
+}
 
 export function registerTools(
     server: FastMCP,
@@ -124,7 +142,10 @@ export function registerTools(
                 notes = notes.filter((n) => n.mtime >= cutoff);
             }
             if (notes.length === 0) {
-                return folder ? `No notes found in folder: ${folder}` : "Vault is empty.";
+                const empty = searchIndex.status.state === "ready"
+                    ? (folder ? `No notes found in folder: ${folder}` : "Vault is empty.")
+                    : (folder ? `No indexed notes found in folder: ${folder}` : "No indexed notes are available yet.");
+                return withIndexStatusNotice(empty, searchIndex);
             }
             if (sort_by === "modified") {
                 notes.sort((a, b) => b.mtime - a.mtime);
@@ -140,7 +161,79 @@ export function registerTools(
             if (total > cap) {
                 lines.push(`\n... and ${total - cap} more. Use a folder filter or limit to narrow results.`);
             }
-            return lines.join("\n");
+            return withIndexStatusNotice(lines.join("\n"), searchIndex);
+        },
+    });
+
+    if (searchIndex.fullTextEnabled) server.addTool({
+        name: "search_notes",
+        description:
+            "Search note titles, aliases, headings, tags, and body text using the disk-backed full-text index. Returns ranked paths with matching snippets. Exact title, alias, filename, and path matches rank first, so a known note name is a good query. Use list_notes only to browse a folder or tag without a text query.",
+        parameters: z.object({
+            query: z
+                .string()
+                .describe("Words or phrase to find in note content and metadata."),
+            folder: z
+                .string()
+                .optional()
+                .describe("Restrict results to this vault-relative folder."),
+            tag: z
+                .string()
+                .optional()
+                .describe("Require this exact tag in addition to the text query."),
+            modified_after: z
+                .string()
+                .optional()
+                .describe("Only include notes modified after this ISO date."),
+            mode: z
+                .enum(["all", "any", "phrase"])
+                .optional()
+                .describe("Match all words (default), any word, or the exact token phrase."),
+            limit: z.coerce
+                .number()
+                .int()
+                .min(1)
+                .max(50)
+                .optional()
+                .describe("Maximum ranked results. Default 10; maximum 50."),
+        }),
+        execute: async ({ query, folder, tag, modified_after, mode, limit }) => {
+            let modifiedAfter: number | undefined;
+            if (modified_after) {
+                modifiedAfter = new Date(modified_after).getTime();
+                if (isNaN(modifiedAfter)) {
+                    return `Invalid date format: ${modified_after}. Use ISO format like '2026-03-25'.`;
+                }
+            }
+
+            try {
+                const status = searchIndex.status;
+                const statusNotice = formatIndexStatusNotice(status);
+                const results = searchIndex.searchNotes({
+                    query,
+                    folder,
+                    tag,
+                    modifiedAfter,
+                    mode,
+                    limit,
+                });
+                if (results.length === 0) {
+                    return `${statusNotice ? `${statusNotice}\n\n` : ""}No notes found matching: ${query}`;
+                }
+
+                const rendered = results.map((result) => {
+                    const deepLink = makeDeepLink(vaultName, result.path);
+                    const date = result.mtime
+                        ? ` (${new Date(result.mtime).toISOString().slice(0, 10)})`
+                        : "";
+                    const location = result.breadcrumb ? ` — ${result.breadcrumb}` : "";
+                    const snippet = result.snippet ? `\n  ${result.snippet}` : "";
+                    return `- [${result.path}](${deepLink})${date}${location}${snippet}`;
+                }).join("\n");
+                return statusNotice ? `${statusNotice}\n\n${rendered}` : rendered;
+            } catch (error) {
+                return `Invalid search query: ${(error as Error).message}`;
+            }
         },
     });
 
@@ -171,10 +264,16 @@ export function registerTools(
                 }
             }
             if (folders.size === 0) {
-                return "Vault is empty.";
+                const empty = searchIndex.status.state === "ready"
+                    ? "Vault is empty."
+                    : "No indexed folders are available yet.";
+                return withIndexStatusNotice(empty, searchIndex);
             }
             const sorted = [...folders.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-            return sorted.map(([f, count]) => `- ${f} (${count} notes)`).join("\n");
+            return withIndexStatusNotice(
+                sorted.map(([f, count]) => `- ${f} (${count} notes)`).join("\n"),
+                searchIndex,
+            );
         },
     });
 
@@ -186,9 +285,15 @@ export function registerTools(
         execute: async () => {
             const tags = searchIndex.listAllTags();
             if (tags.length === 0) {
-                return "No tags found in the vault.";
+                const empty = searchIndex.status.state === "ready"
+                    ? "No tags found in the vault."
+                    : "No indexed tags are available yet.";
+                return withIndexStatusNotice(empty, searchIndex);
             }
-            return tags.map(({ tag, count }) => `- #${tag} (${count} notes)`).join("\n");
+            return withIndexStatusNotice(
+                tags.map(({ tag, count }) => `- #${tag} (${count} notes)`).join("\n"),
+                searchIndex,
+            );
         },
     });
 
@@ -331,7 +436,7 @@ export function registerTools(
                 lines.push(`\nBacklinks: ${backlinks.join(", ")}`);
             }
             lines.push(`\n[Open in Obsidian](${deepLink})`);
-            return lines.join("\n");
+            return withIndexStatusNotice(lines.join("\n"), searchIndex);
         },
     });
 }

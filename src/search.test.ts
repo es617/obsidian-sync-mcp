@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { SearchIndex } from "./search.js";
+import { planFilesystemIndexSync, SearchIndex } from "./search.js";
+import { FullTextIndex } from "./full-text-search.js";
 
 let tmpDir: string;
 
@@ -16,6 +17,56 @@ after(async () => {
 });
 
 describe("SearchIndex", () => {
+    it("plans local startup reads only for new or mtime-changed notes", () => {
+        const plan = planFilesystemIndexSync(
+            [
+                { path: "unchanged.md", mtime: 100 },
+                { path: "same-content-new-mtime.md", mtime: 100 },
+                { path: "deleted.md", mtime: 50 },
+            ],
+            [
+                { path: "unchanged.md", mtime: 100 },
+                { path: "same-content-new-mtime.md", mtime: 200 },
+                { path: "new.md", mtime: 300 },
+            ],
+        );
+        assert.deepEqual(plan, {
+            remove: ["deleted.md"],
+            read: [
+                { path: "same-content-new-mtime.md", mtime: 200 },
+                { path: "new.md", mtime: 300 },
+            ],
+            unchanged: 1,
+        });
+    });
+
+    it("removes every persisted note when the local vault becomes empty", () => {
+        assert.deepEqual(planFilesystemIndexSync([
+            { path: "a.md", mtime: 1 },
+            { path: "b.md", mtime: 2 },
+        ], []), {
+            remove: ["a.md", "b.md"],
+            read: [],
+            unchanged: 0,
+        });
+    });
+
+    it("routes metadata updates and deletes into the full-text index", async () => {
+        const fullText = await FullTextIndex.open(":memory:");
+        const idx = new SearchIndex(fullText);
+        try {
+            idx.update("note.md", "provider recovery evidence", 100);
+            assert.deepEqual(
+                idx.searchNotes({ query: "provider" }).map((result) => result.path),
+                ["note.md"],
+            );
+            idx.remove("note.md");
+            assert.equal(idx.searchNotes({ query: "provider" }).length, 0);
+        } finally {
+            idx.close();
+        }
+    });
+
     it("tracks size correctly", () => {
         const idx = new SearchIndex();
         assert.equal(idx.size, 0);
@@ -126,18 +177,18 @@ describe("SearchIndex", () => {
     });
 });
 
-describe("SearchIndex persistence", () => {
-    it("saves and loads mtimes and tags from disk", async () => {
-        const path = join(tmpDir, "index.json");
-
-        const idx1 = new SearchIndex(path);
+describe("SearchIndex SQLite persistence", () => {
+    it("persists metadata, links, and the checkpoint in the search database", async () => {
+        const path = join(tmpDir, "index.sqlite");
+        const firstDb = await FullTextIndex.open(path);
+        const idx1 = new SearchIndex(firstDb);
         idx1.update("note1.md", "---\ntags: [foo]\n---\nHello world", 100);
         idx1.update("note2.md", "Goodbye world, see [[note1]]", 200);
-        await idx1.saveToDisk();
+        idx1.since = "checkpoint-42";
+        idx1.close();
 
-        const idx2 = new SearchIndex(path);
-        const loaded = await idx2.loadFromDisk();
-        assert.ok(loaded);
+        const secondDb = await FullTextIndex.open(path);
+        const idx2 = new SearchIndex(secondDb);
         assert.equal(idx2.size, 2);
 
         const notes = idx2.listWithMtime();
@@ -150,36 +201,23 @@ describe("SearchIndex persistence", () => {
 
         // Backlinks survive persistence
         assert.deepEqual(idx2.getBacklinks("note1.md"), ["note2.md"]);
-
-        // Metadata survives persistence (no FlexSearch)
+        assert.equal(idx2.since, "checkpoint-42");
+        idx2.close();
     });
 
-    it("saves and loads encrypted when passphrase set", async () => {
-        const path = join(tmpDir, "encrypted-index.json");
-
-        const idx1 = new SearchIndex(path, "mypassphrase");
-        idx1.update("secret.md", "classified content", 999);
-        await idx1.saveToDisk();
-
-        // Verify file is not plaintext
-        const { readFile } = await import("fs/promises");
-        const raw = await readFile(path, "utf-8");
-        assert.ok(!raw.includes("secret.md"));
-        assert.ok(!raw.includes("classified"));
-
-        const idx2 = new SearchIndex(path, "mypassphrase");
-        const loaded = await idx2.loadFromDisk();
-        assert.ok(loaded);
-        assert.equal(idx2.size, 1);
-    });
-
-    it("returns false when no persisted index exists", async () => {
-        const idx = new SearchIndex(join(tmpDir, "nonexistent.json"));
-        assert.equal(await idx.loadFromDisk(), false);
-    });
-
-    it("returns false when no persist path configured", async () => {
-        const idx = new SearchIndex();
-        assert.equal(await idx.loadFromDisk(), false);
+    it("reports build progress with current note and chunk counts", async () => {
+        const db = await FullTextIndex.open(":memory:");
+        const idx = new SearchIndex(db);
+        idx.update("note.md", "# Heading\n\nBody", 1);
+        idx.setBuildStatus("building", 1, 4);
+        assert.deepEqual(idx.status, {
+            state: "building",
+            processed: 1,
+            total: 4,
+            message: undefined,
+            notes: 1,
+            chunks: 1,
+        });
+        idx.close();
     });
 });
