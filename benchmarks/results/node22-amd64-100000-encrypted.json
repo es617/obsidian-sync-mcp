@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-27T06:50:43.895Z",
+  "runtime": {
+    "node": "v22.23.2",
+    "platform": "linux",
+    "architecture": "x64",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "cpuModel": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "logicalCpuCount": 16,
+    "hostMemoryMiB": 15426.18,
+    "cgroupMemoryLimitBytes": null,
+    "cgroupCpuLimit": "max 100000"
+  },
+  "encrypted": true,
+  "notes": 100000,
+  "chunks": 299900,
+  "queryRuns": 120,
+  "updateRuns": 50,
+  "buildSeconds": 38.67,
+  "notesPerSecond": 2586,
+  "queryP50Ms": 155.37,
+  "queryP95Ms": 384.28,
+  "queryP99Ms": 388.01,
+  "updateP95Ms": 10.54,
+  "indexMiB": 206.47,
+  "rssMiB": 284.64,
+  "maxRssMiB": 284.64,
+  "queryClasses": {
+    "exact-title": {
+      "p50Ms": 144.57,
+      "p95Ms": 153.82
+    },
+    "exact-alias": {
+      "p50Ms": 126.5,
+      "p95Ms": 131.25
+    },
+    "rare-passage": {
+      "p50Ms": 120.12,
+      "p95Ms": 131.48
+    },
+    "filtered-passage": {
+      "p50Ms": 194.17,
+      "p95Ms": 201.02
+    },
+    "phrase": {
+      "p50Ms": 364.27,
+      "p95Ms": 377.92
+    },
+    "broad-passage": {
+      "p50Ms": 377.73,
+      "p95Ms": 388.01
+    }
+  }
+}
