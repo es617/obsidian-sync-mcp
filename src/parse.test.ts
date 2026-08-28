@@ -44,6 +44,38 @@ Content`;
         assert.ok(result.tags.includes("important"));
     });
 
+    it("parses inline and multi-line aliases", () => {
+        const content = `---
+aliases:
+  - "Provider recovery"
+  - Stream repair
+alias: [Edge recovery, Playback recovery]
+---`;
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.aliases, [
+            "Provider recovery",
+            "Stream repair",
+            "Edge recovery",
+            "Playback recovery",
+        ]);
+    });
+
+    it("preserves quoted commas in YAML aliases", () => {
+        const result = parseFrontmatterAndLinks(`---
+aliases: ["Smith, John", "Person record"]
+---`);
+        assert.deepEqual(result.aliases, ["Smith, John", "Person record"]);
+    });
+
+    it("preserves unresolved Obsidian template scalars as strings", () => {
+        const result = parseFrontmatterAndLinks(`---
+created: {{date:YYYY-MM-DD}}
+reviewed: {{date:YYYY-MM-DD}} # populated when the template runs
+---`);
+        assert.equal(result.frontmatter.created, "{{date:YYYY-MM-DD}}");
+        assert.equal(result.frontmatter.reviewed, "{{date:YYYY-MM-DD}}");
+    });
+
     it("parses inline #tags", () => {
         const content = "Some text #idea and #project/sub-tag here";
         const result = parseFrontmatterAndLinks(content);
@@ -66,6 +98,8 @@ Also #shared inline`;
         const result = parseFrontmatterAndLinks(content);
         assert.ok(result.links.includes("Other Note"));
         assert.ok(result.links.includes("folder/Linked Note"));
+        assert.ok(result.linkLabels.includes("Other Note"));
+        assert.ok(result.linkLabels.includes("display text"));
     });
 
     it("parses markdown links to .md files", () => {
@@ -73,6 +107,7 @@ Also #shared inline`;
         const result = parseFrontmatterAndLinks(content);
         assert.ok(result.links.includes("other-note.md"));
         assert.ok(result.links.includes("folder/note.md"));
+        assert.ok(result.linkLabels.includes("my link"));
     });
 
     it("ignores non-md markdown links", () => {
@@ -92,11 +127,20 @@ Also #shared inline`;
         assert.deepEqual(result.frontmatter, {});
         assert.deepEqual(result.tags, []);
         assert.deepEqual(result.links, []);
+        assert.deepEqual(result.aliases, []);
+        assert.deepEqual(result.linkLabels, []);
     });
 
     it("handles content with no frontmatter closing delimiter", () => {
         const content = "---\ntitle: Broken\nNo closing delimiter";
         const result = parseFrontmatterAndLinks(content);
         assert.deepEqual(result.frontmatter, {});
+    });
+
+    it("ignores invalid YAML without making the note unindexable", () => {
+        const content = "---\ntags: [unterminated\n---\n# Recovery\nSearchable body #fallback";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.frontmatter, {});
+        assert.deepEqual(result.tags, ["fallback"]);
     });
 });

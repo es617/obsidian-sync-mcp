@@ -4,7 +4,7 @@
 
 ![MCP](https://img.shields.io/badge/MCP-compatible-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Node](https://img.shields.io/badge/node-22%2B-green.svg)
+![Node](https://img.shields.io/badge/node-22.14%2B%20%7C%2024-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)
 
 Give any AI agent access to your Obsidian vault over MCP. Run it locally against your vault files, or pair it with [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) and deploy to the cloud so it works even when your machine is off.
@@ -206,6 +206,7 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | `list_folders` | List all folders in the vault with note counts — use to discover folder names |
 | `list_tags` | List all tags in the vault with counts — use to discover tags before filtering |
 | `list_notes` | List notes with timestamps. Filter by folder, name, tag, or date. Sort by name or modified. |
+| `search_notes` | Ranked full-text search across titles, aliases, headings, tags, and note bodies, with snippets and folder/tag/date filters |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
 | `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, and timestamps — navigate the knowledge graph |
@@ -249,13 +250,14 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `COUCHDB_DATABASE` | CouchDB mode | `obsidian` | CouchDB database name |
 | `COUCHDB_PASSPHRASE` | CouchDB mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
 | `COUCHDB_OBFUSCATE_PROPERTIES` | CouchDB mode | `false` | Set to `true` if "Obfuscate Properties" is enabled in LiveSync (obfuscates file paths, sizes, dates in the database). For existing vaults the actual setting is auto-detected at startup; this value only decides the format for a brand-new empty database |
-| `VAULT_NAME` | Both | `MyVault` | Vault name (used for deep links and index storage) |
+| `VAULT_NAME` | Both | `MyVault` | Display name used for Obsidian deep links and the established OAuth-token path. Search identity comes from the filesystem root or CouchDB URL + database. |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for authentication |
 | `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |
 | `PORT` | Optional | `8787` | HTTP port |
 | `HOST` | Optional | `0.0.0.0` | Bind address (`127.0.0.1` to restrict to localhost) |
 | `MCP_ALLOWED_HOSTS` | Optional | — | Comma-separated extra `Host` values accepted in no-auth mode (e.g. `192.168.1.5,mybox.local`). No-auth mode rejects any other Host to block browser DNS-rebinding; localhost is always allowed. Ignored when `MCP_AUTH_TOKEN` is set. |
-| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (metadata index, auth tokens) |
+| `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for the SQLite search index and auth tokens |
+| `FULL_TEXT_SEARCH` | Optional | `auto` | Disk-backed SQLite full-text search: `auto` and `true` enable it; `false` disables it. When `COUCHDB_PASSPHRASE` is set, the local index is encrypted with a backend-specific derived key. Note: `false` also disables index persistence — metadata is rebuilt in memory on every startup, and CouchDB mode replays the full `_changes` feed each time. |
 | `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync) |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 | `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP. Useful when sharing the server with multiple AI clients and write access should be opt-in. |
@@ -264,6 +266,51 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `MCP_INSTRUCTIONS_FILE` | Optional | — | Path to a file (e.g. markdown) whose contents are appended to the MCP `instructions`. Easier than `MCP_INSTRUCTIONS` for multi-line conventions. If both are set, the file wins and `MCP_INSTRUCTIONS` is ignored (with a startup warning). Missing/unreadable file or files larger than 32 KB are fatal startup errors. **Store this file somewhere only the service user can write (e.g. `chmod 600`)** — its contents land in every MCP session's system prompt, so write access to it = prompt-injection access to every client. |
 
 Set `VAULT_PATH` for filesystem mode or `COUCHDB_URL` for CouchDB mode.
+
+`FULL_TEXT_SEARCH=auto` is the upstream default and currently has the same
+enablement behaviour as `true`: both expose `search_notes` and persist the
+SQLite index. `true` does not force encryption; encryption follows the source
+vault. An encrypted LiveSync vault always gets an encrypted index, while a local
+or unencrypted CouchDB vault gets plaintext SQLite. `false` removes
+`search_notes`, keeps metadata only in memory, and leaves any existing index file
+untouched for rollback or later re-enablement.
+
+For LiveSync E2E-encrypted vaults, the full-text index uses SQLCipher-compatible
+AES-256 page encryption with per-page authentication. The CouchDB passphrase is
+first hardened with scrypt, then domain-separated with HKDF into a dedicated index
+key, and is never written to the database. Search v2 uses a separate index file,
+so the previous index remains available if you roll back the Docker tag. Search
+contents are decrypted only while the MCP process is running and unlocked.
+
+Search storage and encryption are scoped to the actual backend (canonical
+`VAULT_PATH`, or credential-free `COUCHDB_URL` plus `COUCHDB_DATABASE`), so two
+backends with the same `VAULT_NAME` cannot share results or a CouchDB checkpoint.
+The index is stored at
+`DATA_DIR/backends/<backend-hash>/full-text-index-v2.sqlite` with owner-only
+permissions. It contains note text and metadata and must be treated as a derived
+vault copy. Encrypted indexes keep SQLite rollback journals and schema backups
+encrypted; local and unencrypted-vault indexes do not.
+
+The first upgrade from the name-scoped prototype performs a clean rebuild and
+leaves the old index intact because its backend ownership cannot be verified.
+Filesystem restarts read only new or mtime-changed note bodies, remove deleted
+paths, and persist newer mtimes even when content is unchanged. Index-backed
+tools warn while a build or catch-up can make results, counts, or backlinks
+incomplete.
+
+Changing `VAULT_PATH`, the credential-free CouchDB URL, or `COUCHDB_DATABASE`
+selects a different backend directory and rebuilds without reusing another
+vault's checkpoint. A changed or wrong passphrase fails startup without
+overwriting the encrypted index. An incompatible schema or embedded backend
+identity is renamed to a timestamped `.bak` before a clean rebuild. A
+plaintext-to-encrypted upgrade re-keys the active SQLite file, but old snapshots
+or backups may still retain plaintext and must be expired separately.
+
+To roll back, stop the candidate cleanly and start the previous image against
+the same vault and persistent `DATA_DIR`. Search v2 uses a separate file and
+does not delete the prior release's index. Do not delete or migrate either index
+until the previous image has opened successfully; a rebuild affects only the
+derived index, never the source vault.
 
 ---
 
@@ -297,7 +344,13 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 - **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins.
 - **Text only.** Binary attachments are not exposed through MCP tools.
 - **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
-- **Node 22+ required.**
+- **Node 22.14+ or Node 24 required.** Node 22.13 crashes inside the native
+  SQLite dependency. The dependency must also match the runtime platform and
+  architecture.
+- **Source checkouts should use `npm ci --ignore-scripts`.** The SQLite package
+  bundles Linux, macOS, and Windows prebuilds, but npm otherwise invokes its
+  unnecessary implicit `node-gyp rebuild`; compiling from source requires
+  Python, `make`, and a C++ compiler.
 - **Setup script requires bash.** The `deploy/setup.sh` script works on macOS and Linux. On Windows, use WSL or Git Bash.
 
 ---

@@ -2,11 +2,20 @@ import { FastMCP } from "fastmcp";
 import { join } from "path";
 import { timingSafeEqual, createHash } from "crypto";
 import { watch, readFileSync, statSync } from "fs";
-import { stat } from "fs/promises";
+import { realpath, stat } from "fs/promises";
 import { setGlobalLogFunction, LEVEL_INFO } from "octagonal-wheels/common/logger";
 import { mountPasswordAuth } from "./auth.js";
-import { SearchIndex } from "./search.js";
+import { planFilesystemIndexSync, SearchIndex } from "./search.js";
 import { applyIndexChange } from "./index-sync.js";
+import { startAfterSuccessfulRebuild } from "./index-lifecycle.js";
+import {
+    deriveFullTextIndexKey,
+    deriveSearchBackendId,
+    FullTextIndex,
+    resolveFullTextSearchSetting,
+    searchIndexStoragePaths,
+    type FullTextSearchSetting,
+} from "./full-text-search.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { registerTools } from "./tools.js";
 import { parseWriteFolders } from "./write-scope.js";
@@ -37,6 +46,7 @@ const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const READ_ONLY = process.env.READ_ONLY === "true";
 const WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
+const FULL_TEXT_SEARCH = process.env.FULL_TEXT_SEARCH;
 
 // Extra instructions appended to the MCP `instructions` string.
 // File wins if both are set (loud warning); missing file is fatal.
@@ -94,26 +104,87 @@ if (VAULT_PATH) {
 await vault.init();
 console.log("Vault ready.");
 
-// --- Per-vault data directory ---
+// --- Per-backend data directory ---
 const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
-const vaultId = createHash("sha256").update(VAULT_NAME).digest("hex").slice(0, 12);
-const dataDir = join(baseDataDir, vaultId);
+// OAuth persistence stays at its established path; changing search identity
+// must not force unrelated clients to reauthenticate.
+const authDataDir = join(
+    baseDataDir,
+    createHash("sha256").update(VAULT_NAME).digest("hex").slice(0, 12),
+);
+const backendId = VAULT_PATH
+    ? deriveSearchBackendId({ kind: "filesystem", location: await realpath(VAULT_PATH) })
+    : deriveSearchBackendId({ kind: "couchdb", url: COUCHDB_URL!, database: COUCHDB_DATABASE });
+const { indexPath, legacyIndexPath } = searchIndexStoragePaths(baseDataDir, backendId, VAULT_NAME);
 
-// --- Search index ---
-const indexPath = join(dataDir, "search-index.json");
-const searchIndex = new SearchIndex(indexPath, COUCHDB_PASSPHRASE);
-
-// Load persisted metadata from disk
-await searchIndex.loadFromDisk();
-if (debugLogging) {
-    console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
+// --- Search indexes ---
+let fullTextSetting: FullTextSearchSetting;
+try {
+    fullTextSetting = resolveFullTextSearchSetting(
+        FULL_TEXT_SEARCH,
+        Boolean(COUCHDB_URL && COUCHDB_PASSPHRASE),
+    );
+} catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
 }
+
+let fullTextIndex: FullTextIndex | undefined;
+let fullTextPath: string | undefined;
+if (fullTextSetting.enabled) {
+    // v2 intentionally uses a new file. The v1 database remains available if
+    // the operator rolls back to the previous Docker tag.
+    fullTextPath = indexPath;
+    let unverifiableLegacyIndex = false;
+    try {
+        await stat(legacyIndexPath);
+        unverifiableLegacyIndex = legacyIndexPath !== fullTextPath;
+    } catch {
+        // No VAULT_NAME-scoped prototype index to report.
+    }
+    const encryptionKey = fullTextSetting.encryptIndex
+        ? deriveFullTextIndexKey(COUCHDB_PASSPHRASE!, backendId)
+        : undefined;
+    try {
+        fullTextIndex = await FullTextIndex.open(fullTextPath, {
+            encryptionKey,
+            backendIdentity: backendId,
+        });
+    } finally {
+        encryptionKey?.fill(0);
+    }
+    if (fullTextIndex.migratedFromPlaintext) {
+        console.warn(
+            "Migrated the existing plaintext full-text index to encrypted storage. " +
+            "Old backups or filesystem snapshots may still contain the plaintext copy.",
+        );
+    }
+    if (fullTextIndex.recreatedForSchemaMismatch) {
+        console.warn("Archived an incompatible search index and started a clean v2 rebuild.");
+    }
+    if (fullTextIndex.recreatedForIdentityMismatch) {
+        console.warn("Archived a search index owned by a different backend and started a clean rebuild.");
+    }
+    if (fullTextIndex.createdFresh && unverifiableLegacyIndex) {
+        console.warn(
+            "Found a legacy VAULT_NAME-scoped search index. It was left intact but not reused " +
+            "because its backend identity and checkpoint cannot be verified; rebuilding once.",
+        );
+    }
+    console.log(
+        `Full-text search enabled (local index contains ${fullTextIndex.size} notes, ` +
+        `${fullTextIndex.encryptedAtRest ? "encrypted" : "plaintext"}).`,
+    );
+}
+
+const searchIndex = new SearchIndex(fullTextIndex);
 
 // Sync metadata in background (server starts immediately)
 async function rebuildIndex() {
     const start = performance.now();
 
     if (COUCHDB_URL && vault.catchUp) {
+        searchIndex.setBuildStatus("catching_up", 0, undefined, "Catching up with CouchDB changes.");
         const changeCallback = (path: string, content: string | null, mtime?: number) => {
             // content === "" is an empty-but-present note: index it, don't drop it.
             applyIndexChange(searchIndex, path, content, mtime);
@@ -122,10 +193,27 @@ async function rebuildIndex() {
         let since = searchIndex.since || "0";
         if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
         let changes = 0;
-        const onBatch = async (batchSince: string, processed: number) => {
-            searchIndex.since = batchSince;
-            await searchIndex.saveToDisk();
-            console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
+        const catchUpBatched = async (
+            from: string,
+            callback: (path: string, content: string | null, mtime?: number) => void,
+        ) => {
+            searchIndex.beginBatch();
+            try {
+                const result = await vault.catchUp!(from, callback, async (batchSince, processed) => {
+                    // The checkpoint and indexed changes commit atomically.
+                    searchIndex.since = batchSince;
+                    searchIndex.commitBatch();
+                    searchIndex.setBuildStatus("catching_up", processed);
+                    console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
+                    await new Promise<void>((resolve) => setImmediate(resolve));
+                    searchIndex.beginBatch();
+                });
+                searchIndex.commitBatch();
+                return result;
+            } catch (error) {
+                searchIndex.rollbackBatch();
+                throw error;
+            }
         };
         try {
             const countingCallback = (path: string, content: string | null, mtime?: number) => {
@@ -133,16 +221,16 @@ async function rebuildIndex() {
                 if (debugLogging) console.log(`[debug] Change: ${path} ${content !== null ? "(update)" : "(delete)"}`);
                 changeCallback(path, content, mtime);
             };
-            const newSince = await vault.catchUp(since, countingCallback, onBatch);
+            const newSince = await catchUpBatched(since, countingCallback);
             searchIndex.since = newSince;
         } catch (err) {
             console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
             searchIndex.clear();
             changes = 0;
-            const newSince = await vault.catchUp("0", (path, content, mtime) => {
+            const newSince = await catchUpBatched("0", (path, content, mtime) => {
                 changes++;
                 changeCallback(path, content, mtime);
-            }, onBatch);
+            });
             searchIndex.since = newSince;
         }
         if (changes > 0) {
@@ -151,30 +239,53 @@ async function rebuildIndex() {
             console.log(`Search index up to date (${searchIndex.size} notes).`);
         }
     } else if (VAULT_PATH) {
+        searchIndex.setBuildStatus("building", 0, undefined, "Scanning local vault notes.");
         const notesWithMtime = await vault.listNotesWithMtime();
         if (debugLogging) console.log(`[debug] Vault has ${notesWithMtime.length} notes`);
-        if (notesWithMtime.length > 0) {
-            const vaultPaths = new Set(notesWithMtime.map((n) => n.path));
-            for (const p of searchIndex.listPaths()) {
-                if (!vaultPaths.has(p)) searchIndex.remove(p);
-            }
-            console.log(`Building search index (${notesWithMtime.length} notes)...`);
-            for (let i = 0; i < notesWithMtime.length; i++) {
-                const { path, mtime } = notesWithMtime[i];
-                const content = await vault.readNote(path);
-                // Index empty notes too (content === ""); readNote returns null only if absent.
-                if (content !== null) searchIndex.update(path, content, mtime);
-                if (notesWithMtime.length > 100 && (i + 1) % 500 === 0) {
-                    console.log(`  indexed ${i + 1}/${notesWithMtime.length}...`);
+        const plan = planFilesystemIndexSync(searchIndex.listWithMtime(), notesWithMtime);
+        searchIndex.setBuildStatus("building", 0, plan.read.length, "Indexing changed local vault notes.");
+        for (const path of plan.remove) searchIndex.remove(path);
+        if (plan.read.length > 0) {
+            console.log(
+                `Updating search index (${plan.read.length} changed, ${plan.unchanged} unchanged, ` +
+                `${plan.remove.length} deleted)...`,
+            );
+            searchIndex.beginBatch();
+            try {
+                for (let i = 0; i < plan.read.length; i++) {
+                    const { path, mtime } = plan.read[i];
+                    const content = await vault.readNote(path);
+                    // Index empty notes too (content === ""); readNote returns null only if absent.
+                    if (content !== null) searchIndex.update(path, content, mtime);
+                    else searchIndex.remove(path);
+                    searchIndex.setBuildStatus("building", i + 1, plan.read.length);
+                    if (plan.read.length > 100 && (i + 1) % 500 === 0) {
+                        searchIndex.commitBatch();
+                        console.log(`  indexed ${i + 1}/${plan.read.length} changed notes...`);
+                        await new Promise<void>((resolve) => setImmediate(resolve));
+                        searchIndex.beginBatch();
+                    }
                 }
+                searchIndex.commitBatch();
+            } catch (error) {
+                searchIndex.rollbackBatch();
+                throw error;
             }
-            console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+            console.log(`Search index updated: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+        } else {
+            console.log(
+                `Search index up to date (${searchIndex.size} notes; ${plan.remove.length} stale entries removed).`,
+            );
         }
     }
-    await searchIndex.saveToDisk();
+    searchIndex.setBuildStatus("ready", searchIndex.size, searchIndex.size);
 }
-// Fire and forget — server starts while index builds
-rebuildIndex().catch((err) => console.error("Index rebuild failed:", err));
+// Fire and forget — server starts while index builds.
+const rebuildPromise = rebuildIndex();
+void rebuildPromise.catch((err) => {
+    searchIndex.setBuildStatus("error", searchIndex.status.processed, searchIndex.status.total, String(err));
+    console.error("Index rebuild failed:", err);
+});
 
 // --- Watch for external changes ---
 let fsWatcher: ReturnType<typeof watch> | null = null;
@@ -208,14 +319,26 @@ if (VAULT_PATH) {
     }
     console.log("Watching vault for external changes.");
 } else if (COUCHDB_URL && vault.watchChanges) {
-    // Remote mode: watch CouchDB _changes feed for LiveSync updates
-    vault.watchChanges((path: string, content: string | null, mtime?: number, seq?: string | number) => {
-        if (debugLogging) console.log(`[debug] CouchDB ${content === null ? "delete" : "change"}: ${path}`);
-        // content === "" is an empty-but-present note: index it, don't drop it.
-        applyIndexChange(searchIndex, path, content, mtime);
-        if (seq) searchIndex.since = String(seq);
+    // Start the live feed only after catch-up closes its final transaction. The
+    // feed resumes from Vault's last sequence, so changes during catch-up are
+    // not lost and cannot advance the checkpoint out of order.
+    void startAfterSuccessfulRebuild(rebuildPromise, () => {
+        vault.watchChanges!((path: string, content: string | null, mtime?: number, seq?: string | number) => {
+            if (debugLogging) console.log(`[debug] CouchDB ${content === null ? "delete" : "change"}: ${path}`);
+            searchIndex.beginBatch();
+            try {
+                applyIndexChange(searchIndex, path, content, mtime);
+                if (seq) searchIndex.since = String(seq);
+                searchIndex.commitBatch();
+            } catch (error) {
+                searchIndex.rollbackBatch();
+                throw error;
+            }
+        });
+        console.log("Watching CouchDB for LiveSync changes.");
+    }).catch((error) => {
+        console.error("Failed to start CouchDB change watcher:", error);
     });
-    console.log("Watching CouchDB for LiveSync changes.");
 }
 
 // --- MCP Server ---
@@ -278,7 +401,7 @@ if (AUTH_TOKEN) {
 const server = new FastMCP(serverOptions);
 
 if (AUTH_TOKEN) {
-    const tokenPath = join(dataDir, "auth-tokens.json");
+    const tokenPath = join(authDataDir, "auth-tokens.json");
     auth = mountPasswordAuth(server.getApp(), BASE_URL, AUTH_TOKEN, tokenPath);
     await auth.loadTokens();
 }
@@ -290,7 +413,7 @@ registerTools(server, vault, searchIndex, VAULT_NAME, READ_ONLY, WRITE_FOLDERS);
 async function shutdown() {
     console.log("Shutting down...");
     if (fsWatcher) fsWatcher.close();
-    await searchIndex.saveToDisk();
+    searchIndex.close();
     if (auth) await auth.saveTokens();
     await vault.close();
     process.exit(0);
@@ -298,9 +421,8 @@ async function shutdown() {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-// --- Periodic save (every 5 minutes) ---
+// --- Periodic auth-token cleanup ---
 setInterval(async () => {
-    await searchIndex.saveToDisk();
     if (auth) {
         auth.cleanup();
         await auth.saveTokens();

@@ -2,54 +2,63 @@
  * Parse Obsidian markdown content for frontmatter, tags, and links.
  */
 
+import { parse as parseYaml } from "yaml";
+
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
     links: string[];
+    aliases: string[];
+    linkLabels: string[];
+}
+
+function stringList(value: unknown): string[] {
+    if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+    if (typeof value !== "string") return value == null ? [] : [String(value)];
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * Obsidian's core Templates plugin commonly leaves scalar placeholders such as
+ * `created: {{date:YYYY-MM-DD}}` in template notes. YAML treats the double
+ * braces as nested flow mappings and emits a process warning while converting
+ * their collection keys to JavaScript strings. Quote only whole scalar values
+ * so the placeholder remains searchable metadata with its original meaning.
+ */
+function preserveObsidianTemplateScalars(yaml: string): string {
+    return yaml.split("\n").map((line) => {
+        const match = line.match(/^(\s*[^#][^:\n]*:\s*)(\{\{.*\}\})(\s*(?:#.*)?)$/);
+        if (!match) return line;
+        return `${match[1]}${JSON.stringify(match[2])}${match[3]}`;
+    }).join("\n");
 }
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
-    const frontmatter: Record<string, any> = {};
+    const frontmatter: Record<string, string> = {};
     const tags = new Set<string>();
     const links: string[] = [];
+    const aliases = new Set<string>();
+    const linkLabels = new Set<string>();
 
     // Parse YAML frontmatter
     if (content.startsWith("---\n")) {
         const end = content.indexOf("\n---", 4);
         if (end !== -1) {
-            const yaml = content.slice(4, end);
-            let inTagsList = false;
-            for (const line of yaml.split("\n")) {
-                // Multi-line tags list item: "  - tagname"
-                if (inTagsList) {
-                    const listItem = line.match(/^\s+-\s+(.+)/);
-                    if (listItem) {
-                        const trimmed = listItem[1].trim();
-                        if (trimmed) tags.add(trimmed);
-                        continue;
-                    }
-                    inTagsList = false;
+            try {
+                const yaml = preserveObsidianTemplateScalars(content.slice(4, end));
+                const parsed = parseYaml(yaml) as Record<string, unknown> | null;
+                for (const [key, value] of Object.entries(parsed ?? {})) {
+                    frontmatter[key] = typeof value === "string" ? value : JSON.stringify(value);
                 }
-
-                const match = line.match(/^(\w[\w-]*)\s*:\s*(.+)/);
-                if (match) {
-                    frontmatter[match[1]] = match[2].trim();
+                for (const tag of stringList(parsed?.tags)) tags.add(tag);
+                for (const alias of [
+                    ...stringList(parsed?.aliases),
+                    ...stringList(parsed?.alias),
+                ]) {
+                    aliases.add(alias);
                 }
-                // Frontmatter tags (inline: [a, b] or start of multi-line list)
-                if (/^tags\s*:/.test(line)) {
-                    const value = line.replace(/^tags\s*:\s*/, "").trim();
-                    if (value) {
-                        // Inline: tags: [a, b] or tags: a, b
-                        const tagValues = value.replace(/[[\]]/g, "");
-                        for (const t of tagValues.split(",")) {
-                            const trimmed = t.trim();
-                            if (trimmed) tags.add(trimmed);
-                        }
-                    } else {
-                        // Multi-line list follows
-                        inTagsList = true;
-                    }
-                }
+            } catch {
+                // Invalid frontmatter must not make the note itself unindexable.
             }
         }
     }
@@ -60,16 +69,25 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     }
 
     // [[wikilinks]]
-    for (const match of content.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
-        links.push(match[1]);
+    for (const match of content.matchAll(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g)) {
+        const target = match[1].trim();
+        links.push(target);
+        linkLabels.add((match[2] ?? target.split("/").pop() ?? target).trim());
     }
 
     // [markdown links](path.md)
     for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+\.md)\)/g)) {
         links.push(match[2]);
+        linkLabels.add(match[1].trim());
     }
 
-    return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+    return {
+        frontmatter,
+        tags: [...tags],
+        links: [...new Set(links)],
+        aliases: [...aliases],
+        linkLabels: [...linkLabels].filter(Boolean),
+    };
 }
 
 export function extractSnippet(content: string, query: string, context = 80): string {

@@ -18,7 +18,7 @@
         "ai"
     ],
     "engines": {
-        "node": ">=22"
+        "node": "^22.14.0 || ^24.0.0"
     },
     "bin": {
         "obsidian-sync-mcp": "dist/main.js"
@@ -34,10 +34,12 @@
         "start": "node dist/main.js",
         "dev": "tsx src/main.ts",
         "test": "node --import tsx --test 'src/**/*.test.ts'",
+        "benchmark:search": "node --import tsx scripts/benchmark-search.ts",
         "test:e2e": "node --import tsx --test test/e2e.test.ts",
         "test:couchdb": "tsup test/couchdb-obfuscation.e2e.ts --out-dir .harness-tmp && node .harness-tmp/couchdb-obfuscation.e2e.js"
     },
     "dependencies": {
+        "better-sqlite3-multiple-ciphers": "^13.0.3",
         "diff-match-patch": "^1.0.5",
         "fastmcp": "^3.34.0",
         "fflate": "^0.8.2",
@@ -53,6 +55,7 @@
         "pouchdb-utils": "^9.0.0",
         "transform-pouch": "^2.0.0",
         "xxhash-wasm": "^1.0.2",
+        "yaml": "^2.9.0",
         "zod": "^3"
     },
     "devDependencies": {

@@ -297,9 +297,9 @@ describe("E2E: MCP_INSTRUCTIONS", () => {
 
 describe("E2E: cold restart with persisted index", () => {
     it("picks up changes and removes stale entries after restart", async () => {
-        // Stop server (triggers saveToDisk)
+        // Stop server (closes SQLite and flushes auth state)
         const firstLogs = await stopServer();
-        assert.ok(firstLogs.includes("Search index saved"), "Should save index on shutdown");
+        assert.ok(firstLogs.includes("Shutting down..."), "Should shut down cleanly");
 
         // Modify vault while server is down (simulates Obsidian edits)
         await writeFile(join(vaultDir, "new-while-down.md"), "# Created while MCP was down\nfreshcontent");
@@ -309,18 +309,19 @@ describe("E2E: cold restart with persisted index", () => {
         // Restart server
         await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault" });
 
-        // The server accepts connections while the index rebuild runs in the
-        // background — wait for the rebuild to finish before asserting.
+        // The server accepts connections while index reconciliation runs in the
+        // background — wait for the incremental update to finish before asserting.
         const deadline = Date.now() + 5000;
-        while (Date.now() < deadline && !serverLogs.includes("Search index built")) {
+        while (Date.now() < deadline && !serverLogs.includes("Search index updated")) {
             await new Promise((r) => setTimeout(r, 50));
         }
         const restartLogs = serverLogs;
 
-        // Should rebuild search index from vault files
+        // Only the two new/changed bodies should be read; the removed path is
+        // reconciled from the persisted path set.
         assert.ok(
-            restartLogs.includes("Search index built") || restartLogs.includes("Search metadata loaded"),
-            "Should rebuild index on restart",
+            restartLogs.includes("Updating search index (2 changed") && restartLogs.includes("1 deleted"),
+            `Should incrementally reconcile two changed notes and one deletion\n${restartLogs}`,
         );
 
         // New note should be listed

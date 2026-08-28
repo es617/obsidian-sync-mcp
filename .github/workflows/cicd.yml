@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
 
   build:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm pack --dry-run
       - run: npm pack
@@ -54,14 +54,19 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 22.13 segfaults in better-sqlite3-multiple-ciphers; keep the exact
+        # supported floor and the other supported LTS line under test.
+        node-version: ["22.14.0", "24"]
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
       - uses: actions/setup-node@v5
         with:
-          node-version: "22"
-      - run: npm ci
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci --ignore-scripts
       - run: npm test
 
   # E2E: start server in local mode, test all tools via MCP protocol
@@ -75,7 +80,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm run test:e2e
 
@@ -104,7 +109,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run test:couchdb
 
   release:
@@ -148,17 +153,14 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      # Node 20 (LTS) — Node 22.22.2's bundled npm is broken on GHA runners
-      # (nodejs/node#62425), causing both self-upgrade crashes and OIDC publish
-      # failures. Node 20's bundled npm self-upgrades cleanly.
+      # The encrypted SQLite dependency supports the Node 22 and 24 lines.
+      # Use Node 24 here to avoid the npm bug in Node 22.22.2 (nodejs/node#62425).
       - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      # Pin to npm 11.x: npm@latest (12.x) dropped Node 20 support (requires
-      # node >=22.22.2). npm 11 supports Node 20.17+ and OIDC trusted publishing.
-      - run: npm install -g npm@11
-      - run: npm ci
+      - run: npm install -g npm@latest
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm publish --provenance --access public
 
@@ -173,7 +175,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - uses: docker/login-action@v3
         with:

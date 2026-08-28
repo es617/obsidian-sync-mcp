@@ -4,7 +4,9 @@ FROM node:22-slim
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# The encrypted SQLite dependency ships platform-specific prebuilds. npm's
+# implicit node-gyp lifecycle would rebuild it unnecessarily in this slim image.
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY dist/ dist/
 

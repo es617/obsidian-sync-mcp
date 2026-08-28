@@ -1,122 +1,69 @@
-/**
- * Metadata index for vault notes.
- *
- * Tracks paths, mtimes, tags, links, and backlinks.
- * Persists to disk (encrypted if passphrase is set).
- * No full-text search — metadata only.
- */
+/** Metadata access and search facade, backed by SQLite when search is enabled. */
 
-import { readFile, writeFile, mkdir, chmod } from "fs/promises";
-import { dirname } from "path";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
 import { parseFrontmatterAndLinks } from "./parse.js";
+import type { FullTextIndex, FullTextSearchOptions, FullTextSearchResult } from "./full-text-search.js";
 
-
-function encrypt(text: string, passphrase: string): string {
-    const salt = randomBytes(16);
-    const key = scryptSync(passphrase, salt, 32);
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const encrypted = Buffer.concat([cipher.update(text, "utf-8"), cipher.final()]);
-    const tag = (cipher as any).getAuthTag() as Buffer;
-    return salt.toString("hex") + ":" + iv.toString("hex") + ":" + tag.toString("hex") + ":" + encrypted.toString("hex");
+export type SearchBuildState = "ready" | "building" | "catching_up" | "error";
+export interface SearchBuildStatus {
+    state: SearchBuildState;
+    processed: number;
+    total?: number;
+    message?: string;
+    notes: number;
+    chunks: number;
 }
 
-function decrypt(data: string, passphrase: string): string {
-    const [saltHex, ivHex, tagHex, encryptedHex] = data.split(":");
-    const key = scryptSync(passphrase, Buffer.from(saltHex, "hex"), 32);
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
-    (decipher as any).setAuthTag(Buffer.from(tagHex, "hex"));
-    return Buffer.concat([decipher.update(Buffer.from(encryptedHex, "hex")), decipher.final()]).toString("utf-8");
+export interface IndexedNoteListing { path: string; mtime: number }
+export interface FilesystemIndexSyncPlan {
+    remove: string[];
+    read: IndexedNoteListing[];
+    unchanged: number;
+}
+
+/** Plan a local startup reconciliation without reading unchanged note bodies. */
+export function planFilesystemIndexSync(
+    indexedNotes: IndexedNoteListing[],
+    vaultNotes: IndexedNoteListing[],
+): FilesystemIndexSyncPlan {
+    const indexed = new Map(indexedNotes.map((note) => [note.path, note.mtime]));
+    const vaultPaths = new Set(vaultNotes.map((note) => note.path));
+    const remove = indexedNotes
+        .filter((note) => !vaultPaths.has(note.path))
+        .map((note) => note.path)
+        .sort();
+    const read = vaultNotes.filter((note) => indexed.get(note.path) !== note.mtime);
+    return { remove, read, unchanged: vaultNotes.length - read.length };
 }
 
 export class SearchIndex {
+    // Used only when FULL_TEXT_SEARCH=false. The normal path keeps metadata in SQLite.
     private mtimes = new Map<string, number>();
     private tags = new Map<string, string[]>();
     private links = new Map<string, string[]>();
     private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
-    private saving = false;
-    private _since: string = "";
-    private persistPath: string | null;
-    private passphrase: string | null;
+    private _since = "";
+    private fullTextIndex: FullTextIndex | null;
+    private buildState: Omit<SearchBuildStatus, "notes" | "chunks"> = {
+        state: "ready",
+        processed: 0,
+    };
 
-    constructor(persistPath?: string, passphrase?: string) {
-        this.persistPath = persistPath ?? null;
-        this.passphrase = passphrase ?? null;
+    constructor(fullTextIndex?: FullTextIndex) {
+        this.fullTextIndex = fullTextIndex ?? null;
     }
 
-    /** Load metadata from disk. */
-    async loadFromDisk(): Promise<boolean> {
-        if (!this.persistPath) return false;
-        try {
-            let raw = await readFile(this.persistPath, "utf-8");
-            if (this.passphrase) {
-                raw = decrypt(raw, this.passphrase);
-            }
-            const data = JSON.parse(raw);
-            for (const [path, mtime] of Object.entries(data.mtimes ?? {})) {
-                this.mtimes.set(path, mtime as number);
-                this.knownPaths.add(path);
-            }
-            for (const [path, t] of Object.entries(data.tags ?? {})) {
-                this.tags.set(path, t as string[]);
-            }
-            for (const [path, l] of Object.entries(data.links ?? {})) {
-                const targets = l as string[];
-                this.links.set(path, targets);
-                for (const target of targets) {
-                    const key = target.toLowerCase();
-                    if (!this.backlinks.has(key)) this.backlinks.set(key, new Set());
-                    this.backlinks.get(key)!.add(path);
-                }
-            }
-            if (data.since) this._since = data.since;
-            console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes, since: ${this._since ? "yes" : "none"}).`);
-            return this.knownPaths.size > 0;
-        } catch {
-            return false;
-        }
-    }
-
-    /** Save metadata to disk. Encrypted if passphrase is set. */
-    async saveToDisk(): Promise<void> {
-        if (!this.persistPath || this.saving) return;
-        this.saving = true;
-        try {
-            await mkdir(dirname(this.persistPath), { recursive: true });
-            let data = JSON.stringify({
-                mtimes: Object.fromEntries(this.mtimes),
-                tags: Object.fromEntries(this.tags),
-                links: Object.fromEntries(this.links),
-                since: this._since,
-            });
-            if (this.passphrase) {
-                data = encrypt(data, this.passphrase);
-            }
-            await writeFile(this.persistPath, data, { encoding: "utf-8", mode: 0o600 });
-            await chmod(this.persistPath, 0o600);
-            console.log(`Search index saved to disk (${this.knownPaths.size} notes${this.passphrase ? ", encrypted" : ""}).`);
-        } catch (err) {
-            console.error("Failed to save search index:", err);
-        } finally {
-            this.saving = false;
-        }
-    }
-
-    /** Add or update a note in the index. */
     update(path: string, content: string, mtime?: number): void {
-        if (this.knownPaths.has(path)) {
-            this.clearBacklinks(path);
+        if (this.fullTextIndex) {
+            this.fullTextIndex.update(path, content, mtime);
+            return;
         }
+        if (this.knownPaths.has(path)) this.clearBacklinks(path);
         this.knownPaths.add(path);
         if (mtime !== undefined) this.mtimes.set(path, mtime);
         const parsed = parseFrontmatterAndLinks(content);
-        if (parsed.tags.length > 0) {
-            this.tags.set(path, parsed.tags);
-        } else {
-            this.tags.delete(path);
-        }
+        if (parsed.tags.length > 0) this.tags.set(path, parsed.tags);
+        else this.tags.delete(path);
         if (parsed.links.length > 0) {
             this.links.set(path, parsed.links);
             for (const target of parsed.links) {
@@ -124,13 +71,14 @@ export class SearchIndex {
                 if (!this.backlinks.has(key)) this.backlinks.set(key, new Set());
                 this.backlinks.get(key)!.add(path);
             }
-        } else {
-            this.links.delete(path);
-        }
+        } else this.links.delete(path);
     }
 
-    /** Remove a note from the index. */
     remove(path: string): void {
+        if (this.fullTextIndex) {
+            this.fullTextIndex.remove(path);
+            return;
+        }
         if (this.knownPaths.has(path)) {
             this.knownPaths.delete(path);
             this.mtimes.delete(path);
@@ -139,7 +87,6 @@ export class SearchIndex {
         }
     }
 
-    /** Remove all backlink entries where path is the source. */
     private clearBacklinks(path: string): void {
         const oldLinks = this.links.get(path);
         if (oldLinks) {
@@ -152,81 +99,87 @@ export class SearchIndex {
         this.links.delete(path);
     }
 
-    /** List all indexed paths, optionally filtered by folder prefix. */
-    listPaths(folder?: string): string[] {
-        return this.listWithMtime(folder).map((n) => n.path);
-    }
-
-    /** List all indexed paths with mtimes, optionally filtered by folder prefix. */
+    listPaths(folder?: string): string[] { return this.listWithMtime(folder).map((note) => note.path); }
     listWithMtime(folder?: string): Array<{ path: string; mtime: number }> {
-        const prefix = folder && !folder.endsWith("/") ? folder + "/" : folder;
-        const entries = [...this.knownPaths]
-            .filter((p) => p.endsWith(".md"))
-            .filter((p) => !prefix || p.startsWith(prefix))
-            .map((p) => ({ path: p, mtime: this.mtimes.get(p) ?? 0 }));
-        return entries.sort((a, b) => a.path.localeCompare(b.path));
+        if (this.fullTextIndex) return this.fullTextIndex.listWithMtime(folder);
+        const prefix = folder && !folder.endsWith("/") ? `${folder}/` : folder;
+        return [...this.knownPaths]
+            .filter((path) => path.endsWith(".md"))
+            .filter((path) => !prefix || path.startsWith(prefix))
+            .map((path) => ({ path, mtime: this.mtimes.get(path) ?? 0 }))
+            .sort((left, right) => left.path.localeCompare(right.path));
     }
-
-    /** Get mtime for a path. */
     getMtime(path: string): number {
-        return this.mtimes.get(path) ?? 0;
+        return this.fullTextIndex?.getMtime(path) ?? this.mtimes.get(path) ?? 0;
     }
-
-    /** Get tags for a path. */
-    getTags(path: string): string[] {
-        return this.tags.get(path) ?? [];
-    }
-
-    /** Get outgoing links for a path. */
-    getLinks(path: string): string[] {
-        return this.links.get(path) ?? [];
-    }
-
-    /** Get backlinks for a path (notes that link to it). Case-insensitive, matches by full path or filename. */
+    getTags(path: string): string[] { return this.fullTextIndex?.getTags(path) ?? this.tags.get(path) ?? []; }
+    getLinks(path: string): string[] { return this.fullTextIndex?.getLinks(path) ?? this.links.get(path) ?? []; }
     getBacklinks(path: string): string[] {
+        if (this.fullTextIndex) return this.fullTextIndex.getBacklinks(path);
         const results = new Set<string>();
-        const withMd = (path.endsWith(".md") ? path : path + ".md").toLowerCase();
+        const withMd = (path.endsWith(".md") ? path : `${path}.md`).toLowerCase();
         const withoutMd = (path.endsWith(".md") ? path.slice(0, -3) : path).toLowerCase();
-        const nameOnly = withoutMd.includes("/") ? withoutMd.slice(withoutMd.lastIndexOf("/") + 1) : withoutMd;
-
+        const nameOnly = withoutMd.includes("/")
+            ? withoutMd.slice(withoutMd.lastIndexOf("/") + 1)
+            : withoutMd;
         for (const target of [withMd, withoutMd, nameOnly]) {
-            const sources = this.backlinks.get(target);
-            if (sources) {
-                for (const s of sources) results.add(s);
-            }
+            for (const source of this.backlinks.get(target) ?? []) results.add(source);
         }
         return [...results].sort();
     }
-
-    /** List all tags across the vault with counts. */
     listAllTags(): Array<{ tag: string; count: number }> {
+        if (this.fullTextIndex) return this.fullTextIndex.listAllTags();
         const counts = new Map<string, number>();
-        for (const tags of this.tags.values()) {
-            for (const t of tags) {
-                counts.set(t, (counts.get(t) ?? 0) + 1);
-            }
+        for (const noteTags of this.tags.values()) {
+            for (const tag of noteTags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
         }
         return [...counts.entries()]
             .map(([tag, count]) => ({ tag, count }))
-            .sort((a, b) => b.count - a.count);
+            .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag));
     }
 
-    /** Clear all index data (for full rebuild after DB nuke). */
     clear(): void {
-        const paths = Array.from(this.knownPaths);
-        for (const p of paths) this.remove(p);
+        if (this.fullTextIndex) {
+            this.fullTextIndex.clear();
+            return;
+        }
+        this.mtimes.clear();
+        this.tags.clear();
+        this.links.clear();
+        this.backlinks.clear();
+        this.knownPaths.clear();
         this._since = "";
     }
-
-    get since(): string {
-        return this._since;
+    beginBatch(): void { this.fullTextIndex?.beginBatch(); }
+    commitBatch(): void { this.fullTextIndex?.commitBatch(); }
+    rollbackBatch(): void { this.fullTextIndex?.rollbackBatch(); }
+    searchNotes(options: FullTextSearchOptions): FullTextSearchResult[] {
+        return this.fullTextIndex?.search(options) ?? [];
     }
 
+    setBuildStatus(
+        state: SearchBuildState,
+        processed = this.buildState.processed,
+        total?: number,
+        message?: string,
+    ): void {
+        this.buildState = { state, processed, total, message };
+    }
+    get status(): SearchBuildStatus {
+        return {
+            ...this.buildState,
+            notes: this.size,
+            chunks: this.fullTextIndex?.chunkCount ?? 0,
+        };
+    }
+    get fullTextEnabled(): boolean { return this.fullTextIndex !== null; }
+    get fullTextSize(): number { return this.fullTextIndex?.size ?? 0; }
+    get fullTextCreatedFresh(): boolean { return this.fullTextIndex?.createdFresh ?? false; }
+    close(): void { this.fullTextIndex?.close(); }
+    get since(): string { return this.fullTextIndex?.checkpoint ?? this._since; }
     set since(value: string) {
-        this._since = value;
+        if (this.fullTextIndex) this.fullTextIndex.checkpoint = value;
+        else this._since = value;
     }
-
-    get size(): number {
-        return this.knownPaths.size;
-    }
+    get size(): number { return this.fullTextIndex?.size ?? this.knownPaths.size; }
 }
