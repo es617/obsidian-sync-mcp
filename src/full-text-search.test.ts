@@ -394,6 +394,34 @@ Provider recovery continues here with a resilience signal.`,
             name.startsWith("backend-identity.sqlite.backend-mismatch-") && name.endsWith(".bak")));
     });
 
+    it("preserves backend identity across clear() so a rebuilt index is not archived on reopen", async () => {
+        const path = join(tmpDir, "clear-identity.sqlite");
+        const first = await FullTextIndex.open(path, { backendIdentity: "backend-a" });
+        first.update("before.md", "content before the rebuild", 100);
+        // Simulate the CouchDB catch-up fallback: clear the corpus, then rebuild
+        // from scratch against the same backend.
+        first.clear();
+        first.update("after.md", "content after the rebuild", 200);
+        first.checkpoint = "rebuilt-checkpoint";
+        first.close();
+
+        const second = await FullTextIndex.open(path, { backendIdentity: "backend-a" });
+        try {
+            assert.equal(second.recreatedForIdentityMismatch, false);
+            assert.equal(second.size, 1);
+            assert.deepEqual(
+                second.search({ query: "after" }).map((r) => r.path),
+                ["after.md"],
+            );
+        } finally {
+            second.close();
+        }
+        // The rebuilt index must not have been archived as an identity mismatch.
+        const names = await readdir(tmpDir);
+        assert.ok(!names.some((name) =>
+            name.startsWith("clear-identity.sqlite.backend-mismatch-") && name.endsWith(".bak")));
+    });
+
     it("persists a newer mtime even when note content is unchanged", async () => {
         const index = await FullTextIndex.open(":memory:");
         try {

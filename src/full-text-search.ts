@@ -466,7 +466,13 @@ export class FullTextIndex {
         this.batchOpen = false;
     }
     remove(path: string): void { this.statement("DELETE FROM notes WHERE path = ?").run(path); }
-    clear(): void { this.db.exec("DELETE FROM notes; DELETE FROM index_meta;"); }
+    // Preserve backend_identity across a clear: clear() only ever rebuilds the
+    // *same* backend (the CouchDB catch-up fallback), and identity is re-inserted
+    // only for a fresh DB. Deleting it here would leave the rebuilt index with no
+    // identity row, so the next open() reads it as a mismatch and needlessly
+    // archives + full-rebuilds a valid index. `since` is intentionally dropped;
+    // the rebuild resets it from "0".
+    clear(): void { this.db.exec("DELETE FROM notes; DELETE FROM index_meta WHERE key <> 'backend_identity';"); }
 
     private filterSql(options: FullTextSearchOptions, alias = "notes") {
         const conditions: string[] = [];
