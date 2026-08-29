@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4
+
+### Fixes
+- Bump mcp-proxy to 6.7.11 so MCP responses declare `charset=utf-8` in `Content-Type`, fixing mojibake for non-ASCII note content (Cyrillic, CJK) in clients that fall back to Latin-1 when charset is omitted (#16). Fixed upstream by @Zombiehamser.
+
 ## 0.6.3
 
 ### Fixes
