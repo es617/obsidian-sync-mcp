@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+### Fixes
+- Revert the mcp-proxy 6.7.11 bump from 0.6.4, which broke every MCP session for clients speaking protocol revision 2026-07-28 (current Claude clients): mcp-proxy 6.7.x routes modern-protocol requests through `@modelcontextprotocol/server` 2.0, which is incompatible with the SDK 1.x server that fastmcp 3.x provides, crashing with a TypeError before the session is usable (#18). Back on mcp-proxy 6.4.4, the known-good version from 0.6.3. **If you are on 0.6.4, upgrade immediately (or roll back to 0.6.3).**
+- This regresses the `charset=utf-8` fix from 0.6.4; #16 is reopened and will be re-fixed once a compatible dependency path exists. Diagnosed by @mariomaz87 (#18).
+
 ## 0.6.4
 
 ### Fixes
