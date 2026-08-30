@@ -244,6 +244,54 @@ describe("E2E: delete_note", () => {
     });
 });
 
+// Regression for #18: mcp-proxy 6.7.x crashed with a TypeError on any request
+// speaking MCP protocol revision 2026-07-28+ (current Claude clients), while
+// legacy-handshake requests — everything else in this suite — kept working.
+// These requests must get a JSON-RPC error or a session, never a 500/crash.
+describe("E2E: modern-protocol requests must not crash the server", () => {
+    async function modernRequest(body: any, extraHeaders: Record<string, string> = {}) {
+        const resp = await fetch(BASE, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Authorization": `Bearer ${AUTH}`,
+                "MCP-Protocol-Version": "2026-07-28",
+                ...extraHeaders,
+            },
+            body: JSON.stringify(body),
+        });
+        return parseSSE(await resp.text());
+    }
+
+    it("survives a modern server/discover request", async () => {
+        const resp = await modernRequest({
+            jsonrpc: "2.0", id: 90, method: "server/discover",
+            params: {
+                _meta: {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
+                clientInfo: { name: "e2e-modern", version: "1.0" },
+            },
+        }, { "Mcp-Method": "server/discover" });
+        assert.notEqual(resp?.error?.code, -32603, `internal server error: ${JSON.stringify(resp)}`);
+    });
+
+    it("survives an initialize claiming a modern protocol version", async () => {
+        const resp = await modernRequest({
+            jsonrpc: "2.0", id: 91, method: "initialize",
+            params: { protocolVersion: "2026-07-28", capabilities: {}, clientInfo: { name: "e2e-modern", version: "1.0" } },
+        });
+        assert.notEqual(resp?.error?.code, -32603, `internal server error: ${JSON.stringify(resp)}`);
+    });
+
+    it("still serves the legacy session afterwards", async () => {
+        const text = await callTool("list_notes", {});
+        assert.ok(text.length > 0);
+    });
+});
+
 // --- Restart Test ---
 
 describe("E2E: READ_ONLY mode", () => {
