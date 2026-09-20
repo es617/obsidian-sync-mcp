@@ -10,6 +10,17 @@ const debugLogging = process.env.LOG_LEVEL === "debug";
 
 const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as const;
 
+// Claude Code persists any MCP tool result above ~50 000 characters to a file
+// and hands the model a 2 kB preview instead of the text. A tool can raise its
+// own threshold (hard ceiling 500 000) by declaring
+// `_meta["anthropic/maxResultSizeChars"]` in its tools/list entry; text from
+// such a tool is then also exempt from MAX_MCP_OUTPUT_TOKENS. See
+// https://code.claude.com/docs/en/mcp#raise-the-limit-for-a-specific-tool
+// read_note returns whole notes, so it declares 100 000: enough for a large
+// note to arrive in one piece, small enough to keep one read inside a sane
+// context budget. Other clients ignore the key.
+export const READ_NOTE_MAX_RESULT_SIZE_CHARS = 100_000;
+
 export function registerTools(
     server: FastMCP,
     vault: VaultBackend,
@@ -44,6 +55,7 @@ export function registerTools(
         name: "read_note",
         description:
             "Read the content of a note from the Obsidian vault. Returns the markdown content and a deep link to open it in Obsidian.",
+        _meta: { "anthropic/maxResultSizeChars": READ_NOTE_MAX_RESULT_SIZE_CHARS },
         parameters: z.object({
             path: z.string().describe("Vault-relative path to the note, e.g. 'daily/2026-03-23.md'"),
         }),
