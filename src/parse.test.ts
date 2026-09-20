@@ -51,6 +51,47 @@ Content`;
         assert.ok(result.tags.includes("project/sub-tag"));
     });
 
+    it("parses frontmatter keys with non-ASCII letters", () => {
+        const content = `---
+ämne: unicode
+senast_ändrad: 2026-09-16
+title: plain
+---
+
+Content`;
+        const result = parseFrontmatterAndLinks(content);
+        assert.equal(result.frontmatter["ämne"], "unicode");
+        assert.equal(result.frontmatter["senast_ändrad"], "2026-09-16");
+        assert.equal(result.frontmatter.title, "plain");
+    });
+
+    it("parses inline #tags with non-ASCII letters as whole tags", () => {
+        const content = "Se #lägen och #art/rutin-för-personal här, samt #日本語";
+        const result = parseFrontmatterAndLinks(content);
+        assert.ok(result.tags.includes("lägen"));
+        assert.ok(result.tags.includes("art/rutin-för-personal"));
+        assert.ok(result.tags.includes("日本語"));
+        // No truncated stubs from cutting at the first non-ASCII character
+        assert.ok(!result.tags.includes("l"));
+        assert.ok(!result.tags.includes("art/rutin-f"));
+    });
+
+    it("keeps combining marks (NFD) inside keys and tags", () => {
+        // "ä" as base letter + U+0308, built explicitly so the test does not
+        // depend on the editor's normalisation form.
+        const nfdKey = "a\u0308mne";
+        const nfdTag = "la\u0308gen";
+        const content = `---
+${nfdKey}: nfd
+---
+
+Text #${nfdTag} here`;
+        const result = parseFrontmatterAndLinks(content);
+        assert.equal(result.frontmatter[nfdKey], "nfd");
+        assert.ok(result.tags.includes(nfdTag));
+        assert.ok(!result.tags.includes("la"));
+    });
+
     it("deduplicates tags from frontmatter and inline", () => {
         const content = `---
 tags: [shared]

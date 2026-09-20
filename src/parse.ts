@@ -31,7 +31,7 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
                     inTagsList = false;
                 }
 
-                const match = line.match(/^(\w[\w-]*)\s*:\s*(.+)/);
+                const match = line.match(/^([\p{L}\p{N}_][\p{L}\p{M}\p{N}_-]*)\s*:\s*(.+)/u);
                 if (match) {
                     frontmatter[match[1]] = match[2].trim();
                 }
@@ -55,7 +55,7 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     }
 
     // Inline #tags
-    for (const match of content.matchAll(/(^|\s)#([\w/-]+)/g)) {
+    for (const match of content.matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
         tags.add(match[2]);
     }
 
