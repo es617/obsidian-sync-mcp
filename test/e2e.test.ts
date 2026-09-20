@@ -262,6 +262,11 @@ describe("E2E: move_note", () => {
 });
 
 describe("E2E: delete_note", () => {
+    it("does not claim to have deleted a note that does not exist", async () => {
+        const text = await callTool("delete_note", { path: "archive/never-existed.md" });
+        assert.equal(text, "Note not found: archive/never-existed.md");
+    });
+
     it("deletes a note", async () => {
         const text = await callTool("delete_note", { path: "archive/ci-test.md" });
         assert.ok(text.includes("Deleted"));

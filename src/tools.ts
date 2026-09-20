@@ -298,6 +298,11 @@ export function registerTools(
         }),
         execute: async ({ path }) => {
             if (!isPathWritable(path, writeFolders)) return denyWrite(path);
+            // The sync layer reports success even when nothing existed at the
+            // path, so "Deleted" would claim a cleanup that never happened.
+            // readNote returns "" for an empty note and null only when absent.
+            const existing = await vault.readNote(path);
+            if (existing === null) return `Note not found: ${path}`;
             const ok = await vault.deleteNote(path);
             if (ok) searchIndex.remove(path);
             return ok ? `Deleted: ${path}` : `Failed to delete: ${path}`;
