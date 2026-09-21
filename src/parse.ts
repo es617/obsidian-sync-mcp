@@ -54,8 +54,12 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
         }
     }
 
-    // Inline #tags
-    for (const match of content.matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
+    // Inline #tags. Obsidian does not read tags out of code, and a tag must
+    // contain at least one non-numerical character ("#1984 isn't a valid tag,
+    // but #y1984 is" — obsidian.md/help/tags), so code spans and fenced blocks
+    // are masked out first and all-digit matches are dropped.
+    for (const match of maskCode(content).matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
+        if (/^\p{N}+$/u.test(match[2])) continue;
         tags.add(match[2]);
     }
 
@@ -70,6 +74,78 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     }
 
     return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+}
+
+/**
+ * Replace fenced code blocks (``` or ~~~, opener at line start with up to three
+ * spaces of indent, closer of the same character and at least the same length;
+ * an unclosed fence runs to the end) and inline code spans (a backtick run of
+ * length n closes at the next run of exactly n; an unmatched run is literal)
+ * with dots, so offsets are preserved and nothing inside can start or extend a
+ * tag. Indented code blocks, %% comments and math are not masked.
+ */
+export function maskCode(content: string): string {
+    const lines = content.split("\n");
+    const out: string[] = [];
+    let fence: { char: string; len: number } | null = null;
+    const inline: string[] = [];
+    const flushInline = () => {
+        if (inline.length === 0) return;
+        out.push(...maskInlineSpans(inline.join("\n")).split("\n"));
+        inline.length = 0;
+    };
+    for (const line of lines) {
+        const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
+        if (fence) {
+            const close = open && open[1][0] === fence.char && open[1].length >= fence.len && line.trim() === open[1];
+            out.push(".".repeat(line.length));
+            if (close) fence = null;
+            continue;
+        }
+        if (open && (open[1][0] === "~" || !line.slice(open[0].length).includes("`"))) {
+            flushInline();
+            fence = { char: open[1][0], len: open[1].length };
+            out.push(".".repeat(line.length));
+            continue;
+        }
+        inline.push(line);
+    }
+    flushInline();
+    return out.join("\n");
+}
+
+function maskInlineSpans(text: string): string {
+    let result = "";
+    let i = 0;
+    while (i < text.length) {
+        if (text[i] !== "`") {
+            result += text[i++];
+            continue;
+        }
+        let n = 0;
+        while (text[i + n] === "`") n++;
+        const run = "`".repeat(n);
+        // Find the next backtick run of exactly n.
+        let j = i + n;
+        let closeAt = -1;
+        while (j < text.length) {
+            const k = text.indexOf(run, j);
+            if (k === -1) break;
+            let m = 0;
+            while (text[k + m] === "`") m++;
+            if (m === n) { closeAt = k; break; }
+            j = k + m;
+        }
+        if (closeAt === -1) {
+            result += run;
+            i += n;
+            continue;
+        }
+        const span = text.slice(i, closeAt + n);
+        result += span.replace(/[^\n]/g, ".");
+        i = closeAt + n;
+    }
+    return result;
 }
 
 export function extractSnippet(content: string, query: string, context = 80): string {
