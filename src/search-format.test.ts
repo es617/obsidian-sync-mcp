@@ -9,6 +9,8 @@ import { describeHits, describeQuery, describeSync, formatServerTime, seqPrefix,
 
 const JAN = Date.parse("2026-01-15T12:00:00Z");
 const JUL = Date.parse("2026-07-15T12:00:00Z");
+/** Pinned so the expected strings hold on any machine (CI runs in UTC). */
+const ZONE = "Europe/Stockholm";
 
 function status(overrides: Partial<SyncStatus> = {}): SyncStatus {
     return {
@@ -48,7 +50,7 @@ describe("seqPrefix", () => {
 describe("describeSync", () => {
     it("ready: sequence, time, age, coverage", () => {
         assert.equal(
-            describeSync(status()),
+            describeSync(status(), ZONE),
             "Index caught up with CouchDB seq 39995 — 2026-07-15 14:00 CEST (12:00Z), 0 min; 358 of 358 notes with content.",
         );
     });
@@ -63,14 +65,14 @@ describe("describeSync", () => {
         assert.match(describeSync(status({ syncedAt: JUL - 7 * 60_000 })), /, 7 min;/);
     });
     it("building: says not caught up", () => {
-        const line = describeSync(status({ state: "building", notes: 57, withContent: 57 }));
+        const line = describeSync(status({ state: "building", notes: 57, withContent: 57 }), ZONE);
         assert.match(line, /^Index: still building \(57 notes so far\), not caught up — 2026-07-15 14:00 CEST \(12:00Z\); results may be incomplete\.$/);
     });
     it("failed: says not caught up", () => {
         assert.match(describeSync(status({ state: "failed" })), /^Index: rebuild failed at startup .* not caught up/);
     });
     it("catch-up error: keeps the last sequence and its age, flags staleness", () => {
-        const line = describeSync(status({ error: "socket hang up", syncedAt: JUL - 3 * 60_000 }));
+        const line = describeSync(status({ error: "socket hang up", syncedAt: JUL - 3 * 60_000 }), ZONE);
         assert.equal(
             line,
             "Index: catch-up failed (socket hang up); last caught up with CouchDB seq 39995 — 2026-07-15 13:57 CEST (11:57Z), 3 min ago; results may be stale.",
@@ -78,7 +80,7 @@ describe("describeSync", () => {
     });
     it("local vault: no sequence, coverage stated", () => {
         assert.equal(
-            describeSync(status({ mode: "local", notes: 3, withContent: 3 })),
+            describeSync(status({ mode: "local", notes: 3, withContent: 3 }), ZONE),
             "Index: local vault, no sequence — 2026-07-15 14:00 CEST (12:00Z); 3 of 3 notes with content.",
         );
     });

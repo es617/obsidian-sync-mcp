@@ -66,9 +66,9 @@ function plural(n: number, word: string): string {
     return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-/** First line of every search_notes response. */
-export function describeSync(s: SyncStatus): string {
-    const now = formatServerTime(s.now);
+/** First line of every search_notes response. `timeZone` is the display zone; tests pass it so the wording does not depend on the machine's zone. */
+export function describeSync(s: SyncStatus, timeZone: string = DISPLAY_TIMEZONE): string {
+    const now = formatServerTime(s.now, timeZone);
     const coverage = `${s.withContent} of ${plural(s.notes, "note")} with content`;
     if (s.mode === "local") {
         return `Index: local vault, no sequence — ${now}; ${coverage}.`;
@@ -80,7 +80,7 @@ export function describeSync(s: SyncStatus): string {
         return `Index: rebuild failed at startup (see server log), not caught up — ${now}; results may be incomplete or stale.`;
     }
     if (s.error) {
-        const last = s.syncedAt === null ? "never" : `${formatServerTime(s.syncedAt)}, ${minutesBetween(s.syncedAt, s.now)} min ago`;
+        const last = s.syncedAt === null ? "never" : `${formatServerTime(s.syncedAt, timeZone)}, ${minutesBetween(s.syncedAt, s.now)} min ago`;
         return `Index: catch-up failed (${s.error}); last caught up with CouchDB seq ${seqPrefix(s.seq)} — ${last}; results may be stale.`;
     }
     const age = s.syncedAt === null ? 0 : minutesBetween(s.syncedAt, s.now);
