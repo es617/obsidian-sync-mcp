@@ -5,8 +5,14 @@ import type { VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 import { isPathWritable } from "./write-scope.js";
 import { describeListing, describeNoMatch } from "./list-format.js";
+import { describeHits, describeQuery, describeSync, type SyncStatus } from "./search-format.js";
 
 const debugLogging = process.env.LOG_LEVEL === "debug";
+
+/** Runs a CouchDB catch-up before a search; undefined in local (VAULT_PATH) mode. */
+export type SyncBeforeSearch = () => Promise<{ unreadable: number; error?: string }>;
+
+export const SEARCH_MAX_HITS = 20;
 
 const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as const;
 
@@ -28,6 +34,7 @@ export function registerTools(
     vaultName: string,
     readOnly = false,
     writeFolders: string[] | null = null,
+    syncBeforeSearch?: SyncBeforeSearch,
 ) {
     if (readOnly) {
         console.log(`READ_ONLY mode: write tools disabled (${WRITE_TOOLS.join(", ")}).`);
@@ -175,6 +182,69 @@ export function registerTools(
                 return `- ${date} [${n.path}](${deepLink})`;
             });
             return [header, ...lines].join("\n");
+        },
+    });
+
+    server.addTool({
+        name: "search_notes",
+        description:
+            "Search note contents for terms, case-insensitive.\n" +
+            "Paths and frontmatter titles are searched first and such hits rank on top, marked [path/title]; content hits follow. " +
+            "Returns paths with one context line each, never the note body: call read_note on a hit before relying on it. " +
+            "Give `terms` (a note matches when ANY term occurs — OR, so list synonyms, field names and other-language wordings; a term may contain spaces; ranked by how many terms match) " +
+            "Filters: folder, tag, modified_after. " +
+            "The first line of every response is the index status: the CouchDB sequence the index is caught up with after a catch-up run just before the search, " +
+            "the server time (local zone and UTC), its age in minutes, how many notes carry content, and any documents that could not be read.",
+        parameters: z.object({
+            terms: z
+                .array(z.string())
+                .optional()
+                .describe("Case-insensitive substrings; a note matches when any of them occurs. E.g. ['drag i kanban', 'kanban', 'labels på kategori']."),
+            folder: z
+                .string()
+                .optional()
+                .describe("Folder to search in, e.g. 'projects'. Omit for the whole vault."),
+            tag: z
+                .string()
+                .optional()
+                .describe("Only notes carrying this tag, e.g. 'project'."),
+            modified_after: z
+                .string()
+                .optional()
+                .describe("Only notes modified after this ISO date, e.g. '2026-03-25' or '2026-03-25T10:00'."),
+            limit: z.coerce
+                .number()
+                .optional()
+                .describe(`Max hits to return, default and maximum ${SEARCH_MAX_HITS}.`),
+        }),
+        execute: async ({ terms, folder, tag, modified_after, limit }) => {
+            const cleanTerms = (terms ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
+            if (cleanTerms.length === 0) {
+                return "Give at least one term.";
+            }
+            let modifiedAfter: number | undefined;
+            if (modified_after) {
+                modifiedAfter = new Date(modified_after).getTime();
+                if (isNaN(modifiedAfter)) return `Invalid date format: ${modified_after}. Use ISO format like '2026-03-25'.`;
+            }
+            const cap = Math.max(1, Math.min(SEARCH_MAX_HITS, limit ?? SEARCH_MAX_HITS));
+
+            // Catch up first, so a hit can never predate the vault (see main.ts).
+            const sync = syncBeforeSearch ? await syncBeforeSearch() : { unreadable: 0 };
+            const status: SyncStatus = {
+                mode: syncBeforeSearch ? "couchdb" : "local",
+                state: searchIndex.state,
+                seq: searchIndex.since,
+                syncedAt: searchIndex.lastSyncAt,
+                now: Date.now(),
+                notes: searchIndex.size,
+                withContent: searchIndex.contentCount,
+                unreadable: sync.unreadable,
+                error: sync.error,
+            };
+            const { hits, total } = searchIndex.search({ terms: cleanTerms, folder, tag, modifiedAfter, limit: cap });
+            const query = describeQuery(cleanTerms);
+            return `${describeSync(status)}\n${describeHits(hits, total, query, (p) => makeDeepLink(vaultName, p))}`;
         },
     });
 

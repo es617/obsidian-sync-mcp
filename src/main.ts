@@ -108,6 +108,13 @@ await searchIndex.loadFromDisk();
 if (debugLogging) {
     console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
 }
+// The persisted file carries metadata only. A catch-up from its checkpoint
+// would leave every unchanged note without text, and search_notes would then
+// claim "caught up" while seeing a fraction of the vault. Start from zero.
+if (searchIndex.size > 0 && searchIndex.contentCount < searchIndex.size) {
+    console.log(`Persisted index has metadata for ${searchIndex.size} notes but no content; rebuilding from scratch so search_notes covers every note.`);
+    searchIndex.clear();
+}
 
 // Sync metadata in background (server starts immediately)
 async function rebuildIndex() {
@@ -135,6 +142,7 @@ async function rebuildIndex() {
             };
             const newSince = await vault.catchUp(since, countingCallback, onBatch);
             searchIndex.since = newSince;
+            searchIndex.lastSyncAt = Date.now();
         } catch (err) {
             console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
             searchIndex.clear();
@@ -144,6 +152,7 @@ async function rebuildIndex() {
                 changeCallback(path, content, mtime);
             }, onBatch);
             searchIndex.since = newSince;
+            searchIndex.lastSyncAt = Date.now();
         }
         if (changes > 0) {
             console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
@@ -179,6 +188,37 @@ rebuildIndex().catch((err) => {
     searchIndex.state = "failed";
     console.error("Index rebuild failed:", err);
 });
+
+// --- Pre-search catch-up ---
+// search_notes calls this before every search so a hit can never predate the
+// vault: one `_changes` request from the index's own sequence (milliseconds
+// when nothing changed), applied through the same applyIndexChange path as
+// the startup rebuild and the watcher. Calls are serialized so two searches
+// cannot interleave their batches. Errors are returned, never thrown: the
+// search still runs on the index as it is and the status line says so.
+let syncChain: Promise<unknown> = Promise.resolve();
+async function syncBeforeSearch(): Promise<{ unreadable: number; error?: string }> {
+    if (!(COUCHDB_URL && vault.catchUp) || searchIndex.state !== "ready") return { unreadable: 0 };
+    const run = async () => {
+        const stats = { unreadable: 0 };
+        try {
+            const newSince = await vault.catchUp!(
+                searchIndex.since || "0",
+                (path, content, mtime) => applyIndexChange(searchIndex, path, content, mtime),
+                undefined,
+                stats,
+            );
+            searchIndex.since = newSince;
+            searchIndex.lastSyncAt = Date.now();
+            return { unreadable: stats.unreadable };
+        } catch (err) {
+            return { unreadable: stats.unreadable, error: err instanceof Error ? err.message : String(err) };
+        }
+    };
+    const result = syncChain.then(run, run);
+    syncChain = result.catch(() => undefined);
+    return result;
+}
 
 // --- Watch for external changes ---
 let fsWatcher: ReturnType<typeof watch> | null = null;
@@ -217,7 +257,10 @@ if (VAULT_PATH) {
         if (debugLogging) console.log(`[debug] CouchDB ${content === null ? "delete" : "change"}: ${path}`);
         // content === "" is an empty-but-present note: index it, don't drop it.
         applyIndexChange(searchIndex, path, content, mtime);
-        if (seq) searchIndex.since = String(seq);
+        if (seq) {
+            searchIndex.since = String(seq);
+            searchIndex.lastSyncAt = Date.now();
+        }
     });
     console.log("Watching CouchDB for LiveSync changes.");
 }
@@ -288,7 +331,7 @@ if (AUTH_TOKEN) {
 }
 
 // --- Tools ---
-registerTools(server, vault, searchIndex, VAULT_NAME, READ_ONLY, WRITE_FOLDERS);
+registerTools(server, vault, searchIndex, VAULT_NAME, READ_ONLY, WRITE_FOLDERS, COUCHDB_URL ? syncBeforeSearch : undefined);
 
 // --- Graceful shutdown ---
 async function shutdown() {

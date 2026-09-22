@@ -140,6 +140,7 @@ export class Vault implements VaultBackend {
         since: string,
         callback: (path: string, content: string | null, mtime?: number) => void,
         onBatch?: (since: string, processed: number) => Promise<void>,
+        stats?: { unreadable: number },
     ): Promise<string> {
         // Paginate _changes in batches to limit memory usage.
         const BATCH_SIZE = 50;
@@ -165,11 +166,21 @@ export class Vault implements VaultBackend {
                 // Decrypt path to check .md BEFORE fetching chunks (avoids loading large attachments)
                 let path = meta.path ?? "";
                 if (isPathProbablyObfuscated(path) && this.passphrase) {
-                    try { path = await decrypt(path, this.passphrase, false); } catch { continue; }
+                    try { path = await decrypt(path, this.passphrase, false); } catch {
+                        // Path could not be decrypted: the note is skipped and stays
+                        // invisible to the index. Counted so search_notes can say so.
+                        if (stats) stats.unreadable++;
+                        continue;
+                    }
                 }
                 if (!path.endsWith(".md") && !meta.deleted) continue;
                 const doc = await this.manipulator.getByMeta(meta).catch(() => null);
-                if (doc) Vault.docToChange(doc, callback);
+                if (doc) {
+                    Vault.docToChange(doc, callback);
+                } else if (stats && !meta.deleted) {
+                    // Chunks missing or undecryptable for a live note: same class of silent miss.
+                    stats.unreadable++;
+                }
             }
 
             totalProcessed += result.results.length;
