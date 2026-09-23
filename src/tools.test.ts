@@ -21,3 +21,12 @@ test("no other tool carries the annotation", () => {
         assert.equal(tool._meta, undefined, `${tool.name} should not declare _meta`);
     }
 });
+
+test("search_notes is registered with a whole first sentence under 75 characters", () => {
+    const tool = captureTools().find((t) => t.name === "search_notes") as any;
+    assert.ok(tool, "search_notes registered");
+    const firstLine = String(tool.description).split("\n")[0];
+    assert.ok(firstLine.length < 75, `first line is ${firstLine.length} chars`);
+    assert.ok(firstLine.endsWith("."), "first line ends with a period");
+    assert.equal(tool._meta, undefined);
+});

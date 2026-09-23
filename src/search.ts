@@ -1,9 +1,10 @@
 /**
  * Metadata index for vault notes.
  *
- * Tracks paths, mtimes, tags, links, and backlinks.
- * Persists to disk (encrypted if passphrase is set).
- * No full-text search — metadata only.
+ * Tracks paths, mtimes, tags, links, and backlinks, and keeps the decrypted
+ * note text in memory for `search_notes` (substring search over content).
+ * Metadata persists to disk (encrypted if passphrase is set); the content map
+ * is rebuilt from the vault at startup and is never written to disk.
  */
 
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
@@ -33,9 +34,38 @@ function decrypt(data: string, passphrase: string): string {
 /**
  * Lifecycle of the in-memory index. "building" from construction until the
  * startup rebuild finishes, "ready" afterwards, "failed" if the rebuild threw.
- * Read by list_notes so a client can tell a partial index from a complete one.
+ * Read by list_notes and search_notes so a client can tell a partial index from a complete one.
  */
 export type IndexState = "building" | "ready" | "failed";
+
+export interface SearchQuery {
+    /** Case-insensitive substrings; a note matches when ANY term occurs (OR). A term may contain spaces. */
+    terms?: string[];
+    folder?: string;
+    tag?: string;
+    /** Only notes with mtime >= this (ms since epoch). */
+    modifiedAfter?: number;
+    limit?: number;
+}
+
+export interface SearchHit {
+    path: string;
+    mtime: number;
+    /** Distinct terms that matched in path/title or content. */
+    matched: number;
+    /** True when the path or the frontmatter title matched. Name hits rank first. */
+    nameHit: boolean;
+    /** One line of context around the first content match; whitespace collapsed. Empty for a name-only hit. */
+    snippet: string;
+}
+
+/** Cut a one-line snippet around `idx` (match of length `len`), whitespace collapsed. */
+export function snippetAround(text: string, idx: number, len: number, context = 80): string {
+    const start = Math.max(0, idx - context);
+    const end = Math.min(text.length, idx + len + context);
+    const body = text.slice(start, end).replace(/\s+/g, " ").trim();
+    return (start > 0 ? "…" : "") + body + (end < text.length ? "…" : "");
+}
 
 export class SearchIndex {
     private _state: IndexState = "building";
@@ -44,8 +74,14 @@ export class SearchIndex {
     private links = new Map<string, string[]>();
     private backlinks = new Map<string, Set<string>>();
     private knownPaths = new Set<string>();
+    /** Decrypted note text, in memory only — one copy per note; term matching is case-insensitive via a regex per term. */
+    private content = new Map<string, string>();
+    /** Frontmatter `title:` per path, when present — searched together with the path. */
+    private titles = new Map<string, string>();
     private saving = false;
     private _since: string = "";
+    /** When `since` last advanced from a completed catch-up or a watcher change (ms), null before the first. */
+    private _lastSyncAt: number | null = null;
     private persistPath: string | null;
     private passphrase: string | null;
 
@@ -119,7 +155,16 @@ export class SearchIndex {
         }
         this.knownPaths.add(path);
         if (mtime !== undefined) this.mtimes.set(path, mtime);
+        // Same code path for the startup catch-up, the watcher and the
+        // pre-search catch-up: whatever updates metadata also updates content.
+        this.content.set(path, content);
         const parsed = parseFrontmatterAndLinks(content);
+        const title = parsed.frontmatter["title"];
+        if (typeof title === "string" && title.trim().length > 0) {
+            this.titles.set(path, title.trim());
+        } else {
+            this.titles.delete(path);
+        }
         if (parsed.tags.length > 0) {
             this.tags.set(path, parsed.tags);
         } else {
@@ -143,8 +188,74 @@ export class SearchIndex {
             this.knownPaths.delete(path);
             this.mtimes.delete(path);
             this.tags.delete(path);
+            this.content.delete(path);
+            this.titles.delete(path);
             this.clearBacklinks(path);
         }
+    }
+
+    /** Decrypted text of a note, or null if the index holds no content for it. */
+    getContent(path: string): string | null {
+        return this.content.get(path) ?? null;
+    }
+
+    /** Notes whose text is in memory. Below `size` means search cannot see every note. */
+    get contentCount(): number {
+        return this.content.size;
+    }
+
+    /**
+     * Search over path + frontmatter title first, then the in-memory text.
+     * Ranked: name hits first, then number of distinct terms matched, then
+     * newest first, then path. `limit` defaults to 20.
+     */
+    search(q: SearchQuery): { hits: SearchHit[]; total: number } {
+        const prefix = q.folder ? (q.folder.endsWith("/") ? q.folder : q.folder + "/") : undefined;
+        const terms = (q.terms ?? []).filter((t) => t.length > 0).map((t) => ({
+            text: t.toLowerCase(),
+            // Case-insensitive (Unicode) search over the note text without a lowercased copy of the vault in memory.
+            re: new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"),
+        }));
+        const hits: SearchHit[] = [];
+        for (const [path, entry] of this.content) {
+            if (!path.endsWith(".md")) continue;
+            if (prefix && !path.startsWith(prefix)) continue;
+            if (q.tag && !this.getTags(path).includes(q.tag)) continue;
+            const mtime = this.mtimes.get(path) ?? 0;
+            if (q.modifiedAfter !== undefined && mtime < q.modifiedAfter) continue;
+            // Step 1: path and title. Step 2: content. A term counts once even if it hits both.
+            const title = this.titles.get(path);
+            const name = title ? `${path} ${title}` : path;
+            const nameLower = name.toLowerCase();
+            let matched = 0;
+            let nameHit = false;
+            let anchor = -1;
+            let anchorLen = 1;
+            {
+                for (const t of terms) {
+                    const inName = nameLower.includes(t.text);
+                    const i = entry.search(t.re);
+                    if (!inName && i === -1) continue;
+                    matched++;
+                    if (inName) nameHit = true;
+                    if (i !== -1 && (anchor === -1 || i < anchor)) {
+                        anchor = i;
+                        anchorLen = t.text.length;
+                    }
+                }
+                if (matched === 0) continue;
+            }
+            const snippet = anchor === -1 ? "" : snippetAround(entry, anchor, anchorLen);
+            hits.push({ path, mtime, matched, nameHit, snippet });
+        }
+        hits.sort(
+            (a, b) =>
+                Number(b.nameHit) - Number(a.nameHit) ||
+                b.matched - a.matched ||
+                b.mtime - a.mtime ||
+                a.path.localeCompare(b.path),
+        );
+        return { hits: hits.slice(0, q.limit ?? 20), total: hits.length };
     }
 
     /** Remove all backlink entries where path is the source. */
@@ -241,6 +352,14 @@ export class SearchIndex {
 
     set since(value: string) {
         this._since = value;
+    }
+
+    get lastSyncAt(): number | null {
+        return this._lastSyncAt;
+    }
+
+    set lastSyncAt(value: number | null) {
+        this._lastSyncAt = value;
     }
 
     get size(): number {
