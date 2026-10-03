@@ -10,6 +10,7 @@ import { applyIndexChange } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { registerTools } from "./tools.js";
 import { parseWriteFolders } from "./write-scope.js";
+import { redactCredentials, describeError } from "./redact.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -20,7 +21,7 @@ setGlobalLogFunction((message, level = LEVEL_INFO) => {
         if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
         if (message.includes("replicator") || message.includes("Replicator") || message.includes("ReplicatorService")) return;
     }
-    console.log(message);
+    console.log(typeof message === "string" ? redactCredentials(message) : message);
 });
 
 // --- Configuration from environment ---
@@ -85,13 +86,18 @@ if (VAULT_PATH) {
         passphrase: COUCHDB_PASSPHRASE,
         obfuscatePaths: COUCHDB_OBFUSCATE_PROPERTIES,
     });
-    console.log(`Remote mode: ${COUCHDB_URL}`);
+    console.log(`Remote mode: ${redactCredentials(COUCHDB_URL)}`);
 } else {
     console.error("Set VAULT_PATH for local mode or COUCHDB_URL for remote mode.");
     process.exit(1);
 }
 
-await vault.init();
+try {
+    await vault.init();
+} catch (err) {
+    console.error(`Failed to open the vault: ${describeError(err, debugLogging)}`);
+    process.exit(1);
+}
 console.log("Vault ready.");
 
 // --- Per-vault data directory ---
@@ -136,7 +142,7 @@ async function rebuildIndex() {
             const newSince = await vault.catchUp(since, countingCallback, onBatch);
             searchIndex.since = newSince;
         } catch (err) {
-            console.warn(`Catch-up failed (${err}), rebuilding index from scratch...`);
+            console.warn(`Catch-up failed (${describeError(err, debugLogging)}), rebuilding index from scratch...`);
             searchIndex.clear();
             changes = 0;
             const newSince = await vault.catchUp("0", (path, content, mtime) => {
@@ -177,7 +183,7 @@ async function rebuildIndex() {
 // Fire and forget — server starts while index builds
 rebuildIndex().catch((err) => {
     searchIndex.state = "failed";
-    console.error("Index rebuild failed:", err);
+    console.error(`Index rebuild failed: ${describeError(err, debugLogging)}`);
 });
 
 // --- Watch for external changes ---
@@ -320,5 +326,5 @@ console.log(`obsidian-sync-mcp v${process.env.npm_package_version ?? "unknown"} 
 
 // Prevent unhandled rejections from crashing the server (e.g. decryption failures in watcher)
 process.on("unhandledRejection", (err) => {
-    console.error("Unhandled rejection:", err);
+    console.error(`Unhandled rejection: ${describeError(err, debugLogging)}`);
 });
