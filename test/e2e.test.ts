@@ -124,6 +124,20 @@ describe("E2E: Auth", () => {
         });
         assert.equal(resp.status, 401);
     });
+
+    it("rejects a non-ASCII bearer token with a normal 401", async () => {
+        // Same string length as the real header but more UTF-8 bytes; this used to
+        // throw inside the token check and surface the crypto error in the response.
+        const forged = `Bearer ${AUTH.slice(0, -1)}é`;
+        const resp = await fetch(BASE, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Authorization": forged },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "e2e", version: "1.0" } } }),
+        });
+        assert.equal(resp.status, 401);
+        assert.ok(resp.headers.get("www-authenticate")?.includes("resource_metadata="));
+        assert.ok(!(await resp.text()).includes("byte length"));
+    });
 });
 
 describe("E2E: list_notes", () => {

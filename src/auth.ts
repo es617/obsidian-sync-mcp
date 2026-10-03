@@ -55,6 +55,17 @@ const MAX_CLIENTS = 100;
 const MAX_PENDING = 100;
 const PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+/**
+ * Constant-time string comparison for secrets. Comparing SHA-256 digests gives
+ * timingSafeEqual equal-length inputs, so it never throws on a length or
+ * encoding mismatch and the secret's length is not revealed.
+ */
+export function safeEqual(a: string, b: string): boolean {
+    const da = createHash("sha256").update(a).digest();
+    const db = createHash("sha256").update(b).digest();
+    return timingSafeEqual(da, db);
+}
+
 export interface AuthHandle {
     validateToken: (auth: string | undefined) => boolean;
     saveTokens: () => Promise<void>;
@@ -289,9 +300,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
             return c.html(renderPasswordPage(code, newCsrf, `Too many attempts. Try again in ${waitSec} seconds.`), 429);
         }
 
-        const a = Buffer.from(submittedPassword);
-        const b = Buffer.from(password);
-        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+        if (typeof submittedPassword !== "string" || !safeEqual(submittedPassword, password)) {
             failedAttempts++;
             console.warn(`Auth: failed attempt ${failedAttempts} total`);
 

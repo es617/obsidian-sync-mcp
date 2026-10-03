@@ -1,10 +1,10 @@
 import { FastMCP } from "fastmcp";
 import { join } from "path";
-import { timingSafeEqual, createHash } from "crypto";
+import { createHash } from "crypto";
 import { watch, readFileSync, statSync } from "fs";
 import { stat } from "fs/promises";
 import { setGlobalLogFunction, LEVEL_INFO } from "octagonal-wheels/common/logger";
-import { mountPasswordAuth } from "./auth.js";
+import { mountPasswordAuth, safeEqual } from "./auth.js";
 import { SearchIndex } from "./search.js";
 import { applyIndexChange } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
@@ -239,7 +239,7 @@ if (AUTH_TOKEN) {
         const header = req.headers["authorization"];
         // Accept static Bearer token (for curl, MCP Inspector, custom agents)
         const expected = `Bearer ${AUTH_TOKEN}`;
-        if (header && header.length === expected.length && timingSafeEqual(Buffer.from(header), Buffer.from(expected))) {
+        if (header && safeEqual(header, expected)) {
             return { authenticated: true };
         }
         // Accept OAuth-issued tokens (for Claude Web/Desktop/Mobile)
