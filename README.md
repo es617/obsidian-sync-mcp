@@ -286,7 +286,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 |---|---|
 | `npx obsidian-sync-mcp` | Automatic — npx pulls latest |
 | Fly.io | From the same directory where you ran setup: `fly deploy`. If you lost the fly.toml, run `fly config save --app your-app-name` to restore it. |
-| Docker | `docker pull ghcr.io/es617/obsidian-sync-mcp:latest` and restart |
+| Docker | `docker pull ghcr.io/es617/obsidian-sync-mcp:latest` and restart. The image runs as the unprivileged `node` user (uid 1000). If your data volume was created by an older image that ran as root, make it writable once: `docker run --rm -v mcp-data:/data alpine chown -R 1000:1000 /data` (for a bind mount, `chown -R 1000:1000` the host directory) |
 
 ---
 
