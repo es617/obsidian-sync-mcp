@@ -8,6 +8,7 @@ import { mountPasswordAuth } from "./auth.js";
 import { SearchIndex } from "./search.js";
 import { applyIndexChange } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
+import { readOnlyVault } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
 import { parseWriteFolders } from "./write-scope.js";
 
@@ -93,6 +94,10 @@ if (VAULT_PATH) {
 
 await vault.init();
 console.log("Vault ready.");
+
+// READ_ONLY also hides the write tools (see registerTools); wrapping the backend
+// makes any write that bypasses the tools fail too.
+if (READ_ONLY) vault = readOnlyVault(vault);
 
 // --- Per-vault data directory ---
 const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
