@@ -285,9 +285,7 @@ export function mountPasswordAuth(app: Hono, baseUrl: string, password: string, 
         }
 
         // Validate CSRF token
-        const csrfA = Buffer.from(submittedCsrf ?? "");
-        const csrfB = Buffer.from(expectedCsrf);
-        if (csrfA.length !== csrfB.length || !timingSafeEqual(csrfA, csrfB)) {
+        if (typeof submittedCsrf !== "string" || !safeEqual(submittedCsrf, expectedCsrf)) {
             return c.html("<p>Invalid request.</p>", 403);
         }
 

@@ -255,6 +255,8 @@ describe("/oauth/approve — password validation", () => {
         assert.ok((await resp.text()).includes("Wrong password"));
     });
 
+    // Regression guard: this path compared byte lengths and never threw; it keeps
+    // safeEqual from changing that. The bug fixed on this path is the missing field below.
     it("rejects a same-length non-ASCII password with 401", async () => {
         const { app } = setup("test-password");
         const client = await registerClient(app);
