@@ -21,6 +21,8 @@ setGlobalLogFunction((message, level = LEVEL_INFO) => {
         if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
         if (message.includes("replicator") || message.includes("Replicator") || message.includes("ReplicatorService")) return;
     }
+    // Only strings are redacted; the library logs plain strings in practice, and
+    // non-string values are passed through unchanged.
     console.log(typeof message === "string" ? redactCredentials(message) : message);
 });
 

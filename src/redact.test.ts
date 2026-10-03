@@ -46,6 +46,24 @@ describe("describeError", () => {
         assert.ok(describeError(err, true).includes("at "));
     });
 
+    it("appends the cause, as fetch() reports it", () => {
+        const cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5984"), { code: "ECONNREFUSED" });
+        const err = new TypeError("fetch failed", { cause });
+        assert.equal(describeError(err), "TypeError: fetch failed (cause: connect ECONNREFUSED 127.0.0.1:5984)");
+    });
+
+    it("follows a nested cause chain and redacts it", () => {
+        const inner = new Error("getaddrinfo ENOTFOUND http://u:p@db");
+        const err = new Error("outer", { cause: new Error("middle", { cause: inner }) });
+        assert.equal(describeError(err), "Error: outer (cause: middle <- getaddrinfo ENOTFOUND http://***@db)");
+    });
+
+    it("uses the code when a cause has no message, and stringifies non-Error causes", () => {
+        const noMessage = Object.assign(new Error(""), { code: "ETIMEDOUT" });
+        assert.equal(describeError(new Error("x", { cause: noMessage })), "Error: x (cause: ETIMEDOUT)");
+        assert.equal(describeError(new Error("x", { cause: "socket hang up" })), "Error: x (cause: socket hang up)");
+    });
+
     it("stringifies non-Error values", () => {
         assert.equal(describeError("http://u:p@h"), "http://***@h");
         assert.equal(describeError(42), "42");

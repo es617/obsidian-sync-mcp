@@ -256,7 +256,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `HOST` | Optional | `0.0.0.0` | Bind address (`127.0.0.1` to restrict to localhost) |
 | `MCP_ALLOWED_HOSTS` | Optional | — | Comma-separated extra `Host` values accepted in no-auth mode (e.g. `192.168.1.5,mybox.local`). No-auth mode rejects any other Host to block browser DNS-rebinding; localhost is always allowed. Ignored when `MCP_AUTH_TOKEN` is set. |
 | `DATA_DIR` | Optional | `~/.obsidian-mcp` | Directory for persisted data (metadata index, auth tokens) |
-| `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync, full error stacks). Debug logging also records every tool call's arguments, including note contents, so don't leave it on in production. Credentials embedded in `COUCHDB_URL` are redacted from logs either way. |
+| `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync) |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 | `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP. Useful when sharing the server with multiple AI clients and write access should be opt-in. |
 | `WRITE_FOLDERS` | Optional | — | Comma-separated list of vault-relative folders where writes are allowed (e.g. `MCP,Inbox`). When set, the whole vault stays readable but `write_note`, `edit_note`, `delete_note`, and `move_note` refuse paths outside these folders (`move_note` requires both source and destination to be writable). Enforced server-side, unlike `MCP_INSTRUCTIONS`. Matching is case-sensitive and folder-boundary-aware (`MCP` matches `MCP/note.md` but not `MCP-private/note.md`). Ignored when `READ_ONLY=true`; unset means the whole vault is writable. |
@@ -311,6 +311,8 @@ This server gives an AI agent read/write access to your Obsidian vault.
 **Authentication is optional.** Always set `MCP_AUTH_TOKEN` when exposing to the internet.
 
 **Use HTTPS in production.** Use a tunnel or deploy behind a reverse proxy.
+
+**Don't leave `LOG_LEVEL=debug` on in production.** Debug logging records every tool call's arguments, including note contents, and full error stacks. Credentials embedded in `COUCHDB_URL` are redacted from logs at every level.
 
 This software is provided as-is under the [MIT license](https://github.com/es617/obsidian-sync-mcp/blob/main/LICENSE). You are responsible for what agents do with your vault.
 
