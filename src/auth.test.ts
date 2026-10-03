@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { Hono } from "hono";
 import { createHash, randomBytes } from "crypto";
-import { mountPasswordAuth } from "./auth.js";
+import { mountPasswordAuth, safeEqual } from "./auth.js";
 
 function setup(password = "test-password") {
     const app = new Hono();
@@ -253,6 +253,31 @@ describe("/oauth/approve — password validation", () => {
         const resp = await submitPassword(app, fields.code, fields.csrf, "wrong");
         assert.equal(resp.status, 401);
         assert.ok((await resp.text()).includes("Wrong password"));
+    });
+
+    // Regression guard: this path compared byte lengths and never threw; it keeps
+    // safeEqual from changing that. The bug fixed on this path is the missing field below.
+    it("rejects a same-length non-ASCII password with 401", async () => {
+        const { app } = setup("test-password");
+        const client = await registerClient(app);
+        const pkce = generatePKCE();
+        const { fields } = await getAuthorizePage(app, client.client_id, pkce.challenge);
+        const resp = await submitPassword(app, fields.code, fields.csrf, "test-passworé");
+        assert.equal(resp.status, 401);
+        assert.ok((await resp.text()).includes("Wrong password"));
+    });
+
+    it("rejects a missing password field with 401, not 500", async () => {
+        const { app } = setup();
+        const client = await registerClient(app);
+        const pkce = generatePKCE();
+        const { fields } = await getAuthorizePage(app, client.client_id, pkce.challenge);
+        const resp = await app.request("/oauth/approve", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ code: fields.code, csrf: fields.csrf }).toString(),
+        });
+        assert.equal(resp.status, 401);
     });
 
     it("redirects with code and state on correct password", async () => {
@@ -507,5 +532,22 @@ describe("validateToken", () => {
         const { app, validateToken } = setup();
         const tokens = await completeOAuthFlow(app, "test-password");
         assert.ok(validateToken(`Bearer ${tokens.access_token}`));
+    });
+});
+
+describe("safeEqual", () => {
+    it("matches identical strings", () => {
+        assert.equal(safeEqual("Bearer abc", "Bearer abc"), true);
+    });
+
+    it("rejects different strings of equal and unequal length", () => {
+        assert.equal(safeEqual("Bearer abc", "Bearer abd"), false);
+        assert.equal(safeEqual("Bearer abc", "Bearer abcd"), false);
+        assert.equal(safeEqual("", "Bearer abc"), false);
+    });
+
+    it("does not throw when byte lengths differ but string lengths match", () => {
+        // "é" is one UTF-16 unit but two UTF-8 bytes: the case that made timingSafeEqual throw.
+        assert.equal(safeEqual("Bearer abcé", "Bearer abcd"), false);
     });
 });
