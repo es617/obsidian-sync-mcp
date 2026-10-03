@@ -1,0 +1,16 @@
+# Keeps the SHA-pinned actions in .github/workflows and the digest-pinned
+# base image in the Dockerfile up to date. Dependabot updates the pinned SHA
+# or digest together with its version comment.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

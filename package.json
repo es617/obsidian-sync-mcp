@@ -29,7 +29,7 @@
         "LICENSE"
     ],
     "scripts": {
-        "lint": "npx --yes oxlint@latest --deny-warnings src/",
+        "lint": "npx --yes oxlint@1.86.0 --deny-warnings src/",
         "build": "tsup",
         "start": "node dist/main.js",
         "dev": "tsx src/main.ts",
