@@ -312,6 +312,8 @@ This server gives an AI agent read/write access to your Obsidian vault.
 
 **Use HTTPS in production.** Use a tunnel or deploy behind a reverse proxy.
 
+**Don't leave `LOG_LEVEL=debug` on in production.** Debug logging records every tool call's arguments, including note contents, and full error stacks. Credentials embedded in `COUCHDB_URL` are redacted from logs at every level.
+
 This software is provided as-is under the [MIT license](https://github.com/es617/obsidian-sync-mcp/blob/main/LICENSE). You are responsible for what agents do with your vault.
 
 ---
