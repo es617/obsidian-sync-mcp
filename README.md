@@ -246,7 +246,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `COUCHDB_URL` | CouchDB mode | — | CouchDB server URL |
 | `COUCHDB_USER` | CouchDB mode | `admin` | CouchDB username |
 | `COUCHDB_PASSWORD` | CouchDB mode | — | CouchDB password (required) |
-| `COUCHDB_DATABASE` | CouchDB mode | `obsidian` | CouchDB database name |
+| `COUCHDB_DATABASE` | CouchDB mode | `obsidian` | CouchDB database name. The server never creates it: if it doesn't exist yet, or CouchDB isn't reachable, startup waits and logs a warning until it is (LiveSync creates the database on first sync when it connects as a CouchDB admin) |
 | `COUCHDB_PASSPHRASE` | CouchDB mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
 | `COUCHDB_OBFUSCATE_PROPERTIES` | CouchDB mode | `false` | Set to `true` if "Obfuscate Properties" is enabled in LiveSync (obfuscates file paths, sizes, dates in the database). For existing vaults the actual setting is auto-detected at startup; this value only decides the format for a brand-new empty database |
 | `VAULT_NAME` | Both | `MyVault` | Vault name (used for deep links and index storage) |
