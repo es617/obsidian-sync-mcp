@@ -29,7 +29,7 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 - **Timing-safe comparison** — both password and CSRF token comparisons use `crypto.timingSafeEqual` to prevent timing side-channel attacks.
 - **CSRF protection** — the OAuth approval form includes a per-request CSRF token. Submissions without a valid token are rejected.
 - **Redirect URI validation** — the `/oauth/authorize` endpoint validates that the `redirect_uri` matches what the client registered, preventing authorization code theft via open redirect.
-- **Token persistence** — OAuth tokens are persisted to disk on clean shutdown (and every 5 minutes) and loaded on restart, so sessions survive server restarts and deploys. Files are stored in `DATA_DIR/<vault-hash>/` with `0600` permissions (owner-only). Defaults to `~/.obsidian-mcp/` locally, or the persistent volume on Fly.io. Each vault gets an isolated subdirectory.
+- **Token persistence** — OAuth clients and tokens are persisted to disk whenever they change (registration, code exchange, refresh), on clean shutdown and every 5 minutes, and loaded on restart, so sessions survive server restarts and deploys. Files are stored in `DATA_DIR/<vault-hash>/` with `0600` permissions (owner-only). Defaults to `~/.obsidian-mcp/` locally, or the persistent volume on Fly.io. Each vault gets an isolated subdirectory.
 
 ---
 
@@ -46,7 +46,7 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 
 - **TLS via Fly.io** — both the MCP server (port 8787) and CouchDB (port 5984) are served through Fly.io's TLS proxy. No plaintext traffic on the public internet.
 - **HTTPS warning** — when `MCP_AUTH_TOKEN` is set and `BASE_URL` doesn't start with `https://` (and isn't localhost), the server logs a warning at startup.
-- **CORS restricted** — CouchDB CORS is limited to Obsidian app origins (`app://obsidian.md`, `capacitor://localhost`).
+- **CORS restricted** — CouchDB CORS is limited to Obsidian app origins (`app://obsidian.md`, `capacitor://localhost`) and `http://localhost`.
 
 ---
 
@@ -61,8 +61,7 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 
 - **E2E encryption supported** — when `COUCHDB_PASSPHRASE` is set, the server decrypts and encrypts vault data using the same scheme as Self-hosted LiveSync. Data is encrypted at rest in CouchDB.
 - **Text only** — binary attachments are not exposed through MCP tools, reducing the attack surface.
-- **Search result cap** — search results are limited to 50 matches, preventing large responses from exhausting memory or leaking excessive content.
-- **Search index encryption** — the persisted search metadata (paths and timestamps) is encrypted at rest using `COUCHDB_PASSPHRASE` when set. Note content is not persisted — only the FlexSearch tokenized index lives in memory (lost on full restart, rebuilt from vault). Content snippets are fetched on demand from the vault, not cached.
+- **Metadata index** — the server keeps a metadata index (note paths, modification times, tags and links) for `list_notes`, `list_tags` and backlinks. It is persisted to `DATA_DIR/<vault-hash>/search-index.json` with `0600` permissions and, when `COUCHDB_PASSPHRASE` is set, encrypted at rest with AES-256-GCM (key derived from the passphrase with scrypt). Without a passphrase it is stored in plaintext. Note content is not indexed or persisted; it is read from the vault on demand.
 
 ---
 
