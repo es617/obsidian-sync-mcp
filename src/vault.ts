@@ -13,6 +13,7 @@ import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 import { deriveContent } from "./index-sync.js";
 import { classifyIds, type IdFormat } from "./id-format.js";
+import { waitForDatabase } from "./couchdb-preflight.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -24,14 +25,15 @@ export interface VaultConfig {
 }
 
 export class Vault implements VaultBackend {
-    private manipulator: DirectFileManipulator;
+    // Created in init(): constructing it starts connecting, and PouchDB would
+    // create a missing database, so the existence check has to come first.
+    private manipulator!: DirectFileManipulator;
     private passphrase: string | undefined;
     private config: VaultConfig;
 
     constructor(config: VaultConfig) {
         this.config = config;
         this.passphrase = config.passphrase;
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(config, !!config.obfuscatePaths));
     }
 
     private static buildOptions(config: VaultConfig, obfuscatePaths: boolean): DirectFileManipulatorOptions {
@@ -50,6 +52,13 @@ export class Vault implements VaultBackend {
     }
 
     async init(): Promise<void> {
+        await waitForDatabase({
+            url: this.config.couchdbUrl,
+            database: this.config.database,
+            username: this.config.couchdbUser,
+            password: this.config.couchdbPassword,
+        });
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, !!this.config.obfuscatePaths));
         await this.manipulator.ready.promise;
         await this.reconcileObfuscation();
     }
