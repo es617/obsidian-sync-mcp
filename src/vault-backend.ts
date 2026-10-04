@@ -23,6 +23,11 @@ export interface VaultBackend {
     listNotes(folder?: string): Promise<string[]>;
     listNotesWithMtime(folder?: string): Promise<NoteListing[]>;
     watchChanges?(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void;
-    /** Catch up on changes since a sequence. Returns the new sequence. CouchDB only. */
-    catchUp?(since: string, callback: (path: string, content: string | null, mtime?: number) => void, onBatch?: (since: string, processed: number) => Promise<void>): Promise<string>;
+    /**
+     * Catch up on changes since a sequence. Returns the new sequence. CouchDB only.
+     * `stats.unreadable` counts documents that could not be decrypted or loaded
+     * and were therefore skipped — the caller reports them so "caught up" never
+     * hides a silent miss.
+     */
+    catchUp?(since: string, callback: (path: string, content: string | null, mtime?: number) => void, onBatch?: (since: string, processed: number) => Promise<void>, stats?: { unreadable: number }): Promise<string>;
 }

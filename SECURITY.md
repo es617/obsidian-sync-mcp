@@ -61,7 +61,9 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 
 - **E2E encryption supported** — when `COUCHDB_PASSPHRASE` is set, the server decrypts and encrypts vault data using the same scheme as Self-hosted LiveSync. Data is encrypted at rest in CouchDB.
 - **Text only** — binary attachments are not exposed through MCP tools, reducing the attack surface.
-- **Metadata index** — the server keeps a metadata index (note paths, modification times, tags and links) for `list_notes`, `list_tags` and backlinks. It is persisted to `DATA_DIR/<vault-hash>/search-index.json` with `0600` permissions and, when `COUCHDB_PASSPHRASE` is set, encrypted at rest with AES-256-GCM (key derived from the passphrase with scrypt). Without a passphrase it is stored in plaintext. Note content is not indexed or persisted; it is read from the vault on demand.
+- **Metadata index** — the server keeps a metadata index (note paths, modification times, tags and links) for `list_notes`, `list_tags` and backlinks. It is persisted to `DATA_DIR/<vault-hash>/search-index.json` with `0600` permissions and, when `COUCHDB_PASSPHRASE` is set, encrypted at rest with AES-256-GCM (key derived from the passphrase with scrypt). Without a passphrase it is stored in plaintext. Note content is never written to disk.
+- **Search result cap** — `search_notes` returns at most 20 hits with one context line each (never a note body) and accepts at most 20 terms of at most 200 characters each, preventing large responses from exhausting memory or leaking excessive content.
+- **Note text held in memory** — for `search_notes`, the server keeps the full decrypted text of every note in process memory for its whole lifetime (rebuilt from the vault at startup, updated on every change). With E2E encryption on, the plaintext of the entire vault therefore sits in the server's memory: anyone who can read that process's memory (a core dump, a swap file, a debugger, a compromised host) can read every note.
 
 ---
 

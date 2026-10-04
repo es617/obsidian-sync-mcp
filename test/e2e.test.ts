@@ -126,6 +126,52 @@ describe("E2E: Auth", () => {
     });
 });
 
+describe("E2E: search_notes", () => {
+    it("opens with the index status line and returns a hit with a snippet, never the body", async () => {
+        const text = await callTool("search_notes", { terms: ["hello"] });
+        const lines = text.split("\n");
+        assert.match(lines[0], /^Index: local vault, no sequence — \d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+ \(\d{2}:\d{2}Z\); 3 of 3 notes with content\.$/);
+        assert.equal(lines[1], '1 note matches "hello". Call read_note on a hit before relying on it.');
+        assert.match(lines[2], /^- \S* \[Welcome\.md\]\(obsidian:\/\/open\?vault=TestVault&file=Welcome\)$/);
+        assert.match(lines[3], /^  .*Hello world/);
+        assert.ok(!text.includes("# Welcome\nHello"), "the note body is not returned");
+    });
+
+    it("OR-combines terms and searches case-insensitively", async () => {
+        const text = await callTool("search_notes", { terms: ["DAILY NOTE", "[[welcome]]"] });
+        assert.match(text.split("\n")[1], /^2 notes match/);
+        assert.ok(text.includes("daily/2026-03-24.md"));
+        assert.ok(text.includes("projects/test.md"));
+    });
+
+    it("honours folder and tag filters", async () => {
+        const inFolder = await callTool("search_notes", { terms: ["daily", "welcome"], folder: "daily" });
+        assert.match(inFolder.split("\n")[1], /^1 note matches/);
+        const byTag = await callTool("search_notes", { terms: ["hello", "daily"], tag: "intro" });
+        assert.match(byTag.split("\n")[1], /^1 note matches/);
+        assert.ok(byTag.includes("Welcome.md"));
+    });
+
+    it("searches path and title first and lists such hits on top, marked", async () => {
+        const text = await callTool("search_notes", { terms: ["welcome"] });
+        const lines = text.split("\n");
+        assert.match(lines[1], /^2 notes match "welcome"\. 1 hit by path or title listed first\./);
+        assert.match(lines[2], /\[Welcome\.md\]/);
+        assert.match(lines[3], /^  \[path\/title\] /, "Welcome.md matches by path (and title) and by body");
+        assert.match(lines[4], /\[projects\/test\.md\]/);
+        assert.match(lines[5], /^  [^\[]/, "projects/test.md is a content-only hit");
+        const byFolderName = await callTool("search_notes", { terms: ["projects/"] });
+        assert.match(byFolderName.split("\n")[3], /^  \[path\/title match\]$/);
+    });
+
+    it("says so on zero hits and rejects an empty query", async () => {
+        const none = await callTool("search_notes", { terms: ["no-such-phrase"] });
+        assert.equal(none.split("\n")[1], 'No notes match "no-such-phrase".');
+        assert.equal(await callTool("search_notes", {}), "Give at least one term.");
+        assert.equal(await callTool("search_notes", { terms: ["  "] }), "Give at least one term.");
+    });
+});
+
 describe("E2E: list_notes", () => {
     it("lists all notes", async () => {
         const text = await callTool("list_notes");

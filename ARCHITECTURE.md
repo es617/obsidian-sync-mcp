@@ -33,7 +33,7 @@ The MCP server sits between CouchDB (or the local filesystem) and AI agents. It 
 A single `SearchIndex` class manages all indexed data in memory:
 
 ```
-(no full-text search — metadata only)
+(plus the decrypted note text in memory for `search_notes`; substring search, no inverted index)
 knownPaths: Set<string>   ─── all indexed note paths
 mtimes: Map<path, number> ─── modification timestamps
 tags: Map<path, string[]> ─── extracted from frontmatter + inline #tags
@@ -45,7 +45,7 @@ since: string             ─── CouchDB _changes sequence (CouchDB mode only
 ### Persistence
 
 Everything is serialized to a single JSON file at `DATA_DIR/<vault-hash>/search-index.json`:
-- No full-text index (removed FlexSearch for memory efficiency)
+- No inverted full-text index (FlexSearch was removed for memory efficiency); `search_notes` scans the in-memory text (≈120 ms round trip over ~360 notes including the catch-up; ≈100 ms for a name hit) after a `_changes` catch-up from the index's own sequence, and never persists content to disk
 - Metadata (mtimes, tags, links, since)
 - Encrypted with AES-256-GCM when `COUCHDB_PASSPHRASE` is set
 - Saved every 5 minutes + on graceful shutdown
@@ -148,7 +148,7 @@ Agent connects → /oauth/authorize → password page → /oauth/approve
 | `list_notes` | index (fallback: vault) | — |
 | `list_folders` | index (fallback: vault) | — |
 | `list_tags` | index | — |
-| `search_vault` | index + vault (for snippets) | — |
+| `search_notes` | index (in-memory text, catch-up first) | — |
 | `get_note_metadata` | vault + index (backlinks) | — |
 | `move_note` | vault | vault + index |
 | `delete_note` | — | vault + index |
