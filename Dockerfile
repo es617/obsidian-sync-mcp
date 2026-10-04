@@ -1,5 +1,5 @@
 # MCP server image — used by CI to publish to ghcr.io
-FROM node:22-slim
+FROM node:26-slim
 
 WORKDIR /app
 
