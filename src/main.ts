@@ -10,7 +10,7 @@ import { applyIndexChange } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { registerTools } from "./tools.js";
 import { parseWriteFolders } from "./write-scope.js";
-import { redactCredentials, describeError } from "./redact.js";
+import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -21,9 +21,8 @@ setGlobalLogFunction((message, level = LEVEL_INFO) => {
         if (/^(GET|PUT|DELETE|WATCH|FOLLOW|Sensible merge|Object merge):/.test(message)) return;
         if (message.includes("replicator") || message.includes("Replicator") || message.includes("ReplicatorService")) return;
     }
-    // Only strings are redacted; the library logs plain strings in practice, and
-    // non-string values are passed through unchanged.
-    console.log(typeof message === "string" ? redactCredentials(message) : message);
+    // The library also logs raw Error objects and other values, not only strings.
+    console.log(describeLogMessage(message, debugLogging));
 });
 
 // --- Configuration from environment ---

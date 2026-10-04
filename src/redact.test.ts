@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { redactCredentials, describeError } from "./redact.js";
+import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 
 describe("redactCredentials", () => {
     it("removes user and password from a URL", () => {
@@ -67,5 +67,40 @@ describe("describeError", () => {
     it("stringifies non-Error values", () => {
         assert.equal(describeError("http://u:p@h"), "http://***@h");
         assert.equal(describeError(42), "42");
+    });
+});
+
+describe("describeLogMessage", () => {
+    it("redacts strings", () => {
+        assert.equal(describeLogMessage("GET http://u:p@h/db"), "GET http://***@h/db");
+    });
+
+    it("redacts an Error and its cause chain, as the library logs it with Logger(ex)", () => {
+        const err = new TypeError("fetch failed", {
+            cause: new Error("request to http://admin:pass@host/db failed, reason: ECONNREFUSED"),
+        });
+        const out = describeLogMessage(err);
+        assert.equal(out, "TypeError: fetch failed (cause: request to http://***@host/db failed, reason: ECONNREFUSED)");
+        assert.ok(!describeLogMessage(err, true).includes("pass"));
+    });
+
+    it("redacts plain objects, including nested errors", () => {
+        const out = describeLogMessage({ url: "http://admin:pass@host/db", error: new Error("at http://admin:pass@host") });
+        assert.ok(out.includes("http://***@host/db"));
+        assert.ok(!out.includes("pass"));
+    });
+
+    it("does not throw on circular references or BigInt", () => {
+        const obj: Record<string, unknown> = { url: "http://u:p@h", n: 1n };
+        obj.self = obj;
+        const out = describeLogMessage(obj);
+        assert.ok(out.includes("http://***@h"));
+        assert.ok(out.includes("[Circular"));
+    });
+
+    it("renders other values as console.log would", () => {
+        assert.equal(describeLogMessage(42), "42");
+        assert.equal(describeLogMessage(undefined), "undefined");
+        assert.equal(describeLogMessage(null), "null");
     });
 });

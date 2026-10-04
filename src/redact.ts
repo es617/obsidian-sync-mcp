@@ -6,6 +6,8 @@
  * Kept dependency-free so it is unit-testable in isolation.
  */
 
+import { inspect } from "node:util";
+
 /** Replace the userinfo part of every URL in `text` (e.g. `http://u:p@h` -> `http://***@h`). */
 export function redactCredentials(text: string): string {
     // Greedy up to the last "@" before the path, as URL parsers split userinfo,
@@ -35,4 +37,17 @@ export function describeError(err: unknown, verbose = false): string {
     }
     if (causes.length > 0) text += ` (cause: ${causes.join(" <- ")})`;
     return redactCredentials(text);
+}
+
+/**
+ * Redacted text for anything handed to the library log hook. The library logs
+ * strings, but also raw Error objects (`Logger(ex)`) and occasionally other
+ * values; console.log would print those (stack and cause chain included)
+ * without redaction. Other values are rendered as console.log would, via
+ * inspect(), which also copes with circular references and BigInt.
+ */
+export function describeLogMessage(message: unknown, verbose = false): string {
+    if (typeof message === "string") return redactCredentials(message);
+    if (message instanceof Error) return describeError(message, verbose);
+    return redactCredentials(inspect(message));
 }
