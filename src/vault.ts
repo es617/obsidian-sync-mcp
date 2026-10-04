@@ -13,7 +13,7 @@ import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 import { deriveContent } from "./index-sync.js";
 import { classifyIds, type IdFormat } from "./id-format.js";
-import { waitForDatabase } from "./couchdb-preflight.js";
+import { checkDatabase } from "./couchdb-preflight.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -52,7 +52,7 @@ export class Vault implements VaultBackend {
     }
 
     async init(): Promise<void> {
-        await waitForDatabase({
+        await checkDatabase({
             url: this.config.couchdbUrl,
             database: this.config.database,
             username: this.config.couchdbUser,
