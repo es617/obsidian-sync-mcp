@@ -42,7 +42,7 @@
         "fastmcp": "^3.34.0",
         "fflate": "^0.8.2",
         "minimatch": "^10",
-        "octagonal-wheels": "^0.1.39",
+        "octagonal-wheels": "^0.1.54",
         "pouchdb-adapter-http": "^9.0.0",
         "pouchdb-core": "^9.0.0",
         "pouchdb-errors": "^9.0.0",
