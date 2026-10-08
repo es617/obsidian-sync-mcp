@@ -34,6 +34,7 @@ const COUCHDB_PASSWORD = process.env.COUCHDB_PASSWORD;
 const COUCHDB_DATABASE = process.env.COUCHDB_DATABASE ?? "obsidian";
 const COUCHDB_PASSPHRASE = process.env.COUCHDB_PASSPHRASE || undefined;
 const COUCHDB_OBFUSCATE_PROPERTIES = process.env.COUCHDB_OBFUSCATE_PROPERTIES === "true";
+const COUCHDB_ID_DERIVATION_KEY = process.env.COUCHDB_ID_DERIVATION_KEY || undefined;
 const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
 const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
@@ -87,6 +88,7 @@ if (VAULT_PATH) {
         database: COUCHDB_DATABASE,
         passphrase: COUCHDB_PASSPHRASE,
         obfuscatePaths: COUCHDB_OBFUSCATE_PROPERTIES,
+        idDerivationKey: COUCHDB_ID_DERIVATION_KEY,
     });
     console.log(`Remote mode: ${redactCredentials(COUCHDB_URL)}`);
 } else {

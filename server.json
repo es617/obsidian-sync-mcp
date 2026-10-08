@@ -67,6 +67,13 @@
           "name": "COUCHDB_OBFUSCATE_PROPERTIES"
         },
         {
+          "description": "LiveSync 'independent ID derivation' key, as the recovery code (sls-id-v1:...). Required to resolve note paths on vaults created with LiveSync 1.0.33+ and path obfuscation; leave unset for older passphrase-derived vaults. Get it from LiveSync's 'Show current recovery code'.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "COUCHDB_ID_DERIVATION_KEY"
+        },
+        {
           "description": "Vault name for deep links and index storage",
           "isRequired": false,
           "format": "string",

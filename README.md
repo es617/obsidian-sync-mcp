@@ -63,7 +63,7 @@ docker run -p 8787:8787 \
   ghcr.io/es617/obsidian-sync-mcp:latest
 ```
 
-Set `COUCHDB_PASSPHRASE` if you use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. Set `BASE_URL` to your public URL (required for OAuth callbacks when agents connect over HTTPS).
+Set `COUCHDB_PASSPHRASE` if you use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from "Show current recovery code") so the server can resolve note paths. Set `BASE_URL` to your public URL (required for OAuth callbacks when agents connect over HTTPS).
 
 Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io) or `https://your-server:8787/mcp` (Docker behind HTTPS).
 
@@ -170,7 +170,7 @@ VAULT_NAME=MyVault \
 npx obsidian-sync-mcp
 ```
 
-Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings.
+Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`) so the server can resolve note paths.
 
 **Or with Docker:**
 
@@ -250,6 +250,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `COUCHDB_DATABASE` | CouchDB mode | `obsidian` | CouchDB database name. The server never creates it: if it doesn't exist, startup fails with an error |
 | `COUCHDB_PASSPHRASE` | CouchDB mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
 | `COUCHDB_OBFUSCATE_PROPERTIES` | CouchDB mode | `false` | Set to `true` if "Obfuscate Properties" is enabled in LiveSync (obfuscates file paths, sizes, dates in the database). For existing vaults the actual setting is auto-detected at startup; this value only decides the format for a brand-new empty database |
+| `COUCHDB_ID_DERIVATION_KEY` | CouchDB mode | — | LiveSync "independent ID derivation" recovery code (`sls-id-v1:...`). Needed to read and write notes on vaults created with LiveSync 1.0.33+ that use path obfuscation; leave unset for older (passphrase-derived) vaults. Get it from LiveSync's "Show current recovery code" |
 | `VAULT_NAME` | Both | `MyVault` | Vault name (used for deep links and index storage) |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for authentication |
 | `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |

@@ -12,6 +12,8 @@ import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncPar
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
+import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
+import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
 import { classifyIds, type IdFormat } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
@@ -23,6 +25,13 @@ export interface VaultConfig {
     database: string;
     passphrase?: string;
     obfuscatePaths?: boolean;
+    /**
+     * LiveSync "independent ID derivation" key, as the recovery code
+     * (`sls-id-v1:<hex>`) or a source string. Required to resolve paths to
+     * document IDs on vaults created with LiveSync 1.0.33+ that use the new
+     * keyed ID scheme. Leave unset for older (passphrase-derived) vaults.
+     */
+    idDerivationKey?: string;
 }
 
 export class Vault implements VaultBackend {
@@ -31,13 +40,16 @@ export class Vault implements VaultBackend {
     private manipulator!: DirectFileManipulator;
     private passphrase: string | undefined;
     private config: VaultConfig;
+    // Resolved 64-hex ID key (from the recovery code / source string), or
+    // undefined for legacy passphrase-derived vaults. Set in init().
+    private idDerivationKey: string | undefined;
 
     constructor(config: VaultConfig) {
         this.config = config;
         this.passphrase = config.passphrase;
     }
 
-    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean): DirectFileManipulatorOptions {
+    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean, idDerivationKey?: string): DirectFileManipulatorOptions {
         return {
             url: config.couchdbUrl,
             username: config.couchdbUser,
@@ -49,17 +61,22 @@ export class Vault implements VaultBackend {
             enableCompression: false,
             handleFilenameCaseSensitive: false,
             doNotUseFixedRevisionForChunks: false,
+            ...idDerivationOptions(obfuscatePaths, idDerivationKey),
         };
     }
 
     async init(): Promise<void> {
+        // Normalize the recovery code / source string to the 64-hex key once.
+        if (this.config.idDerivationKey) {
+            this.idDerivationKey = await deriveOrImportIdKey(this.config.idDerivationKey);
+        }
         await checkDatabase({
             url: this.config.couchdbUrl,
             database: this.config.database,
             username: this.config.couchdbUser,
             password: this.config.couchdbPassword,
         });
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, !!this.config.obfuscatePaths));
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, !!this.config.obfuscatePaths, this.idDerivationKey));
         await this.manipulator.ready.promise;
         await this.reconcileObfuscation();
     }
@@ -99,7 +116,7 @@ export class Vault implements VaultBackend {
                   "Disabling path obfuscation automatically — set COUCHDB_OBFUSCATE_PROPERTIES=false to silence this warning.",
         );
         await this.manipulator.close();
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual));
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual, this.idDerivationKey));
         await this.manipulator.ready.promise;
     }
 

@@ -68,6 +68,13 @@ if [ "$DEPLOY_TYPE" = "2" ]; then
         printf "Is 'Obfuscate Properties' enabled in LiveSync? (y/N): "
         read -r OBFUSCATE_PROPERTIES
         OBFUSCATE_PROPERTIES=$(echo "$OBFUSCATE_PROPERTIES" | tr '[:upper:]' '[:lower:]')
+        if [ "$OBFUSCATE_PROPERTIES" = "y" ]; then
+            echo "Vaults created with LiveSync 1.0.33+ use an independent ID key."
+            echo "In LiveSync, run 'Show current recovery code' and paste it here."
+            printf "LiveSync ID recovery code (sls-id-v1:..., leave blank for older vaults): "
+            read -rs ID_DERIVATION_KEY
+            echo
+        fi
     fi
 else
     # Full deploy: generate credentials
@@ -85,6 +92,13 @@ else
         printf "Is 'Obfuscate Properties' enabled in LiveSync? (y/N): "
         read -r OBFUSCATE_PROPERTIES
         OBFUSCATE_PROPERTIES=$(echo "$OBFUSCATE_PROPERTIES" | tr '[:upper:]' '[:lower:]')
+        if [ "$OBFUSCATE_PROPERTIES" = "y" ]; then
+            echo "Vaults created with LiveSync 1.0.33+ use an independent ID key."
+            echo "In LiveSync, run 'Show current recovery code' and paste it here."
+            printf "LiveSync ID recovery code (sls-id-v1:..., leave blank for older vaults): "
+            read -rs ID_DERIVATION_KEY
+            echo
+        fi
     fi
 fi
 
@@ -115,6 +129,7 @@ fly secrets set \
     ${LIVESYNC_PASSWORD:+"LIVESYNC_USER=livesync"} \
     ${LIVESYNC_PASSWORD:+"LIVESYNC_PASSWORD=$LIVESYNC_PASSWORD"} \
     ${PASSPHRASE:+"COUCHDB_PASSPHRASE=$PASSPHRASE"} \
+    ${ID_DERIVATION_KEY:+"COUCHDB_ID_DERIVATION_KEY=$ID_DERIVATION_KEY"} \
     $([ "$OBFUSCATE_PROPERTIES" = "y" ] && echo "COUCHDB_OBFUSCATE_PROPERTIES=true")
 
 # Create volume for persistent data
