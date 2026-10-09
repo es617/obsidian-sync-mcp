@@ -43,6 +43,9 @@ export class Vault implements VaultBackend {
     // Resolved 64-hex ID key (from the recovery code / source string), or
     // undefined for legacy passphrase-derived vaults. Set in init().
     private idDerivationKey: string | undefined;
+    // Obfuscation actually in effect after reconciling with the database, which
+    // can differ from the configured value.
+    private obfuscatePathsEffective = false;
 
     constructor(config: VaultConfig) {
         this.config = config;
@@ -70,15 +73,45 @@ export class Vault implements VaultBackend {
         if (this.config.idDerivationKey) {
             this.idDerivationKey = await deriveOrImportIdKey(this.config.idDerivationKey);
         }
+        this.obfuscatePathsEffective = !!this.config.obfuscatePaths;
         await checkDatabase({
             url: this.config.couchdbUrl,
             database: this.config.database,
             username: this.config.couchdbUser,
             password: this.config.couchdbPassword,
         });
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, !!this.config.obfuscatePaths, this.idDerivationKey));
-        await this.manipulator.ready.promise;
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, this.obfuscatePathsEffective, this.idDerivationKey));
+        await this.awaitManipulatorReady();
         await this.reconcileObfuscation();
+        if (this.idDerivationKey && !this.obfuscatePathsEffective) {
+            console.warn(
+                "Warning: COUCHDB_ID_DERIVATION_KEY is set but this vault does not use path obfuscation; " +
+                "the ID key only applies to obfuscated vaults and is ignored.",
+            );
+        }
+    }
+
+    /**
+     * Await the manipulator's readiness, translating the library's ID-mismatch
+     * error into actionable guidance. The library (0.1.34+) verifies at startup
+     * that sampled document IDs match the configured derivation, so a v1 vault
+     * with the wrong or missing key fails here instead of silently missing reads.
+     */
+    private async awaitManipulatorReady(): Promise<void> {
+        try {
+            await this.manipulator.ready.promise;
+        } catch (err) {
+            if (err instanceof Error && err.message.includes("do not match the configured ID key")) {
+                throw new Error(
+                    "Vault document IDs do not match the configured ID scheme. " +
+                    (this.idDerivationKey
+                        ? "COUCHDB_ID_DERIVATION_KEY is set but does not match this vault; paste the exact recovery code (sls-id-v1:...) from LiveSync's \"Show current recovery code\". "
+                        : "If this vault was created with LiveSync 1.0.33+ with path obfuscation, set COUCHDB_ID_DERIVATION_KEY to the LiveSync recovery code (sls-id-v1:...). ") +
+                    "This can also happen if the vault's \"Handle filenames as case-sensitive\" setting differs from the server's.",
+                );
+            }
+            throw err;
+        }
     }
 
     /**
@@ -115,9 +148,10 @@ export class Vault implements VaultBackend {
                 : "Warning: COUCHDB_OBFUSCATE_PROPERTIES=true but vault uses plaintext document IDs. " +
                   "Disabling path obfuscation automatically — set COUCHDB_OBFUSCATE_PROPERTIES=false to silence this warning.",
         );
+        this.obfuscatePathsEffective = actual;
         await this.manipulator.close();
         this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual, this.idDerivationKey));
-        await this.manipulator.ready.promise;
+        await this.awaitManipulatorReady();
     }
 
     /** Sample file-entry docs from the changes feed and classify their IDs. */

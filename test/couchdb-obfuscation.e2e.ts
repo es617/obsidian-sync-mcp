@@ -18,6 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
+import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 
 const base = {
     couchdbUrl: process.env.TEST_COUCHDB_URL ?? "http://localhost:5985",
@@ -43,7 +44,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -144,6 +145,49 @@ step("Control: open obfvault with obfuscatePaths=true (expect NO warning)");
     assert.equal(mismatchWarnings.length, 0, "no mismatch warning expected when settings match");
     await v.close();
     console.log("no warning, reads OK");
+}
+
+// --- Test 5: independent ID derivation (LiveSync 1.0.33+ v1 vault) (#47) ---
+const ID_KEY_HEX = "0123456789abcdef".repeat(4); // 64-hex test key
+const RECOVERY_CODE = `sls-id-v1:${ID_KEY_HEX}`;
+const NOTE_KEYED = "Projects/Keyed Note.md";
+
+step("Test 5: seed keyedvault with COUCHDB_ID_DERIVATION_KEY and read back");
+{
+    const v = new Vault({ ...base, database: "keyedvault", passphrase, obfuscatePaths: true, idDerivationKey: RECOVERY_CODE });
+    await v.init();
+    assert.equal(await v.writeNote(NOTE_KEYED, "# Keyed\nbody"), true);
+    assert.equal(await v.readNote(NOTE_KEYED), "# Keyed\nbody", "read_note must resolve with the keyed scheme");
+    await v.close();
+    console.log("v1 write + read-back OK");
+}
+
+step("Test 5b: raw doc ID equals f: + computeKeyedId(document, lowercased path)");
+{
+    const rows = await rawAllDocIds("keyedvault");
+    const expected = "f:" + (await computeKeyedId(ID_KEY_HEX, "document", NOTE_KEYED.toLowerCase()));
+    assert.ok(rows.includes(expected), `expected keyed doc id ${expected} among ${rows.join(", ")}`);
+    console.log("raw id matches the library's keyed derivation");
+}
+
+step("Test 5c: reopen with obfuscatePaths=false + key (reconcile keeps the key)");
+{
+    const v = new Vault({ ...base, database: "keyedvault", passphrase, obfuscatePaths: false, idDerivationKey: RECOVERY_CODE });
+    await v.init();
+    assert.equal(await v.readNote(NOTE_KEYED), "# Keyed\nbody", "read must resolve after obfuscation auto-correction with the key preserved");
+    await v.close();
+    console.log("key preserved across the reconcile rebuild");
+}
+
+step("Test 5d: reopen WITHOUT the key → fail fast naming the env var");
+{
+    const v = new Vault({ ...base, database: "keyedvault", passphrase, obfuscatePaths: true });
+    await assert.rejects(
+        () => v.init(),
+        (err: Error) => err.message.includes("COUCHDB_ID_DERIVATION_KEY"),
+        "init must fail fast and name COUCHDB_ID_DERIVATION_KEY",
+    );
+    console.log("init rejected without the key, naming the env var");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");
