@@ -101,6 +101,7 @@ cd obsidian-sync-mcp
 
 cat > .env <<EOF
 COUCHDB_PASSWORD=changeme
+MCP_AUTH_TOKEN=changeme-too
 VAULT_NAME=MyVault
 EOF
 
@@ -110,7 +111,7 @@ docker compose up -d
 **After deployment:**
 
 1. In Obsidian, install [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) and configure it with the credentials from the setup output
-2. Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io) or `http://your-server:8787/mcp` (Docker)
+2. Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io). With Docker Compose the MCP port is published on `localhost:8787` only; to reach it from other machines, put an HTTPS tunnel or reverse proxy in front (see [remote access](#c-run-on-your-machine)) and set `BASE_URL` to its public URL
 3. The `MCP_AUTH_TOKEN` is the password you enter when an agent connects
 
 ```
@@ -175,7 +176,7 @@ Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync. Set `COUC
 **Or with Docker:**
 
 ```bash
-docker run -p 8787:8787 \
+docker run -p 127.0.0.1:8787:8787 \
   -v mcp-data:/data -e DATA_DIR=/data \
   -e VAULT_PATH=/vault -v ~/Documents/MyVault:/vault \
   -e VAULT_NAME=MyVault \
