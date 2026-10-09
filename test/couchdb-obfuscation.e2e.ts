@@ -44,7 +44,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -188,6 +188,39 @@ step("Test 5d: reopen WITHOUT the key → fail fast naming the env var");
         "init must fail fast and name COUCHDB_ID_DERIVATION_KEY",
     );
     console.log("init rejected without the key, naming the env var");
+}
+
+// --- Test 6: COUCHDB_CASE_SENSITIVE escape hatch (case-sensitive v0 vault) ---
+const NOTE_CASE = "Inbox/CamelCase.md";
+
+step("Test 6: seed casevault with caseSensitive=true (mixed-case obfuscated path)");
+{
+    const v = new Vault({ ...base, database: "casevault", passphrase, obfuscatePaths: true, caseSensitive: true });
+    await v.init();
+    assert.equal(await v.writeNote(NOTE_CASE, "# Camel\nbody"), true);
+    assert.equal(await v.readNote(NOTE_CASE), "# Camel\nbody");
+    await v.close();
+    console.log("seeded a case-sensitive obfuscated note");
+}
+
+step("Test 6b: open with default case handling → fail fast naming COUCHDB_CASE_SENSITIVE");
+{
+    const v = new Vault({ ...base, database: "casevault", passphrase, obfuscatePaths: true });
+    await assert.rejects(
+        () => v.init(),
+        (err: Error) => err.message.includes("COUCHDB_CASE_SENSITIVE"),
+        "init must fail fast and name COUCHDB_CASE_SENSITIVE",
+    );
+    console.log("init rejected under default case handling, naming the env var");
+}
+
+step("Test 6c: open with COUCHDB_CASE_SENSITIVE=true → reads resolve");
+{
+    const v = new Vault({ ...base, database: "casevault", passphrase, obfuscatePaths: true, caseSensitive: true });
+    await v.init();
+    assert.equal(await v.readNote(NOTE_CASE), "# Camel\nbody", "read must resolve with matching case handling");
+    await v.close();
+    console.log("escape hatch works");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

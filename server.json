@@ -74,6 +74,13 @@
           "name": "COUCHDB_ID_DERIVATION_KEY"
         },
         {
+          "description": "Set to 'true' only if your LiveSync vault has 'Handle filenames as case-sensitive' enabled. Must match the vault, or obfuscated document IDs won't resolve and the server refuses to start. Defaults to false (the LiveSync default).",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "COUCHDB_CASE_SENSITIVE"
+        },
+        {
           "description": "Vault name for deep links and index storage",
           "isRequired": false,
           "format": "string",

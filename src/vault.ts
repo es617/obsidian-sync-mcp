@@ -32,6 +32,12 @@ export interface VaultConfig {
      * keyed ID scheme. Leave unset for older (passphrase-derived) vaults.
      */
     idDerivationKey?: string;
+    /**
+     * Match LiveSync's "Handle filenames as case-sensitive" setting. Defaults
+     * to false (the plugin default). Set true only if your vault was created
+     * with that option on, otherwise obfuscated document IDs won't resolve.
+     */
+    caseSensitive?: boolean;
 }
 
 export class Vault implements VaultBackend {
@@ -62,7 +68,7 @@ export class Vault implements VaultBackend {
             obfuscatePassphrase: obfuscatePaths ? config.passphrase : undefined,
             useEden: false,
             enableCompression: false,
-            handleFilenameCaseSensitive: false,
+            handleFilenameCaseSensitive: !!config.caseSensitive,
             doNotUseFixedRevisionForChunks: false,
             ...idDerivationOptions(obfuscatePaths, idDerivationKey),
         };
@@ -107,7 +113,7 @@ export class Vault implements VaultBackend {
                     (this.idDerivationKey
                         ? "COUCHDB_ID_DERIVATION_KEY is set but does not match this vault; paste the exact recovery code (sls-id-v1:...) from LiveSync's \"Show current recovery code\". "
                         : "If this vault was created with LiveSync 1.0.33+ with path obfuscation, set COUCHDB_ID_DERIVATION_KEY to the LiveSync recovery code (sls-id-v1:...). ") +
-                    "This can also happen if the vault's \"Handle filenames as case-sensitive\" setting differs from the server's.",
+                    "If instead your LiveSync vault has \"Handle filenames as case-sensitive\" enabled, set COUCHDB_CASE_SENSITIVE=true to match it.",
                 );
             }
             throw err;

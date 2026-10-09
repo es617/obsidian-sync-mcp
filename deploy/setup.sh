@@ -169,6 +169,10 @@ if [ "$DEPLOY_TYPE" != "2" ]; then
     echo "Note: The LiveSync user has limited permissions (sync and vault access only)."
     echo "You may see a 'not admin' warning in LiveSync — sync works fine."
     echo "Some maintenance operations in the plugin require admin credentials."
+    echo ""
+    echo "If you enable E2E encryption with path obfuscation in LiveSync (the default"
+    echo "for new vaults on 1.0.33+), afterward set the ID key so reads resolve:"
+    echo "  fly secrets set COUCHDB_ID_DERIVATION_KEY=<your LiveSync recovery code>"
 
     # Generate Setup URIs for easy Obsidian configuration
     SETUP_SCRIPT="$(dirname "$0")/../generate-setup-uri.mjs"

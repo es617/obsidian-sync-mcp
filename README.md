@@ -251,6 +251,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `COUCHDB_PASSPHRASE` | CouchDB mode | — | LiveSync E2E encryption passphrase (must match plugin setting) |
 | `COUCHDB_OBFUSCATE_PROPERTIES` | CouchDB mode | `false` | Set to `true` if "Obfuscate Properties" is enabled in LiveSync (obfuscates file paths, sizes, dates in the database). For existing vaults the actual setting is auto-detected at startup; this value only decides the format for a brand-new empty database |
 | `COUCHDB_ID_DERIVATION_KEY` | CouchDB mode | — | LiveSync "independent ID derivation" recovery code (`sls-id-v1:...`). Needed to read and write notes on vaults created with LiveSync 1.0.33+ that use path obfuscation; leave unset for older (passphrase-derived) vaults. Get it from LiveSync's "Show current recovery code" |
+| `COUCHDB_CASE_SENSITIVE` | CouchDB mode | `false` | Set to `true` only if your LiveSync vault has "Handle filenames as case-sensitive" enabled. It must match the vault, or obfuscated document IDs won't resolve (the server fails to start with a clear message). Leave unset otherwise |
 | `VAULT_NAME` | Both | `MyVault` | Vault name (used for deep links and index storage) |
 | `MCP_AUTH_TOKEN` | Optional | — | Password for authentication |
 | `BASE_URL` | Optional | `http://localhost:PORT` | Public URL (for OAuth callbacks when using a tunnel) |
