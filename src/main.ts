@@ -218,6 +218,13 @@ async function rebuildIndex() {
     }
     await searchIndex.saveToDisk();
     searchIndex.state = "ready";
+    // Start the live watcher only now: the catch-up has advanced `since` to the
+    // live tip, so the watcher resumes from there. Starting it at boot (before
+    // the catch-up set `since`) made it replay the whole feed from seq 0
+    // alongside the catch-up — a duplicate decrypt pass that roughly doubled
+    // startup on large vaults. No changes are missed: the catch-up drains to the
+    // current tip, the watcher continues from it.
+    if (COUCHDB_URL && vault.watchChanges) startCouchDbWatcher();
 }
 // Fire and forget — server starts while index builds
 rebuildIndex().catch((err) => {
@@ -291,9 +298,13 @@ if (VAULT_PATH) {
         }
     }
     console.log("Watching vault for external changes.");
-} else if (COUCHDB_URL && vault.watchChanges) {
-    // Remote mode: watch CouchDB _changes feed for LiveSync updates
-    vault.watchChanges((path: string, content: string | null, mtime?: number, seq?: string | number) => {
+}
+
+// Remote mode: watch the CouchDB _changes feed for LiveSync updates. Called from
+// rebuildIndex() after the initial catch-up, so the watcher resumes from the
+// caught-up `since` rather than replaying the whole feed from seq 0.
+function startCouchDbWatcher() {
+    vault.watchChanges!((path: string, content: string | null, mtime?: number, seq?: string | number) => {
         if (debugLogging) console.log(`[debug] CouchDB ${content === null ? "delete" : "change"}: ${path}`);
         // content === "" is an empty-but-present note: index it, don't drop it.
         applyIndexChange(searchIndex, path, content, mtime);
