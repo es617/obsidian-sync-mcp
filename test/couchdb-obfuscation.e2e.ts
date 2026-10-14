@@ -44,7 +44,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -221,6 +221,51 @@ step("Test 6c: open with COUCHDB_CASE_SENSITIVE=true → reads resolve");
     assert.equal(await v.readNote(NOTE_CASE), "# Camel\nbody", "read must resolve with matching case handling");
     await v.close();
     console.log("escape hatch works");
+}
+
+// --- Test 7: watcher resumes from the caught-up tip — no missed changes, no replay ---
+// The startup fix defers the live watcher until the catch-up drains `_changes`
+// to the live tip. This asserts the property that makes that safe: after
+// catchUp, the watcher delivers a change written *after* the catch-up and
+// replays none of the already-caught-up notes.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+step("Test 7: seed watchervault with 3 notes");
+{
+    const v = new Vault({ ...base, database: "watchervault", passphrase, obfuscatePaths: true });
+    await v.init();
+    for (const p of ["A.md", "sub/B.md", "sub/C.md"]) assert.equal(await v.writeNote(p, `body ${p}`), true);
+    await v.close();
+    console.log("seeded 3 notes");
+}
+
+step("Test 7b: catchUp drains to tip, then the watcher picks up a later write and replays nothing");
+{
+    const reader = new Vault({ ...base, database: "watchervault", passphrase, obfuscatePaths: true });
+    await reader.init();
+
+    const caughtUp: string[] = [];
+    await reader.catchUp!("0", (path, content) => { if (content !== null) caughtUp.push(path); });
+    assert.deepEqual(caughtUp.sort(), ["A.md", "sub/B.md", "sub/C.md"], "catchUp must drain all 3 notes to the tip");
+
+    // A change that lands AFTER catchUp returned but BEFORE the watcher starts.
+    const writer = new Vault({ ...base, database: "watchervault", passphrase, obfuscatePaths: true });
+    await writer.init();
+    assert.equal(await writer.writeNote("after/D.md", "written after catch-up"), true);
+
+    const watched: string[] = [];
+    reader.watchChanges!((path, content) => { if (content !== null) watched.push(path); });
+
+    // Poll until the watcher delivers the post-catch-up write (or time out).
+    for (let i = 0; i < 75 && !watched.includes("after/D.md"); i++) await sleep(200);
+
+    assert.ok(watched.includes("after/D.md"), `watcher must deliver the post-catch-up write; saw ${JSON.stringify(watched)}`);
+    const replayed = watched.filter((p) => caughtUp.includes(p));
+    assert.deepEqual(replayed, [], `watcher must not replay already-caught-up notes; replayed ${JSON.stringify(replayed)}`);
+
+    await reader.close();
+    await writer.close();
+    console.log("watcher resumed from the tip: delivered the new note, replayed none of the caught-up notes");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

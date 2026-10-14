@@ -230,6 +230,11 @@ async function rebuildIndex() {
 rebuildIndex().catch((err) => {
     searchIndex.state = "failed";
     console.error(`Index rebuild failed: ${describeError(err, debugLogging)}`);
+    // Still start the watcher so live updates recover: it replays from the last
+    // sequence the manipulator reached (seq 0 on a cold start) and reconnects on
+    // its own. On the success path the watcher is already started inside
+    // rebuildIndex(); beginWatch() guards against a double start.
+    if (COUCHDB_URL && vault.watchChanges) startCouchDbWatcher();
 });
 
 // --- Pre-search catch-up ---
