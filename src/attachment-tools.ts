@@ -36,6 +36,15 @@ export interface AttachmentToolOptions {
     baseUrl: string;
 }
 
+/** Rough output-token cost of sending `bytes` as base64 (~3.3 characters per token). */
+export function estimateBase64Tokens(bytes: number): number {
+    return Math.ceil((Math.ceil(bytes / 3) * 4) / 3.3);
+}
+
+export function formatTokens(n: number): string {
+    return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
+
 export function formatBytes(n: number): string {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
@@ -174,9 +183,10 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
     server.addTool({
         name: "create_attachment_upload",
         description:
-            `Create a one-time URL for uploading an image, PDF, audio or video file (${extList}) into the vault, up to ${formatBytes(maxBytes)}. ` +
-            "Send the raw file bytes to the returned URL with HTTP PUT (e.g. `curl -fsS -X PUT --data-binary @file.png '<url>'`); no other auth is needed. " +
-            `The URL works once and expires after ${Math.round(registry.ttlMs / 60000)} minutes. Use this instead of write_attachment for anything but tiny files.` +
+            `Preferred way to add an image, PDF, audio or video file (${extList}) to the vault, up to ${formatBytes(maxBytes)}. ` +
+            "Returns a one-time URL; send the raw file bytes to it with HTTP PUT, e.g. `curl -fsS -X PUT --data-binary @file.png '<url>'` (no other auth needed). " +
+            "Use this whenever you can run a command or make an HTTP request (shell, code execution, a script): it takes milliseconds at any size, " +
+            `while write_attachment spends output tokens on every byte. The URL works once and expires after ${Math.round(registry.ttlMs / 60000)} minutes.` +
             embedNote + writeScopeNote,
         parameters: z.object({
             path: z.string().describe("Vault-relative destination path, e.g. 'Attachments/screenshot.png'. The extension decides how Obsidian shows the file."),
@@ -216,8 +226,9 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
     server.addTool({
         name: "write_attachment",
         description:
-            `Save a small attachment (${extList}) from base64 content, up to ${formatBytes(base64MaxBytes)}. ` +
-            "Every byte costs output tokens, so prefer create_attachment_upload when you can run a command such as curl." +
+            `Fallback for clients that cannot make HTTP requests: save a tiny attachment (${extList}) from base64, up to ${formatBytes(base64MaxBytes)}. ` +
+            `A file at that limit is about ${formatTokens(estimateBase64Tokens(base64MaxBytes))} output tokens, minutes of generation, and one wrong character corrupts it. ` +
+            "If you can run curl or any HTTP client, or the file exists on a disk you can read, use create_attachment_upload instead." +
             embedNote + writeScopeNote,
         parameters: z.object({
             path: z.string().describe("Vault-relative destination path, e.g. 'Attachments/diagram.png'"),
