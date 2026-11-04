@@ -219,7 +219,7 @@ With `ATTACHMENTS_ENABLED=true`, agents can also store images, PDFs, audio and v
 | Tool | Description |
 |---|---|
 | `create_attachment_upload` | Get a one-time upload URL for a vault path. The agent sends the raw bytes there with HTTP `PUT`, e.g. `curl -fsS -X PUT --data-binary @shot.png '<url>'`. Use this for anything but tiny files |
-| `write_attachment` | Save a small file from base64 (default limit 256 KB). Every byte is a model output token, so this is for small files only |
+| `write_attachment` | Fallback for clients that cannot make HTTP requests: save a tiny file from base64 (default limit 32 KB). Every byte is a model output token, so a 32 KB file is already ~13k tokens and minutes of generation |
 | `move_attachment` | Move or rename an attachment (embeds in notes are not rewritten; the response lists notes that still point at the old path) |
 | `delete_attachment` | Delete an attachment |
 | `get_attachment_metadata` | Size, timestamps, and the notes that embed or link it |
@@ -286,7 +286,7 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `WRITE_FOLDERS` | Optional | — | Comma-separated list of vault-relative folders where writes are allowed (e.g. `MCP,Inbox`). When set, the whole vault stays readable but `write_note`, `edit_note`, `delete_note`, and `move_note` refuse paths outside these folders (`move_note` requires both source and destination to be writable). Enforced server-side, unlike `MCP_INSTRUCTIONS`. Matching is case-sensitive and folder-boundary-aware (`MCP` matches `MCP/note.md` but not `MCP-private/note.md`). Ignored when `READ_ONLY=true`; unset means the whole vault is writable. |
 | `ATTACHMENTS_ENABLED` | Optional | `false` | Set to `true` to enable the [attachment tools](#attachments-opt-in) and the upload endpoint. Under `READ_ONLY=true` only `get_attachment_metadata` and `list_attachments` are exposed and the endpoint is not mounted. With CouchDB, startup then always reads the change feed from the beginning to learn existing attachments (it already does so whenever notes are indexed, to rebuild the search text) |
 | `ATTACHMENT_MAX_BYTES` | Optional | `20971520` (20 MB) | Largest file accepted by an upload URL. The whole file is held in memory while it is written |
-| `ATTACHMENT_INLINE_MAX_BYTES` | Optional | `262144` (256 KB) | Largest decoded file accepted by `write_attachment` |
+| `ATTACHMENT_INLINE_MAX_BYTES` | Optional | `32768` (32 KB) | Largest decoded file accepted by `write_attachment`. Base64 costs about one output token per 2.5 bytes, so raising this mainly makes slow, error-prone calls possible |
 | `ATTACHMENT_UPLOAD_TTL_SECONDS` | Optional | `600` | How long an upload URL stays valid |
 | `ATTACHMENT_EXTENSIONS` | Optional | all supported | Comma-separated subset of the supported extensions to allow, e.g. `png,jpg,pdf`. Can only narrow the list; an unsupported extension is a startup error |
 | `MCP_INSTRUCTIONS` | Optional | — | Extra text appended to the server's MCP `instructions` (the string clients inject into the system prompt). Use this to bake vault-specific conventions into the server — e.g. folder structure, naming rules, folders to avoid — so they apply across every MCP client without per-client config. Best-effort: not all clients respect `instructions`. |

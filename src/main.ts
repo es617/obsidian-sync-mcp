@@ -59,7 +59,8 @@ function parsePositiveInt(name: string, fallback: number): number {
     return n;
 }
 const ATTACHMENT_MAX_BYTES = parsePositiveInt("ATTACHMENT_MAX_BYTES", 20 * 1024 * 1024);
-const ATTACHMENT_INLINE_MAX_BYTES = parsePositiveInt("ATTACHMENT_INLINE_MAX_BYTES", 256 * 1024);
+// Inline base64 costs ~1 output token per 2.5 bytes; 32 KB is already ~13k tokens.
+const ATTACHMENT_INLINE_MAX_BYTES = parsePositiveInt("ATTACHMENT_INLINE_MAX_BYTES", 32 * 1024);
 const ATTACHMENT_UPLOAD_TTL_SECONDS = parsePositiveInt("ATTACHMENT_UPLOAD_TTL_SECONDS", 600);
 let ATTACHMENT_EXTENSIONS: Set<string>;
 try {
@@ -400,7 +401,7 @@ function startCouchDbWatcher() {
 
 // --- MCP Server ---
 const ATTACHMENT_INSTRUCTIONS = ATTACHMENTS_ENABLED
-    ? " Images, PDFs, audio and video can be stored as attachments: upload with create_attachment_upload (or write_attachment for tiny files), then embed them in a note with ![[path]]."
+    ? " Images, PDFs, audio and video can be stored as attachments: whenever you can make an HTTP request, use create_attachment_upload and PUT the file to the returned URL; write_attachment (base64) is a slow fallback for tiny files only. Then embed the file in a note with ![[path]]."
     : "";
 const BASE_INSTRUCTIONS = "Access and manage an Obsidian vault. You can read, write, list, search, move, and delete markdown notes." + ATTACHMENT_INSTRUCTIONS + " Every tool response includes an Obsidian deep link. Always show this link to the user using the format [obsidian://open?vault=...&file=...](obsidian://open?vault=...&file=...) so it is both clickable and visible as a URL.";
 const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { registerAttachmentTools, decodeBase64Strict, formatBytes, type AttachmentToolOptions } from "./attachment-tools.js";
+import { registerAttachmentTools, decodeBase64Strict, formatBytes, estimateBase64Tokens, type AttachmentToolOptions } from "./attachment-tools.js";
 import { UploadRegistry, UPLOAD_ROUTE_PREFIX } from "./uploads.js";
 import { memoryAttachments } from "./attachment-test-fixtures.js";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS } from "./attachment-path.js";
@@ -211,5 +211,23 @@ describe("list_attachments", () => {
     it("is available in read-only mode", async () => {
         const { tools } = setup({ readOnly: true });
         assert.ok(tools.some((t) => t.name === "list_attachments"));
+    });
+});
+
+describe("steering towards the upload URL", () => {
+    it("write_attachment calls itself a fallback and points at create_attachment_upload with a token cost", () => {
+        const { tools } = setup({ base64MaxBytes: 32 * 1024 });
+        const write = tools.find((t) => t.name === "write_attachment")!;
+        const upload = tools.find((t) => t.name === "create_attachment_upload")!;
+        assert.match(write.description, /^Fallback for clients that cannot make HTTP requests/);
+        assert.match(write.description, /up to 32 KB\./);
+        assert.match(write.description, /about 13k output tokens/);
+        assert.match(write.description, /use create_attachment_upload instead/);
+        assert.match(upload.description, /^Preferred way/);
+    });
+
+    it("estimateBase64Tokens", () => {
+        assert.equal(estimateBase64Tokens(3), 2);
+        assert.ok(Math.abs(estimateBase64Tokens(262_144) - 106_000) < 1000, "256 KB is ~106k tokens");
     });
 });
