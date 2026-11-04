@@ -15,6 +15,10 @@ function fakeBackend(withRemote = false) {
         getMetadata: async (p) => { calls.push(`meta:${p}`); return null; },
         listNotes: async () => { calls.push("list"); return ["a.md"]; },
         listNotesWithMtime: async () => { calls.push("listMtime"); return [{ path: "a.md", mtime: 1 }]; },
+        writeAttachment: async (p) => { calls.push(`writeAtt:${p}`); return true; },
+        deleteAttachment: async (p) => { calls.push(`deleteAtt:${p}`); return true; },
+        moveAttachment: async (f, t) => { calls.push(`moveAtt:${f}->${t}`); return true; },
+        getAttachmentInfo: async (p) => { calls.push(`attInfo:${p}`); return null; },
     };
     if (withRemote) {
         backend.catchUp = async (since) => { calls.push(`catchUp:${since}`); return "42"; };
@@ -24,6 +28,16 @@ function fakeBackend(withRemote = false) {
 }
 
 describe("readOnlyVault", () => {
+    it("rejects attachment writes and delegates getAttachmentInfo", async () => {
+        const { backend, calls } = fakeBackend();
+        const ro = readOnlyVault(backend);
+        await assert.rejects(ro.writeAttachment("a.png", new Uint8Array([1])), { message: READ_ONLY_MESSAGE });
+        await assert.rejects(ro.deleteAttachment("a.png"), { message: READ_ONLY_MESSAGE });
+        await assert.rejects(ro.moveAttachment("a.png", "b.png"), { message: READ_ONLY_MESSAGE });
+        assert.equal(await ro.getAttachmentInfo("a.png"), null);
+        assert.deepEqual(calls, ["attInfo:a.png"]);
+    });
+
     it("rejects writeNote, deleteNote and moveNote without touching the backend", async () => {
         const { backend, calls } = fakeBackend();
         const ro = readOnlyVault(backend);

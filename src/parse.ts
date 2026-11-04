@@ -2,6 +2,8 @@
  * Parse Obsidian markdown content for frontmatter, tags, and links.
  */
 
+import { isValidAttachmentPath } from "./attachment-path.js";
+
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
@@ -71,6 +73,18 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     // [markdown links](path.md)
     for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+\.md)\)/g)) {
         links.push(match[2]);
+    }
+
+    // Markdown links and embeds to attachments: ![](Attachments/shot.png),
+    // [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title"). Recorded
+    // URL-decoded so list_attachments can tell which files are still used.
+    for (const match of content.matchAll(/\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+        let target = match[1].replace(/^<|>$/g, "");
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.endsWith(".md")) continue;
+        // Obsidian URL-decodes markdown link targets (a literal % is written %25).
+        try { target = decodeURIComponent(target); } catch { continue; }
+        target = target.replace(/^(\.\.?\/)+/, "");
+        if (isValidAttachmentPath(target)) links.push(target);
     }
 
     return { frontmatter, tags: [...tags], links: [...new Set(links)] };

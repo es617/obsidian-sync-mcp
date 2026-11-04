@@ -212,6 +212,25 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
 | `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, and timestamps — navigate the knowledge graph |
 
+### Attachments (opt-in)
+
+With `ATTACHMENTS_ENABLED=true`, agents can also store images, PDFs, audio and video in the vault. In CouchDB mode they are written through livesync-commonlib, chunked and encrypted the same way as a file added in Obsidian, so they sync to every device.
+
+| Tool | Description |
+|---|---|
+| `create_attachment_upload` | Get a one-time upload URL for a vault path. The agent sends the raw bytes there with HTTP `PUT`, e.g. `curl -fsS -X PUT --data-binary @shot.png '<url>'`. Use this for anything but tiny files |
+| `write_attachment` | Save a small file from base64 (default limit 256 KB). Every byte is a model output token, so this is for small files only |
+| `move_attachment` | Move or rename an attachment (embeds in notes are not rewritten; the response lists notes that still point at the old path) |
+| `delete_attachment` | Delete an attachment |
+| `get_attachment_metadata` | Size, timestamps, and the notes that embed or link it |
+| `list_attachments` | List attachments with size, date and how many notes use each. Filter by folder, name or extension, sort by name, date or size, or pass `unreferenced=true` to find files no note embeds or links |
+
+The agent then embeds the file in a note with `edit_note`, e.g. `![[Attachments/shot.png]]`.
+
+Upload URLs are served by this server at `BASE_URL/attachments/upload/<token>`, so `BASE_URL` must be reachable by the agent. The token in the URL is the only credential for that request: 32 random bytes, valid for one upload, one path, and `ATTACHMENT_UPLOAD_TTL_SECONDS`. Path checks, `WRITE_FOLDERS` and the size limit are applied when the URL is created, and existing files are never replaced unless the agent passed `overwrite=true`.
+
+Allowed extensions: `avif`, `bmp`, `gif`, `jpeg`, `jpg`, `png`, `webp`, `flac`, `m4a`, `mp3`, `ogg`, `wav`, `3gp`, `mkv`, `mov`, `mp4`, `ogv`, `webm`, `pdf`. Text formats (`.md`, `.svg`, `.html`, `.js`, `.json`, `.canvas`, ...) and dot-folders such as `.obsidian/` are always refused. Attachments never appear in `list_notes` or `search_notes`. For `list_attachments` the server keeps their path, size and modification time in its metadata index, learned from the CouchDB change feed (from the metadata alone, so file contents are never downloaded) or, in filesystem mode, from a scan at startup and the file watcher. References are matched by file name, the way Obsidian resolves `![[shot.png]]`, from `[[wikilinks]]`, `![[embeds]]` and markdown links such as `![](Attachments/shot.png)`. Two files with the same name in different folders therefore count as referenced if either one is, which errs on the safe side when cleaning up.
+
 Every tool response includes an [Obsidian deep link](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI) (`obsidian://open?vault=...&file=...`) that works on Mac and iOS.
 
 > "Add a bullet point to my daily note." "Find my notes about the MCP server and fix the typo in the second one."
@@ -265,6 +284,11 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 | `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP, and the vault backend rejects writes as well. Useful when sharing the server with multiple AI clients and write access should be opt-in. This protects the vault from MCP clients; it is not a database-level guarantee. To make CouchDB itself refuse writes, use CouchDB-side controls, such as a `validate_doc_update` function that rejects the server's CouchDB user. |
 | `WRITE_FOLDERS` | Optional | — | Comma-separated list of vault-relative folders where writes are allowed (e.g. `MCP,Inbox`). When set, the whole vault stays readable but `write_note`, `edit_note`, `delete_note`, and `move_note` refuse paths outside these folders (`move_note` requires both source and destination to be writable). Enforced server-side, unlike `MCP_INSTRUCTIONS`. Matching is case-sensitive and folder-boundary-aware (`MCP` matches `MCP/note.md` but not `MCP-private/note.md`). Ignored when `READ_ONLY=true`; unset means the whole vault is writable. |
+| `ATTACHMENTS_ENABLED` | Optional | `false` | Set to `true` to enable the [attachment tools](#attachments-opt-in) and the upload endpoint. Under `READ_ONLY=true` only `get_attachment_metadata` and `list_attachments` are exposed and the endpoint is not mounted. With CouchDB, startup then always reads the change feed from the beginning to learn existing attachments (it already does so whenever notes are indexed, to rebuild the search text) |
+| `ATTACHMENT_MAX_BYTES` | Optional | `20971520` (20 MB) | Largest file accepted by an upload URL. The whole file is held in memory while it is written |
+| `ATTACHMENT_INLINE_MAX_BYTES` | Optional | `262144` (256 KB) | Largest decoded file accepted by `write_attachment` |
+| `ATTACHMENT_UPLOAD_TTL_SECONDS` | Optional | `600` | How long an upload URL stays valid |
+| `ATTACHMENT_EXTENSIONS` | Optional | all supported | Comma-separated subset of the supported extensions to allow, e.g. `png,jpg,pdf`. Can only narrow the list; an unsupported extension is a startup error |
 | `MCP_INSTRUCTIONS` | Optional | — | Extra text appended to the server's MCP `instructions` (the string clients inject into the system prompt). Use this to bake vault-specific conventions into the server — e.g. folder structure, naming rules, folders to avoid — so they apply across every MCP client without per-client config. Best-effort: not all clients respect `instructions`. |
 | `MCP_INSTRUCTIONS_FILE` | Optional | — | Path to a file (e.g. markdown) whose contents are appended to the MCP `instructions`. Easier than `MCP_INSTRUCTIONS` for multi-line conventions. If both are set, the file wins and `MCP_INSTRUCTIONS` is ignored (with a startup warning). Missing/unreadable file or files larger than 32 KB are fatal startup errors. **Store this file somewhere only the service user can write (e.g. `chmod 600`)** — its contents land in every MCP session's system prompt, so write access to it = prompt-injection access to every client. |
 
@@ -300,7 +324,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 - **Single vault per instance.** Each server connects to one vault. For multiple vaults, run multiple instances on different ports.
 - **Single machine on Fly.io.** Auth state is in-memory, so multiple machines break the OAuth flow. The setup script enforces this automatically.
 - **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins.
-- **Text only.** Binary attachments are not exposed through MCP tools.
+- **Attachments are write-and-describe only.** With `ATTACHMENTS_ENABLED=true` agents can store, move and delete media files, but the server does not return attachment contents to the model.
 - **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
 - **Node 22+ required.**
 - **Setup script requires bash.** The `deploy/setup.sh` script works on macOS and Linux. On Windows, use WSL or Git Bash.

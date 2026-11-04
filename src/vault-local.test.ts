@@ -348,3 +348,62 @@ describe("file watcher integration", () => {
         }
     });
 });
+
+describe("attachments", () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10]);
+
+    it("writes, stats, moves and deletes binary files byte-exact", async () => {
+        assert.equal(await vault.writeAttachment("Attachments/a.png", bytes), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/a.png"))), bytes);
+        const info = await vault.getAttachmentInfo("Attachments/a.png");
+        assert.equal(info?.size, bytes.byteLength);
+
+        assert.equal(await vault.moveAttachment("Attachments/a.png", "Attachments/sub/b.png"), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/a.png"), null);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/sub/b.png"))), bytes);
+
+        assert.equal(await vault.deleteAttachment("Attachments/sub/b.png"), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/sub/b.png"), null);
+    });
+
+    it("is not visible as a note", async () => {
+        await vault.writeAttachment("Attachments/c.pdf", bytes);
+        const notes = await vault.listNotes();
+        assert.equal(notes.some((n) => n.includes("c.pdf")), false);
+        await vault.deleteAttachment("Attachments/c.pdf");
+    });
+
+    it("listAttachments finds media files and skips notes, other files and dot-folders", async () => {
+        await vault.writeAttachment("Attachments/l1.png", bytes);
+        await vault.writeAttachment("deep/er/l2.pdf", bytes);
+        await mkdir(join(tmpDir, ".obsidian/plugins/x"), { recursive: true });
+        await writeFile(join(tmpDir, ".obsidian/plugins/x/hidden.png"), bytes);
+        await writeFile(join(tmpDir, "notes.txt"), "x");
+        const listed = (await vault.listAttachments()).map((a) => a.path);
+        assert.ok(listed.includes("Attachments/l1.png"));
+        assert.ok(listed.includes("deep/er/l2.pdf"));
+        assert.ok(!listed.some((p) => p.includes(".obsidian") || p.endsWith(".md") || p.endsWith(".txt")), listed.join(", "));
+        assert.equal((await vault.listAttachments()).find((a) => a.path === "Attachments/l1.png")?.size, bytes.byteLength);
+        await vault.deleteAttachment("Attachments/l1.png");
+        await vault.deleteAttachment("deep/er/l2.pdf");
+    });
+
+    it("refuses notes, config and traversal through the attachment methods", async () => {
+        await assert.rejects(() => vault.writeAttachment("note.md", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.writeAttachment(".obsidian/plugins/x/main.js", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.writeAttachment("../escape.png", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.moveAttachment("a.png", "a.md"), /Invalid attachment path/);
+    });
+
+    it("blocks an attachment write that escapes via a symlinked directory", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        try {
+            const { symlink } = await import("fs/promises");
+            await symlink(outside, join(tmpDir, "attlink"));
+            await assert.rejects(() => vault.writeAttachment("attlink/x.png", bytes), /Path traversal blocked/);
+        } finally {
+            await unlink(join(tmpDir, "attlink")).catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+});

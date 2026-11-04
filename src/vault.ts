@@ -4,14 +4,16 @@
 
 import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
 import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
-import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
+import { createTextBlob, createBinaryBlob, readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
+import type { LoadedEntry } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
+import type { VaultBackend, NoteInfo, NoteListing, AttachmentInfo, AttachmentChangeCallback } from "./vault-backend.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
+import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
 import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
@@ -208,6 +210,7 @@ export class Vault implements VaultBackend {
         callback: (path: string, content: string | null, mtime?: number) => void,
         onBatch?: (since: string, processed: number) => Promise<void>,
         stats?: { unreadable: number },
+        onAttachment?: AttachmentChangeCallback,
     ): Promise<string> {
         // Paginate _changes in batches to limit memory usage.
         const BATCH_SIZE = 50;
@@ -239,6 +242,12 @@ export class Vault implements VaultBackend {
                         if (stats) stats.unreadable++;
                         continue;
                     }
+                }
+                // Attachments are reported from the metadata doc alone: size and
+                // mtime are on it, so no chunk is ever fetched for them.
+                if (onAttachment && isValidAttachmentPath(path)) {
+                    onAttachment(path, meta.deleted ? null : { size: meta.size ?? 0, mtime: meta.mtime ?? 0 });
+                    continue;
                 }
                 // A deletion doesn't need the body — the decrypted path is enough
                 // to remove the note. Short-circuit so a tombstone whose chunks were
@@ -276,12 +285,32 @@ export class Vault implements VaultBackend {
         return currentSince;
     }
 
-    watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void {
-        // catchUp already set this.manipulator.since to the right point
+    watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void, onAttachment?: AttachmentChangeCallback): void {
+        // catchUp already set this.manipulator.since to the right point.
+        // The interest filter sees the metadata doc before any chunk is loaded:
+        // attachments are reported from it and then filtered out, so their
+        // bytes are never fetched.
+        const filter = (meta: any): boolean => {
+            if (onAttachment) this.reportAttachment(meta, onAttachment);
+            return Vault.mdFilter(meta);
+        };
         this.manipulator.beginWatch(
             (doc, seq) => Vault.docToChange(doc, callback, seq),
-            Vault.mdFilter,
+            filter,
         );
+    }
+
+    private reportAttachment(meta: any, onAttachment: AttachmentChangeCallback): void {
+        const emit = (path: string) => {
+            if (!isValidAttachmentPath(path)) return;
+            onAttachment(path, meta.deleted ? null : { size: meta.size ?? 0, mtime: meta.mtime ?? 0 });
+        };
+        const path = meta.path ?? "";
+        if (isPathProbablyObfuscated(path) && this.passphrase) {
+            decrypt(path, this.passphrase, false).then(emit, () => {});
+        } else {
+            emit(path);
+        }
     }
 
     private validatePath(path: string): void {
@@ -368,4 +397,47 @@ export class Vault implements VaultBackend {
         return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
+    async writeAttachment(path: string, data: Uint8Array): Promise<boolean> {
+        validateAttachmentPath(path);
+        clearHandlers();
+        let ctime = Date.now();
+        const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (existing && "ctime" in existing) {
+            ctime = existing.ctime;
+        }
+        // A binary blob makes the library store a "newnote" (binary) entry,
+        // chunked and encrypted exactly as LiveSync does for files added in Obsidian.
+        // Copy into a fresh ArrayBuffer-backed view: the blob type wants one.
+        const blob = createBinaryBlob(new Uint8Array(data));
+        return await this.manipulator.put(path, blob, {
+            ctime,
+            mtime: Date.now(),
+            size: data.byteLength,
+        });
+    }
+
+    async deleteAttachment(path: string): Promise<boolean> {
+        validateAttachmentPath(path);
+        clearHandlers();
+        return await this.manipulator.delete(path);
+    }
+
+    async moveAttachment(from: string, to: string): Promise<boolean> {
+        validateAttachmentPath(from);
+        validateAttachmentPath(to);
+        const entry = await this.manipulator.get(from as FilePathWithPrefix);
+        if (!entry || !("data" in entry)) return false;
+        const content = readContent(entry as LoadedEntry);
+        const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
+        const wrote = await this.writeAttachment(to, bytes);
+        if (!wrote) return false;
+        return await this.deleteAttachment(from);
+    }
+
+    async getAttachmentInfo(path: string): Promise<AttachmentInfo | null> {
+        validateAttachmentPath(path);
+        const entry = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (!entry) return null;
+        return { path, size: entry.size, ctime: entry.ctime, mtime: entry.mtime };
+    }
 }

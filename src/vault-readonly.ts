@@ -3,7 +3,7 @@
  *
  * READ_ONLY=true already keeps the write tools from being registered. Wrapping
  * the backend as well means a write fails even if some future code path
- * reaches writeNote/deleteNote/moveNote without going through a tool.
+ * reaches a note or attachment write without going through a tool.
  * Kept dependency-free so it is unit-testable in isolation.
  */
 
@@ -23,10 +23,15 @@ export function readOnlyVault(inner: VaultBackend): VaultBackend {
         getMetadata: (path) => inner.getMetadata(path),
         listNotes: (folder) => inner.listNotes(folder),
         listNotesWithMtime: (folder) => inner.listNotesWithMtime(folder),
+        getAttachmentInfo: (path) => inner.getAttachmentInfo(path),
+        listAttachments: inner.listAttachments?.bind(inner),
         watchChanges: inner.watchChanges?.bind(inner),
         catchUp: inner.catchUp?.bind(inner),
         writeNote: deny,
         deleteNote: deny,
         moveNote: deny,
+        writeAttachment: deny,
+        deleteAttachment: deny,
+        moveAttachment: deny,
     };
 }
