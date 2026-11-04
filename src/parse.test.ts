@@ -198,10 +198,25 @@ Also #shared inline`;
         assert.ok(result.links.includes("folder/note.md"));
     });
 
-    it("ignores non-md markdown links", () => {
-        const content = "See [link](https://example.com) and [img](photo.png)";
+    it("ignores URLs and links to files that are neither notes nor attachments", () => {
+        const content = "See [link](https://example.com), [x](file:///etc/passwd), [data](data.json) and [script](x.js)";
         const result = parseFrontmatterAndLinks(content);
         assert.equal(result.links.length, 0);
+    });
+
+    it("records markdown links and embeds to attachments, decoded", () => {
+        const content = [
+            "![](Attachments/shot.png)",
+            "[img](photo.png)",
+            '![alt](my%20image.JPG "title")',
+            "[report](<docs/Q1 report.pdf>)",
+            "![](./rel/clip.mp4)",
+            "![](../up/audio.mp3)",
+        ].join("\n");
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), [
+            "Attachments/shot.png", "docs/Q1 report.pdf", "my image.JPG", "photo.png", "rel/clip.mp4", "up/audio.mp3",
+        ].sort());
     });
 
     it("deduplicates links", () => {

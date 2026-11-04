@@ -39,6 +39,7 @@ mtimes: Map<path, number> ─── modification timestamps
 tags: Map<path, string[]> ─── extracted from frontmatter + inline #tags
 links: Map<path, string[]>── outgoing [[wikilinks]] and [markdown](links.md)
 backlinks: Map<target, Set<source>> ─── reverse link index (case-insensitive keys)
+attachments: Map<path, {size, mtime}> ─── binary attachments, metadata only (ATTACHMENTS_ENABLED)
 since: string             ─── CouchDB _changes sequence (CouchDB mode only)
 ```
 

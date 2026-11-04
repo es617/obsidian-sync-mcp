@@ -68,6 +68,11 @@ export function snippetAround(text: string, idx: number, len: number, context = 
     return (start > 0 ? "…" : "") + body + (end < text.length ? "…" : "");
 }
 
+export interface AttachmentEntry {
+    size: number;
+    mtime: number;
+}
+
 export class SearchIndex {
     private _state: IndexState = "building";
     private mtimes = new Map<string, number>();
@@ -79,6 +84,8 @@ export class SearchIndex {
     private content = new Map<string, string>();
     /** Frontmatter `title:` per path, when present — searched together with the path. */
     private titles = new Map<string, string>();
+    /** Binary attachments (path -> size and mtime). Metadata only: their bytes are never read for the index. */
+    private attachments = new Map<string, AttachmentEntry>();
     private saving = false;
     private _since: string = "";
     /** When `since` last advanced from a completed catch-up or a watcher change (ms), null before the first. */
@@ -116,8 +123,12 @@ export class SearchIndex {
                     this.backlinks.get(key)!.add(path);
                 }
             }
+            for (const [path, v] of Object.entries(data.attachments ?? {})) {
+                const [size, mtime] = v as [number, number];
+                this.attachments.set(path, { size, mtime });
+            }
             if (data.since) this._since = data.since;
-            console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes, since: ${this._since ? "yes" : "none"}).`);
+            console.log(`Search metadata loaded from disk (${this.knownPaths.size} notes, ${this.attachments.size} attachments, since: ${this._since ? "yes" : "none"}).`);
             return this.knownPaths.size > 0;
         } catch {
             return false;
@@ -134,6 +145,7 @@ export class SearchIndex {
                 mtimes: Object.fromEntries(this.mtimes),
                 tags: Object.fromEntries(this.tags),
                 links: Object.fromEntries(this.links),
+                attachments: Object.fromEntries([...this.attachments].map(([p, a]) => [p, [a.size, a.mtime]])),
                 since: this._since,
             });
             if (this.passphrase) {
@@ -141,7 +153,8 @@ export class SearchIndex {
             }
             await writeFile(this.persistPath, data, { encoding: "utf-8", mode: 0o600 });
             await chmod(this.persistPath, 0o600);
-            console.log(`Search index saved to disk (${this.knownPaths.size} notes${this.passphrase ? ", encrypted" : ""}).`);
+            const att = this.attachments.size > 0 ? `, ${this.attachments.size} attachments` : "";
+            console.log(`Search index saved to disk (${this.knownPaths.size} notes${att}${this.passphrase ? ", encrypted" : ""}).`);
         } catch (err) {
             console.error("Failed to save search index:", err);
         } finally {
@@ -340,10 +353,66 @@ export class SearchIndex {
             .sort((a, b) => b.count - a.count);
     }
 
+    /** Record or update an attachment's size and mtime. */
+    updateAttachment(path: string, size: number, mtime: number): void {
+        this.attachments.set(path, { size, mtime });
+    }
+
+    removeAttachment(path: string): void {
+        this.attachments.delete(path);
+    }
+
+    /** Replace every attachment entry (local mode's startup scan). */
+    replaceAttachments(entries: Iterable<{ path: string; size: number; mtime: number }>): void {
+        this.attachments.clear();
+        for (const e of entries) this.attachments.set(e.path, { size: e.size, mtime: e.mtime });
+    }
+
+    clearAttachments(): void {
+        this.attachments.clear();
+    }
+
+    get attachmentCount(): number {
+        return this.attachments.size;
+    }
+
+    /** Indexed attachments, optionally under a folder, sorted by path. */
+    listAttachments(folder?: string): Array<{ path: string; size: number; mtime: number }> {
+        const prefix = folder && !folder.endsWith("/") ? folder + "/" : folder;
+        return [...this.attachments]
+            .filter(([p]) => !prefix || p.startsWith(prefix))
+            .map(([path, a]) => ({ path, size: a.size, mtime: a.mtime }))
+            .sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    /**
+     * Notes that embed or link each attachment, keyed by lowercased file name.
+     * Matched by name rather than full path because Obsidian resolves
+     * `![[shot.png]]` by name and relative markdown links vary; an ambiguous
+     * name therefore errs towards "referenced", the safe side when the answer
+     * decides what to clean up. Build once and look up many.
+     */
+    attachmentReferenceMap(): Map<string, Set<string>> {
+        const byName = new Map<string, Set<string>>();
+        for (const [target, sources] of this.backlinks) {
+            const name = target.slice(target.lastIndexOf("/") + 1);
+            if (!byName.has(name)) byName.set(name, new Set());
+            for (const s of sources) byName.get(name)!.add(s);
+        }
+        return byName;
+    }
+
+    /** Notes that embed or link the attachment at `path` (see attachmentReferenceMap). */
+    getAttachmentReferences(path: string, refs = this.attachmentReferenceMap()): string[] {
+        const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+        return [...(refs.get(name) ?? [])].sort();
+    }
+
     /** Clear all index data (for full rebuild after DB nuke). */
     clear(): void {
         const paths = Array.from(this.knownPaths);
         for (const p of paths) this.remove(p);
+        this.attachments.clear();
         this._since = "";
         this._state = "building";
     }
