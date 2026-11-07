@@ -53,7 +53,7 @@ The server implements a self-contained OAuth 2.1 authorization server with PKCE.
 ## Filesystem (local mode)
 
 - **Path traversal prevention** — all file operations resolve the full path and verify it stays within the vault root directory. Attempts to access `../` or absolute paths outside the vault throw an error before any I/O occurs.
-- **Symlink resolution** — `fs.realpath()` resolves symlinks before the path check. A symlink inside the vault pointing to `/etc/passwd` is caught because the resolved path falls outside the vault root.
+- **Symlink resolution** — `fs.realpath()` resolves symlinks before the path check. A symlink inside the vault pointing to `/etc/passwd` is caught because the resolved path falls outside the vault root. A dangling symlink (one whose target doesn't exist yet) can't be resolved, so a write through one, or through a dangling symlinked directory, is refused instead of creating the target outside the vault. `list_attachments` leaves out symlinks that resolve outside the vault.
 
 ---
 

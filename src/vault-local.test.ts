@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir, unlink, readFile } from "fs/promises";
-import { watch } from "fs";
+import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
@@ -455,6 +455,61 @@ describe("attachments", () => {
             await assert.rejects(() => vault.writeAttachment("attlink/x.png", bytes), /Path traversal blocked/);
         } finally {
             await unlink(join(tmpDir, "attlink")).catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("blocks writes through a dangling symlink to a file or directory outside the vault", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        const links = ["dangling.png", "dangling.md", "danglingdir"];
+        try {
+            const { symlink } = await import("fs/promises");
+            await symlink(join(outside, "new.png"), join(tmpDir, "dangling.png"));
+            await symlink(join(outside, "new.md"), join(tmpDir, "dangling.md"));
+            await symlink(join(outside, "notyet"), join(tmpDir, "danglingdir"));
+            await assert.rejects(() => vault.writeAttachment("dangling.png", bytes), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeAttachment("dangling.png", bytes, { overwrite: true }), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeNote("dangling.md", "x"), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeAttachment("danglingdir/sub/x.png", bytes), /Path traversal blocked/);
+            assert.equal(existsSync(join(outside, "new.png")), false);
+            assert.equal(existsSync(join(outside, "new.md")), false);
+            assert.equal(existsSync(join(outside, "notyet")), false);
+        } finally {
+            for (const l of links) await unlink(join(tmpDir, l)).catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("still writes a new file through a symlinked directory inside the vault", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, "realdir"), { recursive: true });
+        await symlink(join(tmpDir, "realdir"), join(tmpDir, "innerlink"));
+        try {
+            assert.equal(await vault.writeAttachment("innerlink/ok.png", bytes), true);
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "realdir/ok.png"))), bytes);
+        } finally {
+            await unlink(join(tmpDir, "innerlink")).catch(() => {});
+            await rm(join(tmpDir, "realdir"), { recursive: true, force: true });
+        }
+    });
+
+    it("listAttachments leaves out symlinks that point outside the vault", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        try {
+            const { symlink } = await import("fs/promises");
+            await writeFile(join(outside, "secret.png"), bytes);
+            await mkdir(join(outside, "dir"));
+            await writeFile(join(outside, "dir/inner.png"), bytes);
+            await symlink(join(outside, "secret.png"), join(tmpDir, "leak.png"));
+            await symlink(join(outside, "dir"), join(tmpDir, "leakdir"));
+            await symlink(join(outside, "gone.png"), join(tmpDir, "gone.png"));
+            await vault.writeAttachment("Attachments/kept.png", bytes);
+            const listed = (await vault.listAttachments()).map((a) => a.path);
+            assert.ok(listed.includes("Attachments/kept.png"), listed.join(", "));
+            assert.ok(!listed.some((p) => p.startsWith("leak") || p === "gone.png"), listed.join(", "));
+        } finally {
+            for (const l of ["leak.png", "leakdir", "gone.png"]) await unlink(join(tmpDir, l)).catch(() => {});
+            await vault.deleteAttachment("Attachments/kept.png").catch(() => {});
             await rm(outside, { recursive: true, force: true });
         }
     });

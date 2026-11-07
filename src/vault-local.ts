@@ -1,4 +1,4 @@
-import { readFile, writeFile, unlink, mkdir, stat, realpath, rename, link, copyFile } from "fs/promises";
+import { readFile, writeFile, unlink, mkdir, stat, lstat, realpath, rename, link, copyFile } from "fs/promises";
 import { dirname, resolve, sep } from "path";
 import { realpathSync, constants } from "fs";
 import { glob } from "fs/promises";
@@ -40,8 +40,37 @@ export class LocalVault implements VaultBackend {
             if (!(await this.realpathWithinRoot(dirname(full)))) {
                 throw new Error("Path traversal blocked");
             }
+            // realpath also fails with ENOENT on a dangling symlink, which a
+            // write would follow and create outside the vault.
+            if (await this.hasDanglingSymlink(full)) {
+                throw new Error("Path traversal blocked");
+            }
             return full;
         }
+    }
+
+    /** Whether `full` or one of its ancestors below the root is a symlink to nothing. */
+    private async hasDanglingSymlink(full: string): Promise<boolean> {
+        for (let current = full; current !== this.root; current = dirname(current)) {
+            let s;
+            try {
+                s = await lstat(current);
+            } catch (e: any) {
+                if (e.code === "ENOENT") continue;
+                throw e;
+            }
+            // The nearest existing entry decides: anything but a symlink is
+            // real, and a resolvable symlink is checked by realpathWithinRoot.
+            if (!s.isSymbolicLink()) return false;
+            try {
+                await realpath(current);
+                return false;
+            } catch (e: any) {
+                if (e.code === "ENOENT") return true;
+                throw e;
+            }
+        }
+        return false;
     }
 
     private async realpathWithinRoot(target: string): Promise<boolean> {
@@ -249,10 +278,13 @@ export class LocalVault implements VaultBackend {
                 const path = entry.replace(/\\/g, "/");
                 if (!isValidAttachmentPath(path)) continue;
                 try {
-                    const s = await stat(resolve(this.root, path));
+                    // A symlink out of the vault would leak the target's name and size.
+                    const real = await realpath(resolve(this.root, path));
+                    if (!real.startsWith(this.root + sep)) continue;
+                    const s = await stat(real);
                     if (s.isFile()) results.push({ path, size: s.size, ctime: s.birthtimeMs, mtime: s.mtimeMs });
                 } catch {
-                    // Vanished between listing and stat.
+                    // Vanished between listing and stat, or a dangling symlink.
                 }
             }
         } catch {

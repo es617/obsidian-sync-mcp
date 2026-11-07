@@ -11,6 +11,7 @@
 - Link targets no longer keep a `#heading`, `#^block` or `#page=2` suffix: `[[Note#Heading]]` and `[x](Note.md#Heading)` now count as backlinks to the note, and `![[paper.pdf#page=2]]` / `![](clip.mp4#t=10)` count as uses of the file. `[[#Heading]]` (a heading in the same note) is not recorded as a link.
 
 ### Fixes
+- Local mode: a write through a dangling symlink in the vault (a link whose target doesn't exist yet) followed the link and created the file outside the vault. Such writes are now refused, for notes and attachments.
 - `move_note` in CouchDB mode no longer deletes the note when the source and destination are the same document: the same path, or a case-only rename (`Foo.md` → `foo.md`) on a vault with LiveSync's default case-insensitive file names. A case-only rename now renames the note.
 
 ## 0.10.0
