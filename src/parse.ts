@@ -10,27 +10,28 @@ export interface NoteMetadata {
     links: string[];
 }
 
-// Link patterns. Each part stops at a bracket, paren or newline and is capped
-// in length. Otherwise a failed match rescans the rest of the note, which is
-// quadratic on input like "[".repeat(20000), and parsing is synchronous and
-// runs on every note at startup.
+// Link patterns. Each part stops at a bracket, paren or newline, so a failed
+// match only scans up to the next one. Otherwise it rescans the rest of the
+// note, which is quadratic on input like "[".repeat(20000), and parsing is
+// synchronous and runs on every note at startup. No length cap is needed on
+// top: attachment targets are capped by isValidAttachmentPath after decoding.
 
 // [[wikilinks]]. A #heading, #^block or #page=2 suffix points into the target,
 // so [[Note#Heading]] links Note and ![[paper.pdf#page=2]] embeds paper.pdf.
 // [[#Heading]] (same note) is not a link.
-const WIKILINK = /\[\[([^[\]|#\n]{1,1000})(?:#[^[\]|\n]{0,1000})?(?:\|[^[\]\n]{0,1000})?\]\]/g;
+const WIKILINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
 // Markdown link text: plain characters, or one level of [brackets], so
 // [see [1]](note.md) and [![thumb](t.png)](full.png) parse. The two
 // alternatives never match the same character, so this adds no backtracking.
-const LINK_LABEL = String.raw`[^[\]\n]|\[[^[\]\n]{0,1000}\]`;
+const LINK_LABEL = String.raw`[^[\]\n]|\[[^[\]\n]*\]`;
 
 // [markdown links](path.md), also with a #heading: [x](path.md#Heading) links path.md.
-const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL}){1,1000}\]\(([^()#\n]{1,1000}\.md)(?:#[^()\n]{0,1000})?\)`, "g");
+const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL})+\]\(([^()#\n]+\.md)(?:#[^()\n]*)?\)`, "g");
 
 // Markdown links and embeds to attachments: ![](Attachments/shot.png),
 // [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title").
-const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL}){0,1000})\]\((<[^<>\n]{1,1000}>|[^()\s]{1,1000})(?:\s+"[^"\n]{0,1000}")?\)`, "g");
+const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL})*)\]\((<[^<>\n]+>|[^()\s]+)(?:\s+"[^"\n]*")?\)`, "g");
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     const frontmatter: Record<string, any> = {};

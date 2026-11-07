@@ -271,6 +271,24 @@ Also #shared inline`;
         assert.deepEqual(parseFrontmatterAndLinks("[](a".repeat(10000) + " [[end]]").links, ["end"]);
     });
 
+    it("keeps links with long text, aliases or percent-encoded targets", () => {
+        const long = "x".repeat(5000);
+        // 200 CJK characters are 1800 characters encoded but 200 decoded.
+        const cjk = "图".repeat(200) + ".png";
+        const content = [
+            `![${long}](alt.png)`,
+            `[[Note|${long}]]`,
+            `[[Other#${long}]]`,
+            `[${long}](linked.md)`,
+            `![](${encodeURIComponent(cjk)})`,
+        ].join("\n");
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), [cjk, "Note", "Other", "alt.png", "linked.md"].sort());
+    });
+
+    it("still drops attachment targets over the path length limit once decoded", () => {
+        assert.deepEqual(parseFrontmatterAndLinks(`![](${"a".repeat(1001)}.png)`).links, []);
+    });
+
     it("still finds links next to other brackets", () => {
         const content = "[see [1]](note.md) [![thumb](t.png)](full.png) [[a]][[b]] ([[c]]) [x](d.md)(e)";
         const result = parseFrontmatterAndLinks(content);
