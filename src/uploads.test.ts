@@ -69,11 +69,30 @@ describe("upload route", () => {
         assert.deepEqual(files.get("Attachments/s.png")?.data, bytes(50));
     });
 
-    it("accepts POST too", async () => {
-        const { registry, app } = setup();
+    it("accepts PUT only, and a POST leaves the token usable", async () => {
+        const { registry, app, files, put } = setup();
         const h = registry.create({ path: "a.png", overwrite: false, maxBytes: 100 });
         const res = await app.request(`${UPLOAD_ROUTE_PREFIX}${h.token}`, { method: "POST", body: bytes(3) });
-        assert.equal(res.status, 201);
+        assert.equal(res.status, 404);
+        assert.equal(files.size, 0);
+        assert.equal((await put(h.token, bytes(3))).status, 201);
+    });
+
+    it("returns a generic 500 and reports the backend error to onError", async () => {
+        const registry = new UploadRegistry();
+        const errors: Array<[string, unknown]> = [];
+        const vault = { writeAttachment: async () => { throw new Error("connect ECONNREFUSED http://admin:secret@couchdb.internal:5984"); } } as any;
+        const app = new Hono();
+        mountAttachmentUpload(app, { registry, vault, onError: (path, err) => errors.push([path, err]) });
+        const h = registry.create({ path: "a.png", overwrite: false, maxBytes: 100 });
+        const res = await app.request(`${UPLOAD_ROUTE_PREFIX}${h.token}`, { method: "PUT", body: bytes(3), duplex: "half" } as RequestInit);
+        assert.equal(res.status, 500);
+        const body = await res.text();
+        assert.ok(!body.includes("couchdb.internal") && !body.includes("ECONNREFUSED"), body);
+        assert.deepEqual(JSON.parse(body), { error: "Failed to write attachment: a.png" });
+        assert.equal(errors.length, 1);
+        assert.equal(errors[0][0], "a.png");
+        assert.match((errors[0][1] as Error).message, /ECONNREFUSED/);
     });
 
     it("rejects unknown and reused tokens", async () => {

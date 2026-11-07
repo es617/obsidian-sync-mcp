@@ -124,9 +124,11 @@ export interface UploadRouteOptions {
     vault: VaultBackend;
     /** Called after a successful write, e.g. for logging. */
     onWritten?: (path: string, size: number) => void;
+    /** Called when the backend write throws. The client only gets a generic 500. */
+    onError?: (path: string, err: unknown) => void;
 }
 
-export function mountAttachmentUpload(app: Hono, { registry, vault, onWritten }: UploadRouteOptions): void {
+export function mountAttachmentUpload(app: Hono, { registry, vault, onWritten, onError }: UploadRouteOptions): void {
     const handler = async (c: any) => {
         const handle = registry.take(c.req.param("token") ?? "");
         if (!handle) {
@@ -157,11 +159,16 @@ export function mountAttachmentUpload(app: Hono, { registry, vault, onWritten }:
             if (err instanceof AttachmentExistsError) {
                 return c.json({ error: `Attachment already exists: ${handle.path}` }, 409);
             }
-            return c.json({ error: `Failed to write attachment: ${(err as Error).message}` }, 500);
+            // The message can name the CouchDB host, so it stays in the server log.
+            onError?.(handle.path, err);
+            return c.json({ error: `Failed to write attachment: ${handle.path}` }, 500);
         }
         onWritten?.(handle.path, data.byteLength);
         return c.json({ path: handle.path, size: data.byteLength, embed: `![[${handle.path}]]` }, 201);
     };
+    // PUT only. The route is outside the Host/Origin guard and mcp-proxy sends
+    // permissive CORS headers, so a web page could POST here without a
+    // preflight. A cross-origin PUT needs one, and mcp-proxy allows only GET
+    // and POST, so the browser never sends it.
     app.put(`${UPLOAD_ROUTE_PREFIX}:token`, handler);
-    app.post(`${UPLOAD_ROUTE_PREFIX}:token`, handler);
 }

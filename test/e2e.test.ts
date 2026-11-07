@@ -403,6 +403,11 @@ describe("E2E: attachments", () => {
         const url = out.match(/http:\/\/localhost:\d+\/attachments\/upload\/[A-Za-z0-9_-]+/)?.[0];
         assert.ok(url, out);
 
+        // POST is not accepted: nothing is written and the token stays valid.
+        const post = await fetch(url, { method: "POST", body: png, headers: { Origin: "https://evil.example" } });
+        assert.ok(post.status >= 400, `POST got ${post.status}`);
+        assert.ok(!existsSync(join(vaultDir, "Attachments/shot.png")));
+
         // No Authorization header: the token in the URL is the credential.
         const resp = await fetch(url, { method: "PUT", body: png });
         assert.equal(resp.status, 201);

@@ -493,6 +493,9 @@ if (ATTACHMENTS_ENABLED) {
                 searchIndex.updateAttachment(path, size, Date.now());
                 if (debugLogging) console.log(`[debug] attachment upload: ${path} (${size} bytes)`);
             },
+            onError: (path, err) => {
+                console.error(`Attachment upload failed${debugLogging ? ` (${path})` : ""}: ${describeError(err, debugLogging)}`);
+            },
         });
     }
     console.log(
