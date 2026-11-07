@@ -166,13 +166,9 @@ if (searchIndex.size > 0 && searchIndex.contentCount < searchIndex.size) {
 
 // Attachments are only indexed while the feature is on. Off: drop any left
 // from an earlier run so the persisted file stops carrying their paths. On:
-// read the change feed from the start, because notes skipped while the
-// feature was off (or before this version) never reported their attachments.
-if (!ATTACHMENTS_ENABLED) {
-    searchIndex.clearAttachments();
-} else if (searchIndex.since && searchIndex.since !== "0") {
-    searchIndex.since = "0";
-}
+// the re-read from sequence zero above also reports every attachment,
+// including those added while the feature was off.
+if (!ATTACHMENTS_ENABLED) searchIndex.clearAttachments();
 const onAttachmentChange: AttachmentChangeCallback | undefined = ATTACHMENTS_ENABLED
     ? (path, info) => {
         if (info) searchIndex.updateAttachment(path, info.size, info.mtime);
