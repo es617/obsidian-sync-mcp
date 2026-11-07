@@ -13,6 +13,7 @@
 
 ### Fixes
 - Local mode: a write through a dangling symlink in the vault (a link whose target doesn't exist yet) followed the link and created the file outside the vault. Such writes are now refused, for notes and attachments.
+- Local mode: a symlink inside the vault could point a note or attachment operation at a file its name doesn't allow, such as `a.png` → a note or `.obsidian/` file, which the attachment tools could then overwrite or delete. The resolved path now has to pass the same checks as the name, and the attachment tools refuse to write, delete or move a symlink itself.
 - `move_note` in CouchDB mode no longer deletes the note when the source and destination are the same document: the same path, or a case-only rename (`Foo.md` → `foo.md`) on a vault with LiveSync's default case-insensitive file names. A case-only rename now renames the note.
 
 ## 0.10.0

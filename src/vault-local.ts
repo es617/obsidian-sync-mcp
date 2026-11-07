@@ -1,5 +1,5 @@
 import { readFile, writeFile, unlink, mkdir, stat, lstat, realpath, rename, link, copyFile } from "fs/promises";
-import { dirname, resolve, sep } from "path";
+import { basename, dirname, join, relative, resolve, sep } from "path";
 import { realpathSync, constants } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
@@ -14,7 +14,7 @@ export class LocalVault implements VaultBackend {
         this.root = realpathSync(resolve(vaultPath));
     }
 
-    private async safePath(path: string, kind: "note" | "attachment" | "folder" = "folder"): Promise<string> {
+    private async safePath(path: string, kind: "note" | "attachment" | "folder" = "folder", { noSymlink = false } = {}): Promise<string> {
         // Note operations must target a real note (.md, no dot-folders, etc.)
         // and attachment operations an allowed media file; folder listing
         // passes a directory and skips this.
@@ -25,27 +25,62 @@ export class LocalVault implements VaultBackend {
         if (!full.startsWith(this.root + sep)) {
             throw new Error("Path traversal blocked");
         }
-        // Resolve symlinks and re-check (catches symlink escapes)
+        // Resolve symlinks and re-check (catches symlink escapes). A path
+        // that doesn't exist yet resolves through its nearest existing
+        // ancestor, so a symlinked parent can't redirect a write either.
+        const real = await this.resolveExisting(full);
+        if (!real.startsWith(this.root + sep)) {
+            throw new Error("Path traversal blocked");
+        }
+        // The name was validated, but a symlink inside the vault can point at
+        // a note, a dot-folder or another type, so the target must pass too.
+        if (kind !== "folder" && !this.isValidKind(relative(this.root, real), kind)) {
+            throw new Error("Path traversal blocked");
+        }
+        // realpath fails with ENOENT on a dangling symlink, so it resolves as
+        // a new file, but a write would follow it and create outside the vault.
+        if (await this.hasDanglingSymlink(full)) {
+            throw new Error("Path traversal blocked");
+        }
+        // Writing or deleting through a symlink would act on its target, a
+        // different path from the one the caller named.
+        if (noSymlink && (await this.isSymlink(full))) {
+            throw new Error(`Refusing to modify a symlink: ${path}`);
+        }
+        return real;
+    }
+
+    private isValidKind(rel: string, kind: "note" | "attachment"): boolean {
+        const path = rel.split(sep).join("/");
+        return kind === "note" ? isValidNotePath(path) : isValidAttachmentPath(path);
+    }
+
+    private async isSymlink(full: string): Promise<boolean> {
         try {
-            const real = await realpath(full);
-            if (!real.startsWith(this.root + sep)) {
-                throw new Error("Path traversal blocked");
-            }
-            return real;
+            return (await lstat(full)).isSymbolicLink();
         } catch (e: any) {
-            if (e.code !== "ENOENT") throw e;
-            // The file (or a parent) doesn't exist yet. Confirm the nearest
-            // existing ancestor still resolves inside the vault, so a symlinked
-            // parent directory can't redirect a write outside the root.
-            if (!(await this.realpathWithinRoot(dirname(full)))) {
-                throw new Error("Path traversal blocked");
+            if (e.code === "ENOENT") return false;
+            throw e;
+        }
+    }
+
+    /**
+     * realpath of `full`, or for a path that doesn't exist yet the realpath of
+     * its nearest existing ancestor joined with the rest.
+     */
+    private async resolveExisting(full: string): Promise<string> {
+        const rest: string[] = [];
+        let current = full;
+        for (;;) {
+            try {
+                return join(await realpath(current), ...rest);
+            } catch (e: any) {
+                if (e.code !== "ENOENT") throw e;
+                const parent = dirname(current);
+                if (parent === current) return full; // reached filesystem root
+                rest.unshift(basename(current));
+                current = parent;
             }
-            // realpath also fails with ENOENT on a dangling symlink, which a
-            // write would follow and create outside the vault.
-            if (await this.hasDanglingSymlink(full)) {
-                throw new Error("Path traversal blocked");
-            }
-            return full;
         }
     }
 
@@ -60,7 +95,7 @@ export class LocalVault implements VaultBackend {
                 throw e;
             }
             // The nearest existing entry decides: anything but a symlink is
-            // real, and a resolvable symlink is checked by realpathWithinRoot.
+            // real, and a resolvable symlink was checked by resolveExisting.
             if (!s.isSymbolicLink()) return false;
             try {
                 await realpath(current);
@@ -71,21 +106,6 @@ export class LocalVault implements VaultBackend {
             }
         }
         return false;
-    }
-
-    private async realpathWithinRoot(target: string): Promise<boolean> {
-        let current = target;
-        for (;;) {
-            try {
-                const real = await realpath(current);
-                return real === this.root || real.startsWith(this.root + sep);
-            } catch (e: any) {
-                if (e.code !== "ENOENT") throw e;
-                const parent = dirname(current);
-                if (parent === current) return false; // reached filesystem root
-                current = parent;
-            }
-        }
     }
 
     async init(): Promise<void> {}
@@ -193,7 +213,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async writeAttachment(path: string, data: Uint8Array, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
-        const fullPath = await this.safePath(path, "attachment");
+        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
         try {
             await mkdir(dirname(fullPath), { recursive: true });
             // "wx" (O_EXCL) fails if the file exists, in the same step as the
@@ -207,7 +227,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async deleteAttachment(path: string): Promise<boolean> {
-        const fullPath = await this.safePath(path, "attachment");
+        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
         try {
             await unlink(fullPath);
             return true;
@@ -217,8 +237,8 @@ export class LocalVault implements VaultBackend {
     }
 
     async moveAttachment(from: string, to: string, { overwrite = false }: MoveOptions = {}): Promise<boolean> {
-        const fromPath = await this.safePath(from, "attachment");
-        const toPath = await this.safePath(to, "attachment");
+        const fromPath = await this.safePath(from, "attachment", { noSymlink: true });
+        const toPath = await this.safePath(to, "attachment", { noSymlink: true });
         if (fromPath === toPath) {
             // Same file, which link below would refuse with EEXIST. rename is a
             // no-op here, or the case-only rename on a case-insensitive filesystem.
@@ -278,9 +298,10 @@ export class LocalVault implements VaultBackend {
                 const path = entry.replace(/\\/g, "/");
                 if (!isValidAttachmentPath(path)) continue;
                 try {
-                    // A symlink out of the vault would leak the target's name and size.
+                    // A symlink out of the vault would leak the target's name and
+                    // size, and one to a note or dot-folder isn't an attachment.
                     const real = await realpath(resolve(this.root, path));
-                    if (!real.startsWith(this.root + sep)) continue;
+                    if (!real.startsWith(this.root + sep) || !this.isValidKind(relative(this.root, real), "attachment")) continue;
                     const s = await stat(real);
                     if (s.isFile()) results.push({ path, size: s.size, ctime: s.birthtimeMs, mtime: s.mtimeMs });
                 } catch {

@@ -520,4 +520,65 @@ describe("attachments", () => {
             await rm(outside, { recursive: true, force: true });
         }
     });
+
+    it("refuses attachment operations through a symlink to a note or a dot-folder file", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, ".obsidian/plugins"), { recursive: true });
+        await mkdir(join(tmpDir, "Notes"), { recursive: true });
+        await writeFile(join(tmpDir, "Notes/secret.md"), "secret");
+        await writeFile(join(tmpDir, ".obsidian/plugins/main.png"), bytes);
+        await symlink(join(tmpDir, "Notes/secret.md"), join(tmpDir, "tonote.png"));
+        await symlink(join(tmpDir, ".obsidian/plugins/main.png"), join(tmpDir, "todot.png"));
+        await symlink(join(tmpDir, ".obsidian/plugins"), join(tmpDir, "media"));
+        try {
+            for (const link of ["tonote.png", "todot.png", "media/main.png", "media/new.png"]) {
+                await assert.rejects(() => vault.writeAttachment(link, bytes, { overwrite: true }), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.deleteAttachment(link), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.moveAttachment(link, "moved.png"), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.getAttachmentInfo(link), /Path traversal blocked/, link);
+            }
+            await assert.rejects(() => vault.moveAttachment("kept-src.png", "tonote.png", { overwrite: true }), /Path traversal blocked/);
+            assert.equal(await readFile(join(tmpDir, "Notes/secret.md"), "utf8"), "secret");
+            assert.ok(existsSync(join(tmpDir, ".obsidian/plugins/main.png")));
+            assert.equal(existsSync(join(tmpDir, ".obsidian/plugins/new.png")), false);
+            const listed = (await vault.listAttachments()).map((a) => a.path);
+            assert.ok(!listed.some((p) => ["tonote.png", "todot.png"].includes(p) || p.startsWith("media/")), listed.join(", "));
+        } finally {
+            for (const l of ["tonote.png", "todot.png", "media"]) await unlink(join(tmpDir, l)).catch(() => {});
+            await rm(join(tmpDir, ".obsidian"), { recursive: true, force: true });
+            await rm(join(tmpDir, "Notes"), { recursive: true, force: true });
+        }
+    });
+
+    it("refuses to write, delete or move a symlink to another attachment, but reads through it", async () => {
+        const { symlink } = await import("fs/promises");
+        await writeFile(join(tmpDir, "target.png"), bytes);
+        await symlink(join(tmpDir, "target.png"), join(tmpDir, "alias.png"));
+        try {
+            await assert.rejects(() => vault.writeAttachment("alias.png", new Uint8Array([9]), { overwrite: true }), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.deleteAttachment("alias.png"), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.moveAttachment("alias.png", "x.png"), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.moveAttachment("target.png", "alias.png", { overwrite: true }), /Refusing to modify a symlink/);
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "target.png"))), bytes);
+            assert.equal((await vault.getAttachmentInfo("alias.png"))?.size, bytes.byteLength);
+        } finally {
+            await unlink(join(tmpDir, "alias.png")).catch(() => {});
+            await unlink(join(tmpDir, "target.png")).catch(() => {});
+        }
+    });
+
+    it("refuses a note operation through a symlink to a file that isn't a note", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, ".trash"), { recursive: true });
+        await writeFile(join(tmpDir, ".trash/old.md"), "old");
+        await symlink(join(tmpDir, ".trash/old.md"), join(tmpDir, "trashed.md"));
+        try {
+            await assert.rejects(() => vault.readNote("trashed.md"), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeNote("trashed.md", "new"), /Path traversal blocked/);
+            assert.equal(await readFile(join(tmpDir, ".trash/old.md"), "utf8"), "old");
+        } finally {
+            await unlink(join(tmpDir, "trashed.md")).catch(() => {});
+            await rm(join(tmpDir, ".trash"), { recursive: true, force: true });
+        }
+    });
 });
