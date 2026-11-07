@@ -68,6 +68,12 @@ export class UploadRegistry {
         return handle;
     }
 
+    /** Return the handle without using it up, or null when unknown or expired. */
+    peek(token: string): UploadHandle | null {
+        const handle = this.handles.get(token);
+        return handle && handle.expiresAt > this.now() ? handle : null;
+    }
+
     /** Remove and return the handle (single use), or null when unknown or expired. */
     take(token: string): UploadHandle | null {
         const handle = this.handles.get(token);
@@ -130,14 +136,18 @@ export interface UploadRouteOptions {
 
 export function mountAttachmentUpload(app: Hono, { registry, vault, onWritten, onError }: UploadRouteOptions): void {
     const handler = async (c: any) => {
-        const handle = registry.take(c.req.param("token") ?? "");
-        if (!handle) {
-            return c.json({ error: "Unknown, used or expired upload URL. Call create_attachment_upload again." }, 404);
-        }
+        const token = c.req.param("token") ?? "";
+        const unknown = () => c.json({ error: "Unknown, used or expired upload URL. Call create_attachment_upload again." }, 404);
+        const peeked = registry.peek(token);
+        if (!peeked) return unknown();
+        // Refused from the header alone, the URL stays usable for a retry.
+        // Once the body is read the handle is used up, whatever the outcome.
         const declared = Number(c.req.header("content-length"));
-        if (Number.isFinite(declared) && declared > handle.maxBytes) {
-            return c.json({ error: `Upload exceeds the limit of ${handle.maxBytes} bytes` }, 413);
+        if (Number.isFinite(declared) && declared > peeked.maxBytes) {
+            return c.json({ error: `Upload exceeds the limit of ${peeked.maxBytes} bytes` }, 413);
         }
+        const handle = registry.take(token);
+        if (!handle) return unknown();
         let data: Uint8Array;
         try {
             data = await readBodyLimited(c.req.raw.body, handle.maxBytes);

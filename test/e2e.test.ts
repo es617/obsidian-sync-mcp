@@ -429,6 +429,11 @@ describe("E2E: attachments", () => {
         const resp = await fetch(url, { method: "PUT", body: new Uint8Array(1001) });
         assert.equal(resp.status, 413);
         assert.ok(!existsSync(join(vaultDir, "Attachments/big.pdf")));
+        // Refused from Content-Length alone, so the same URL takes a smaller file.
+        const retry = await fetch(url, { method: "PUT", body: new Uint8Array(10).fill(7) });
+        assert.equal(retry.status, 201);
+        assert.equal(readFileSync(join(vaultDir, "Attachments/big.pdf")).byteLength, 10);
+        await callTool("delete_attachment", { path: "Attachments/big.pdf" });
     });
 
     it("lets only one of two concurrent uploads to the same new path succeed", async () => {

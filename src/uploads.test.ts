@@ -115,7 +115,8 @@ describe("upload route", () => {
     it("rejects bodies over the limit, by header or by stream", async () => {
         const { registry, put, files } = setup();
         const h1 = registry.create({ path: "a.png", overwrite: false, maxBytes: 10 });
-        assert.equal((await put(h1.token, bytes(11))).status, 413);
+        // app.request doesn't add Content-Length the way fetch does, so set it.
+        assert.equal((await put(h1.token, bytes(11), { "content-length": "11" })).status, 413);
         // A chunked stream with no content-length is cut off while reading.
         const h2 = registry.create({ path: "b.png", overwrite: false, maxBytes: 10 });
         const stream = new ReadableStream<Uint8Array>({
@@ -123,6 +124,20 @@ describe("upload route", () => {
         });
         assert.equal((await put(h2.token, stream)).status, 413);
         assert.equal(files.size, 0);
+    });
+
+    it("keeps the URL usable after a 413 from the header, but not once the body was read", async () => {
+        const { registry, put, files } = setup();
+        const h = registry.create({ path: "a.png", overwrite: false, maxBytes: 10 });
+        assert.equal((await put(h.token, bytes(11), { "content-length": "11" })).status, 413);
+        assert.equal((await put(h.token, bytes(5))).status, 201, "retry with a smaller file");
+        assert.equal(files.get("a.png")?.data.byteLength, 5);
+        assert.equal((await put(h.token, bytes(5))).status, 404, "then used up");
+
+        const s = registry.create({ path: "s.png", overwrite: false, maxBytes: 10 });
+        const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(bytes(6)); c.enqueue(bytes(6)); c.close(); } });
+        assert.equal((await put(s.token, stream)).status, 413);
+        assert.equal((await put(s.token, bytes(5))).status, 404, "a body cut off while reading uses the URL up");
     });
 
     it("rejects an empty body and a size mismatch", async () => {
