@@ -65,13 +65,15 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
         tags.add(match[2]);
     }
 
-    // [[wikilinks]]
-    for (const match of content.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
+    // [[wikilinks]]. A #heading, #^block or #page=2 suffix points into the
+    // target, so [[Note#Heading]] links Note and ![[paper.pdf#page=2]] embeds
+    // paper.pdf. [[#Heading]] (same note) is not a link.
+    for (const match of content.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]+)?\]\]/g)) {
         links.push(match[1]);
     }
 
-    // [markdown links](path.md)
-    for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+\.md)\)/g)) {
+    // [markdown links](path.md), also with a #heading: [x](path.md#Heading) links path.md.
+    for (const match of content.matchAll(/\[([^\]]+)\]\(([^)#]+\.md)(?:#[^)]*)?\)/g)) {
         links.push(match[2]);
     }
 
@@ -79,7 +81,9 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     // [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title"). Recorded
     // URL-decoded so list_attachments can tell which files are still used.
     for (const match of content.matchAll(/\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)/g)) {
-        let target = match[1].replace(/^<|>$/g, "");
+        // Drop a #page=2 fragment, as for wikilinks. Before decoding, since a
+        // literal # in a file name is written %23.
+        let target = match[1].replace(/^<|>$/g, "").replace(/#.*$/, "");
         if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.endsWith(".md")) continue;
         // Obsidian URL-decodes markdown link targets (a literal % is written %25).
         try { target = decodeURIComponent(target); } catch { continue; }

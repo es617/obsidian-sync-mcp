@@ -398,4 +398,20 @@ describe("SearchIndex attachments", () => {
         idx.remove("a.md");
         assert.deepEqual(idx.getAttachmentReferences("Attachments/shot.png"), ["b.md"], "follows note removal");
     });
+
+    it("counts embeds with a #page or #t anchor as references to the file", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "![[paper.pdf#page=2]]");
+        idx.update("b.md", "![](Attachments/paper.pdf#page=5)");
+        idx.update("c.md", "![[clip.mp4#t=10]]");
+        assert.deepEqual(idx.getAttachmentReferences("Attachments/paper.pdf"), ["a.md", "b.md"]);
+        assert.deepEqual(idx.getAttachmentReferences("media/clip.mp4"), ["c.md"]);
+    });
+
+    it("counts [[Note#Heading]] and [x](Note.md#Heading) as backlinks to the note", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "See [[b#Section]] and [[b#^block|here]]");
+        idx.update("c.md", "See [b](b.md#Section)");
+        assert.deepEqual(idx.getBacklinks("b.md"), ["a.md", "c.md"]);
+    });
 });

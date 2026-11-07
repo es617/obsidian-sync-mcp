@@ -191,11 +191,23 @@ Also #shared inline`;
         assert.ok(result.links.includes("folder/Linked Note"));
     });
 
+    it("drops #heading, #^block and #page anchors from wikilink targets", () => {
+        const content = "[[Note#Heading]] [[folder/Other#^abc123|alias]] ![[paper.pdf#page=2]] ![[clip.mp4#t=10]] [[#Local heading]]";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["Note", "clip.mp4", "folder/Other", "paper.pdf"]);
+    });
+
     it("parses markdown links to .md files", () => {
         const content = "See [my link](other-note.md) and [another](folder/note.md)";
         const result = parseFrontmatterAndLinks(content);
         assert.ok(result.links.includes("other-note.md"));
         assert.ok(result.links.includes("folder/note.md"));
+    });
+
+    it("drops a #heading from markdown links to .md files", () => {
+        const content = "[a](other-note.md#Heading) [b](folder/note.md#^block) [c](plain.md)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["folder/note.md", "other-note.md", "plain.md"]);
     });
 
     it("ignores URLs and links to files that are neither notes nor attachments", () => {
@@ -217,6 +229,12 @@ Also #shared inline`;
         assert.deepEqual(result.links.sort(), [
             "Attachments/shot.png", "docs/Q1 report.pdf", "my image.JPG", "photo.png", "rel/clip.mp4", "up/audio.mp3",
         ].sort());
+    });
+
+    it("drops #fragments from markdown attachment links but keeps an encoded # in the name", () => {
+        const content = "![](paper.pdf#page=2) [clip](<media/my clip.mp4#t=10>) ![](odd%23name.png)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["media/my clip.mp4", "odd#name.png", "paper.pdf"]);
     });
 
     it("deduplicates links", () => {

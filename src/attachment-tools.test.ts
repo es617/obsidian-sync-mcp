@@ -194,6 +194,12 @@ describe("list_attachments", () => {
         assert.match(out, /^1 attachment matching unreferenced \(of 4\), 500 B in total\./);
     });
 
+    it("does not report a file embedded with a #page anchor as unreferenced", async () => {
+        const ctx = populated();
+        ctx.searchIndex.update("daily/reading.md", "![[old.jpg#crop]]");
+        assert.deepEqual(paths(await ctx.call("list_attachments", { unreferenced: true })), []);
+    });
+
     it("sorts by modified and size, and limits", async () => {
         const { call } = populated();
         assert.deepEqual(paths(await call("list_attachments", { sort_by: "modified" })), ["docs/report.pdf", "Attachments/shot.png", "Attachments/sub/diagram.png", "Attachments/old.jpg"]);

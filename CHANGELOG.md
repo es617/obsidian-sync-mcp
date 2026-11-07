@@ -8,6 +8,7 @@
 
 ### Changes
 - Markdown links and embeds that point at attachment files (`![](Attachments/shot.png)`, `[report](<docs/Q1 report.pdf>)`) are now recorded as links, URL-decoded, like `![[shot.png]]` already was. They show up under "Outgoing links" in `get_note_metadata`.
+- Link targets no longer keep a `#heading`, `#^block` or `#page=2` suffix: `[[Note#Heading]]` and `[x](Note.md#Heading)` now count as backlinks to the note, and `![[paper.pdf#page=2]]` / `![](clip.mp4#t=10)` count as uses of the file. `[[#Heading]]` (a heading in the same note) is not recorded as a link.
 
 ## 0.10.0
 
