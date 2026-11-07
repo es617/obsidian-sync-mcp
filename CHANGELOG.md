@@ -9,6 +9,7 @@
 ### Changes
 - Markdown links and embeds that point at attachment files (`![](Attachments/shot.png)`, `[report](<docs/Q1 report.pdf>)`) are now recorded as links, URL-decoded, like `![[shot.png]]` already was. They show up under "Outgoing links" in `get_note_metadata`.
 - Link targets no longer keep a `#heading`, `#^block` or `#page=2` suffix: `[[Note#Heading]]` and `[x](Note.md#Heading)` now count as backlinks to the note, and `![[paper.pdf#page=2]]` / `![](clip.mp4#t=10)` count as uses of the file. `[[#Heading]]` (a heading in the same note) is not recorded as a link.
+- Link parsing is now linear-time. The link patterns could take about a second on a note full of `[` or `[](a`, and parsing is synchronous and runs on every note at startup. A link can no longer span lines, and a link whose text, target or alias is over 1000 characters is not recorded. A linked thumbnail (`[![thumb](t.png)](full.png)`) now records both files.
 
 ### Fixes
 - Local mode: a write through a dangling symlink in the vault (a link whose target doesn't exist yet) followed the link and created the file outside the vault. Such writes are now refused, for notes and attachments.

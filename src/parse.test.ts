@@ -237,6 +237,33 @@ Also #shared inline`;
         assert.deepEqual(result.links.sort(), ["media/my clip.mp4", "odd#name.png", "paper.pdf"]);
     });
 
+    it("parses links in linear time on hostile input", () => {
+        const hostile = [
+            "[".repeat(20000), "[[".repeat(10000), "[[a|".repeat(10000), "[[a#".repeat(10000),
+            "[](a".repeat(10000), "[](<".repeat(10000), "[a](b.md".repeat(10000),
+            "[[a]".repeat(10000), "[" + "[a]".repeat(10000), "[![a](b)".repeat(10000),
+        ];
+        for (const content of hostile) {
+            const start = performance.now();
+            parseFrontmatterAndLinks(content + " [[end]]");
+            const ms = performance.now() - start;
+            // Unbounded patterns took 0.35-1.5 s on these; the bounded ones take under 50 ms.
+            assert.ok(ms < 200, `${JSON.stringify(content.slice(0, 8))}... took ${ms.toFixed(0)} ms`);
+        }
+        assert.deepEqual(parseFrontmatterAndLinks("[](a".repeat(10000) + " [[end]]").links, ["end"]);
+    });
+
+    it("still finds links next to other brackets", () => {
+        const content = "[see [1]](note.md) [![thumb](t.png)](full.png) [[a]][[b]] ([[c]]) [x](d.md)(e)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["a", "b", "c", "d.md", "full.png", "note.md", "t.png"]);
+    });
+
+    it("does not let a link span lines", () => {
+        const result = parseFrontmatterAndLinks("[[broken\nlink]] [label\n](x.png)");
+        assert.deepEqual(result.links, []);
+    });
+
     it("deduplicates links", () => {
         const content = "See [[Note]] and [[Note]] again";
         const result = parseFrontmatterAndLinks(content);
