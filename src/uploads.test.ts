@@ -45,6 +45,27 @@ describe("UploadRegistry", () => {
         assert.doesNotThrow(() => r.create({ path: "c.png", overwrite: false, maxBytes: 1 }));
         assert.equal(r.pending, 1);
     });
+
+    it("counts taken handles against the cap until they are released", () => {
+        const r = new UploadRegistry({ maxPending: 2 });
+        const a = r.create({ path: "a.png", overwrite: false, maxBytes: 1 });
+        const b = r.create({ path: "b.png", overwrite: false, maxBytes: 1 });
+        assert.ok(r.take(a.token));
+        assert.ok(r.take(b.token));
+        assert.throws(() => r.create({ path: "c.png", overwrite: false, maxBytes: 1 }), /Too many pending uploads/);
+        r.release();
+        assert.doesNotThrow(() => r.create({ path: "c.png", overwrite: false, maxBytes: 1 }));
+    });
+
+    it("does not count a token that was unknown or expired", () => {
+        let now = 0;
+        const r = new UploadRegistry({ ttlMs: 100, maxPending: 1, now: () => now });
+        const h = r.create({ path: "a.png", overwrite: false, maxBytes: 1 });
+        now = 100;
+        assert.equal(r.take(h.token), null);
+        assert.equal(r.take("nope"), null);
+        assert.doesNotThrow(() => r.create({ path: "b.png", overwrite: false, maxBytes: 1 }));
+    });
 });
 
 describe("readBodyLimited", () => {
@@ -159,5 +180,32 @@ describe("upload route", () => {
         const replace = registry.create({ path: "a.png", overwrite: true, maxBytes: 10 });
         assert.equal((await put(replace.token, bytes(3))).status, 201);
         assert.equal(files.get("a.png")?.data.byteLength, 3);
+    });
+
+    it("holds a slot while the body streams, and frees it when the upload ends", async () => {
+        const { registry, put } = setup();
+        let controller!: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({ start: (c) => { controller = c; } });
+        const h = registry.create({ path: "slow.png", overwrite: false, maxBytes: 100 });
+        const pending = put(h.token, body);
+        controller.enqueue(bytes(5));
+        registry.create({ path: "b.png", overwrite: false, maxBytes: 1 });
+        // maxPending is 3: one in flight plus two pending.
+        registry.create({ path: "c.png", overwrite: false, maxBytes: 1 });
+        await new Promise((r) => setImmediate(r));
+        assert.throws(() => registry.create({ path: "d.png", overwrite: false, maxBytes: 1 }), /Too many pending uploads/);
+        controller.close();
+        assert.equal((await pending).status, 201);
+        assert.doesNotThrow(() => registry.create({ path: "d.png", overwrite: false, maxBytes: 1 }));
+    });
+
+    it("frees the slot when the upload fails", async () => {
+        const { registry, put } = setup();
+        for (let i = 0; i < 3; i++) {
+            const h = registry.create({ path: `f${i}.png`, overwrite: false, maxBytes: 4 });
+            assert.equal((await put(h.token, bytes(5))).status, 413);
+        }
+        assert.equal(registry.pending, 0);
+        for (let i = 0; i < 3; i++) registry.create({ path: `g${i}.png`, overwrite: false, maxBytes: 1 });
     });
 });
