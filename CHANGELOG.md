@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Binary attachments (#21), opt-in with `ATTACHMENTS_ENABLED=true`.** Agents can store images, PDFs, audio and video in the vault and embed them in notes with `![[path]]`. New tools: `create_attachment_upload`, `write_attachment`, `move_attachment`, `delete_attachment`, `get_attachment_metadata`, `list_attachments`. Large files go through a single-use upload URL (`PUT BASE_URL/attachments/upload/<token>`) so the bytes never pass through the model; `write_attachment` takes base64 as a fallback for tiny files (default limit 32 KB, about 13k output tokens). In CouchDB mode files are written through livesync-commonlib as LiveSync binary entries (chunked, encrypted, path-obfuscated), so they sync like files added in Obsidian. `READ_ONLY` and `WRITE_FOLDERS` apply; overwriting needs `overwrite=true`. Limits: `ATTACHMENT_MAX_BYTES`, `ATTACHMENT_INLINE_MAX_BYTES`, `ATTACHMENT_UPLOAD_TTL_SECONDS`, `ATTACHMENT_EXTENSIONS`.
+- `list_attachments` lists attachments with size, date and how many notes use each, with folder/name/extension filters, sorting by name, date or size, and `unreferenced=true` to find files no note uses. It is served from the metadata index: attachment paths, sizes and mtimes are learned from the CouchDB change feed without downloading file contents (or, in filesystem mode, from a startup scan and the file watcher) and persisted with the rest of the index.
+
+### Changes
+- Markdown links and embeds that point at attachment files (`![](Attachments/shot.png)`, `[report](<docs/Q1 report.pdf>)`) are now recorded as links, URL-decoded, like `![[shot.png]]` already was. They show up under "Outgoing links" in `get_note_metadata`.
+- Link targets no longer keep a `#heading`, `#^block` or `#page=2` suffix: `[[Note#Heading]]` and `[x](Note.md#Heading)` now count as backlinks to the note, and `![[paper.pdf#page=2]]` / `![](clip.mp4#t=10)` count as uses of the file. `[[#Heading]]` (a heading in the same note) is not recorded as a link.
+- Link parsing is now linear-time. The link patterns could take about a second on a note full of `[` or `[](a`, and parsing is synchronous and runs on every note at startup. A link can no longer span lines. A linked thumbnail (`[![thumb](t.png)](full.png)`) now records both files.
+
+### Fixes
+- Local mode: a write through a dangling symlink in the vault (a link whose target doesn't exist yet) followed the link and created the file outside the vault. Such writes are now refused, for notes and attachments.
+- Local mode: a symlink inside the vault could point a note or attachment operation at a file its name doesn't allow, such as `a.png` → a note or `.obsidian/` file, which the attachment tools could then overwrite or delete. The resolved path now has to pass the same checks as the name, and the attachment tools refuse to write, delete or move a symlink itself.
+- `move_note` in CouchDB mode no longer deletes the note when the source and destination are the same document: the same path, or a case-only rename (`Foo.md` → `foo.md`) on a vault with LiveSync's default case-insensitive file names. A case-only rename now renames the note.
+- Local mode: a case-only `move_note` (`Foo.md` → `foo.md`) on a case-insensitive filesystem reported success but kept the old name. It now renames the file.
+
 ## 0.10.0
 
 This release hardens the default Docker and docker-compose deployment and speeds up startup on large CouchDB vaults. **It contains breaking changes to the Docker/compose defaults** — see the upgrade note.

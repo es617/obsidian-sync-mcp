@@ -18,7 +18,10 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
+import { AttachmentExistsError, AttachmentTooLargeError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
+import { readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
+import { randomBytes } from "node:crypto";
 
 const base = {
     couchdbUrl: process.env.TEST_COUCHDB_URL ?? "http://localhost:5985",
@@ -44,7 +47,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -266,6 +269,143 @@ step("Test 7b: catchUp drains to tip, then the watcher picks up a later write an
     await reader.close();
     await writer.close();
     console.log("watcher resumed from the tip: delivered the new note, replayed none of the caught-up notes");
+}
+
+// --- Binary attachments ---
+// Written through the same livesync-commonlib path as notes: must be stored as
+// a binary ("newnote") entry, chunked and encrypted, and read back byte-exact by
+// a fresh client — which is what an Obsidian device does when it syncs it.
+step("Attachments: encrypted + obfuscated binary round-trip");
+{
+    const ATTACHMENT = "Attachments/shot.png";
+    // ~3 MB of random bytes: incompressible and well past one chunk.
+    const bytes = new Uint8Array(randomBytes(3 * 1024 * 1024 + 123));
+    const writer = new Vault({ ...base, database: "attachvault", passphrase, obfuscatePaths: true });
+    await writer.init();
+    assert.equal(await writer.writeNote("Note.md", "![[Attachments/shot.png]]"), true);
+    assert.equal(await writer.writeAttachment(ATTACHMENT, bytes), true);
+    await writer.close();
+
+    const reader = new Vault({ ...base, database: "attachvault", passphrase, obfuscatePaths: true });
+    await reader.init();
+    const info = await reader.getAttachmentInfo(ATTACHMENT);
+    assert.equal(info?.size, bytes.byteLength);
+
+    const entry: any = await (reader as any).manipulator.get(ATTACHMENT);
+    assert.ok(entry, "attachment entry readable by a fresh client");
+    assert.equal(entry.type, "newnote", "stored as a LiveSync binary entry");
+    assert.ok(entry.children.length > 1, `split into chunks (got ${entry.children.length})`);
+    const back = readContent(entry);
+    assert.ok(back instanceof ArrayBuffer || ArrayBuffer.isView(back), "binary content");
+    assert.ok(Buffer.from(back as ArrayBuffer).equals(Buffer.from(bytes)), "byte-exact round-trip");
+
+    // The plaintext path never reaches CouchDB, and every chunk is encrypted.
+    const ids = await rawAllDocIds("attachvault");
+    assert.ok(!ids.some((id) => id.includes("shot.png")), "path is obfuscated in document ids");
+    const rawDocs = ((await (await fetch(`${base.couchdbUrl}/attachvault/_all_docs?include_docs=true`, { headers: auth })).json()) as any)
+        .rows.map((r: any) => r.doc);
+    const leaves = rawDocs.filter((d: any) => d.type === "leaf");
+    assert.ok(leaves.length >= entry.children.length, "chunks stored as leaf docs");
+    assert.ok(leaves.every((d: any) => d.e_ === true && String(d.data).startsWith("%")), "every chunk is encrypted");
+
+    // The note index ignores attachments.
+    const caughtUp: string[] = [];
+    await reader.catchUp!("0", (path, content) => { if (content !== null) caughtUp.push(path); });
+    assert.deepEqual(caughtUp, ["Note.md"], "catchUp reports notes only");
+    assert.deepEqual(await reader.listNotes(), ["Note.md"], "listNotes reports notes only");
+
+    // With an attachment callback, catchUp reports the attachment from its
+    // metadata doc alone: right size, and its chunks are never loaded.
+    const manip = (reader as any).manipulator;
+    const loaded: string[] = [];
+    const origGetByMeta = manip.getByMeta.bind(manip);
+    manip.getByMeta = (meta: any) => origGetByMeta(meta).then((d: any) => { loaded.push(d.path); return d; });
+    const attSeen: Array<[string, number | null]> = [];
+    await reader.catchUp!("0", () => {}, undefined, undefined, (path, info) => attSeen.push([path, info ? info.size : null]));
+    assert.deepEqual(attSeen, [[ATTACHMENT, bytes.byteLength]], "catchUp reports the attachment with its size");
+    assert.ok(!loaded.includes(ATTACHMENT), `attachment chunks were loaded: ${JSON.stringify(loaded)}`);
+
+    // The live watcher reports attachment changes the same way.
+    const watched: Array<[string, number | null]> = [];
+    reader.watchChanges!(() => {}, (path, info) => watched.push([path, info ? info.size : null]));
+
+    assert.equal(await reader.moveAttachment(ATTACHMENT, "Attachments/moved.png"), true);
+    assert.equal(await reader.getAttachmentInfo(ATTACHMENT), null, "source gone after move");
+    const moved: any = await (reader as any).manipulator.get("Attachments/moved.png");
+    assert.ok(Buffer.from(readContent(moved) as ArrayBuffer).equals(Buffer.from(bytes)), "move preserves bytes");
+
+    assert.equal(await reader.deleteAttachment("Attachments/moved.png"), true);
+    assert.equal(await reader.getAttachmentInfo("Attachments/moved.png"), null, "deleted");
+
+    const expected = [["Attachments/moved.png", bytes.byteLength], [ATTACHMENT, null], ["Attachments/moved.png", null]];
+    for (let i = 0; i < 75 && watched.length < expected.length; i++) await sleep(200);
+    assert.deepEqual(watched, expected, "watcher reports the move (new path, old path deleted) and the delete");
+    assert.ok(!loaded.includes("Attachments/moved.png"), "watcher never loads attachment chunks");
+    await assert.rejects(() => reader.writeAttachment("obsydian_livesync_version", bytes), /Invalid attachment path/);
+    await reader.close();
+    console.log(`attachment: ${entry.children.length} encrypted chunks, byte-exact after reopen, move and delete`);
+}
+
+// --- Overwrite protection and same-document moves ---
+// Plain ids so the stored path is readable; LiveSync's default is
+// case-insensitive, so ids are lowercased and Foo.png / foo.png are one doc.
+step("Attachments/notes: atomic create, move onto itself, case-only rename");
+{
+    const v = new Vault({ ...base, database: "movevault", passphrase });
+    await v.init();
+    const a = new Uint8Array(randomBytes(4096));
+    const b = new Uint8Array(randomBytes(4096));
+
+    // Two concurrent creates of one path: exactly one wins, the other is refused.
+    const results = await Promise.allSettled([v.writeAttachment("A/race.png", a), v.writeAttachment("A/race.png", b)]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "one create wins");
+    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof AttachmentExistsError, String(lost.reason));
+    const winner = results[0].status === "fulfilled" ? a : b;
+    const stored: any = await (v as any).manipulator.get("A/race.png");
+    assert.ok(Buffer.from(readContent(stored) as ArrayBuffer).equals(Buffer.from(winner)), "the winner's bytes are stored");
+    await assert.rejects(() => v.writeAttachment("A/race.png", b), AttachmentExistsError);
+    assert.equal(await v.writeAttachment("A/race.png", b, { overwrite: true }), true);
+
+    // Moving onto an existing file needs overwrite; refusing keeps both files.
+    assert.equal(await v.writeAttachment("A/other.png", a), true);
+    await assert.rejects(() => v.moveAttachment("A/race.png", "A/other.png"), AttachmentExistsError);
+    assert.ok(await v.getAttachmentInfo("A/race.png"), "source kept after a refused move");
+    assert.ok(await v.getAttachmentInfo("A/other.png"), "destination kept after a refused move");
+
+    // Moving copies the bytes here, so a file over maxBytes is refused from
+    // its metadata, before any chunk is loaded, and stays where it was.
+    const manipTL = (v as any).manipulator;
+    const fullGets: string[] = [];
+    const origGet = manipTL.get.bind(manipTL);
+    manipTL.get = (p: string, metaOnly?: boolean) => { if (!metaOnly) fullGets.push(p); return origGet(p, metaOnly); };
+    await assert.rejects(() => v.moveAttachment("A/race.png", "A/big-moved.png", { maxBytes: 100 }), AttachmentTooLargeError);
+    manipTL.get = origGet;
+    assert.deepEqual(fullGets, [], "a refused move loads no chunks");
+    assert.ok(await v.getAttachmentInfo("A/race.png"), "source kept after a refused move");
+    assert.equal(await v.getAttachmentInfo("A/big-moved.png"), null, "nothing written");
+
+    // Onto itself, with overwrite: the file must survive.
+    assert.equal(await v.moveAttachment("A/other.png", "A/other.png", { overwrite: true }), true);
+    assert.equal((await v.getAttachmentInfo("A/other.png"))?.size, a.byteLength, "moving onto itself keeps the file");
+
+    // Case-only rename maps to the same doc: the file survives under the new name.
+    assert.equal(await v.moveAttachment("A/other.png", "A/Other.png"), true);
+    const renamed: any = await (v as any).manipulator.get("A/Other.png");
+    assert.ok(renamed && !renamed.deleted, "file survives a case-only rename");
+    assert.equal(renamed.path, "A/Other.png", "stored path takes the new case");
+    assert.ok(Buffer.from(readContent(renamed) as ArrayBuffer).equals(Buffer.from(a)), "bytes intact after the rename");
+
+    // Same for notes.
+    assert.equal(await v.writeNote("N/Self.md", "keep me"), true);
+    assert.equal(await v.moveNote("N/Self.md", "N/Self.md"), true);
+    assert.equal(await v.readNote("N/Self.md"), "keep me", "moving a note onto itself keeps it");
+    assert.equal(await v.moveNote("N/Self.md", "N/self.md"), true);
+    assert.equal(await v.readNote("N/self.md"), "keep me", "note survives a case-only rename");
+    assert.ok((await v.listNotes()).includes("N/self.md"), "listed under the new case");
+    assert.ok(!(await v.listNotes()).includes("N/Self.md"), "old case gone");
+    await v.close();
+    console.log("atomic create, refused overwrite on move, self-move and case-only renames keep the file");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

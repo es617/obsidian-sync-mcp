@@ -11,6 +11,9 @@ import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.
 import { readOnlyVault } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
 import { parseWriteFolders } from "./write-scope.js";
+import { parseAttachmentExtensions, isValidAttachmentPath } from "./attachment-path.js";
+import { registerAttachmentTools, ATTACHMENT_WRITE_TOOLS, formatBytes } from "./attachment-tools.js";
+import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
 import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
@@ -43,6 +46,30 @@ const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const READ_ONLY = process.env.READ_ONLY === "true";
 const WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
 
+// Attachments (images, PDFs, audio, video) are opt-in.
+const ATTACHMENTS_ENABLED = process.env.ATTACHMENTS_ENABLED === "true";
+function parsePositiveInt(name: string, fallback: number): number {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+        console.error(`${name} must be a positive integer, got '${raw}'.`);
+        process.exit(1);
+    }
+    return n;
+}
+const ATTACHMENT_MAX_BYTES = parsePositiveInt("ATTACHMENT_MAX_BYTES", 20 * 1024 * 1024);
+// Inline base64 costs ~1 output token per 2.5 bytes; 32 KB is already ~13k tokens.
+const ATTACHMENT_INLINE_MAX_BYTES = parsePositiveInt("ATTACHMENT_INLINE_MAX_BYTES", 32 * 1024);
+const ATTACHMENT_UPLOAD_TTL_SECONDS = parsePositiveInt("ATTACHMENT_UPLOAD_TTL_SECONDS", 600);
+let ATTACHMENT_EXTENSIONS: Set<string>;
+try {
+    ATTACHMENT_EXTENSIONS = parseAttachmentExtensions(process.env.ATTACHMENT_EXTENSIONS);
+} catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+}
+
 // Extra instructions appended to the MCP `instructions` string.
 // File wins if both are set (loud warning); missing file is fatal.
 const MCP_INSTRUCTIONS_FILE = process.env.MCP_INSTRUCTIONS_FILE?.trim() || undefined;
@@ -68,7 +95,7 @@ if (MCP_INSTRUCTIONS_FILE) {
 }
 
 // --- Initialize vault (local or remote) ---
-import type { VaultBackend } from "./vault-backend.js";
+import type { VaultBackend, AttachmentChangeCallback } from "./vault-backend.js";
 
 let vault: VaultBackend;
 
@@ -137,6 +164,18 @@ if (searchIndex.size > 0 && searchIndex.contentCount < searchIndex.size) {
     searchIndex.since = "0";
 }
 
+// Attachments are only indexed while the feature is on. Off: drop any left
+// from an earlier run so the persisted file stops carrying their paths. On:
+// the re-read from sequence zero above also reports every attachment,
+// including those added while the feature was off.
+if (!ATTACHMENTS_ENABLED) searchIndex.clearAttachments();
+const onAttachmentChange: AttachmentChangeCallback | undefined = ATTACHMENTS_ENABLED
+    ? (path, info) => {
+        if (info) searchIndex.updateAttachment(path, info.size, info.mtime);
+        else searchIndex.removeAttachment(path);
+    }
+    : undefined;
+
 // Sync metadata in background (server starts immediately)
 async function rebuildIndex() {
     const start = performance.now();
@@ -155,6 +194,15 @@ async function rebuildIndex() {
         // is never pruned.
         const preexisting = new Set(searchIndex.listPaths());
         const seen = new Set<string>();
+        const preexistingAttachments = new Set(searchIndex.listAttachments().map((a) => a.path));
+        const seenAttachments = new Set<string>();
+        const countingAttachment: AttachmentChangeCallback | undefined = onAttachmentChange
+            ? (path, info) => {
+                changes++;
+                if (info) seenAttachments.add(path); else seenAttachments.delete(path);
+                onAttachmentChange(path, info);
+            }
+            : undefined;
         let fromZero = since === "0";
         const onBatch = async (batchSince: string, processed: number) => {
             searchIndex.since = batchSince;
@@ -169,7 +217,7 @@ async function rebuildIndex() {
             applyIndexChange(searchIndex, path, content, mtime);
         };
         try {
-            const newSince = await vault.catchUp(since, countingCallback, onBatch);
+            const newSince = await vault.catchUp(since, countingCallback, onBatch, undefined, countingAttachment);
             searchIndex.since = newSince;
             searchIndex.lastSyncAt = Date.now();
         } catch (err) {
@@ -180,8 +228,9 @@ async function rebuildIndex() {
             console.warn(`Catch-up failed (${describeError(err, debugLogging)}), re-reading from the start...`);
             changes = 0;
             seen.clear();
+            seenAttachments.clear();
             fromZero = true;
-            const newSince = await vault.catchUp("0", countingCallback, onBatch);
+            const newSince = await vault.catchUp("0", countingCallback, onBatch, undefined, countingAttachment);
             searchIndex.since = newSince;
             searchIndex.lastSyncAt = Date.now();
         }
@@ -189,7 +238,10 @@ async function rebuildIndex() {
         // the watcher adds mid-pass is never pruned (it is not in `preexisting`);
         // one the watcher re-adds between the pass and the prune is re-added by
         // the next pre-search catch-up, so any race is self-correcting.
-        if (fromZero) pruneGhosts(searchIndex, preexisting, seen);
+        if (fromZero) {
+            pruneGhosts(searchIndex, preexisting, seen);
+            if (countingAttachment) pruneGhosts({ remove: (p) => searchIndex.removeAttachment(p) }, preexistingAttachments, seenAttachments);
+        }
         if (changes > 0) {
             console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
         } else {
@@ -214,6 +266,10 @@ async function rebuildIndex() {
                 }
             }
             console.log(`Search index built: ${searchIndex.size} notes in ${((performance.now() - start) / 1000).toFixed(1)}s`);
+        }
+        if (ATTACHMENTS_ENABLED && vault.listAttachments) {
+            searchIndex.replaceAttachments(await vault.listAttachments());
+            console.log(`Attachment index built: ${searchIndex.attachmentCount} attachments.`);
         }
     }
     await searchIndex.saveToDisk();
@@ -255,6 +311,7 @@ async function syncBeforeSearch(): Promise<{ unreadable: number; error?: string 
                 (path, content, mtime) => applyIndexChange(searchIndex, path, content, mtime),
                 undefined,
                 stats,
+                onAttachmentChange,
             );
             searchIndex.since = newSince;
             searchIndex.lastSyncAt = Date.now();
@@ -278,8 +335,15 @@ if (VAULT_PATH) {
     // Local mode: watch filesystem for changes from Obsidian
     const pending = new Map<string, ReturnType<typeof setTimeout>>();
     fsWatcher = watch(VAULT_PATH, { recursive: true }, (event, filename) => {
-        if (!filename || !filename.endsWith(".md")) return;
-        const notePath = filename.replace(/\\/g, "/");
+        if (!filename) return;
+        const changedPath = filename.replace(/\\/g, "/");
+        if (ATTACHMENTS_ENABLED && isValidAttachmentPath(changedPath)) {
+            if (pending.has(changedPath)) clearTimeout(pending.get(changedPath)!);
+            pending.set(changedPath, setTimeout(() => handleAttachmentChange(changedPath), 100));
+            return;
+        }
+        if (!filename.endsWith(".md")) return;
+        const notePath = changedPath;
         if (notePath.startsWith(".obsidian/") || notePath.includes("/.obsidian/")) return;
 
         // Debounce: coalesce rapid events for the same file (Obsidian fires 2-3 per save)
@@ -302,6 +366,16 @@ if (VAULT_PATH) {
             searchIndex.remove(notePath);
         }
     }
+    async function handleAttachmentChange(path: string) {
+        pending.delete(path);
+        try {
+            const info = await vault.getAttachmentInfo(path);
+            if (info) searchIndex.updateAttachment(path, info.size, info.mtime);
+            else searchIndex.removeAttachment(path);
+        } catch {
+            searchIndex.removeAttachment(path);
+        }
+    }
     console.log("Watching vault for external changes.");
 }
 
@@ -317,12 +391,15 @@ function startCouchDbWatcher() {
             searchIndex.since = String(seq);
             searchIndex.lastSyncAt = Date.now();
         }
-    });
+    }, onAttachmentChange);
     console.log("Watching CouchDB for LiveSync changes.");
 }
 
 // --- MCP Server ---
-const BASE_INSTRUCTIONS = "Access and manage an Obsidian vault. You can read, write, list, search, move, and delete markdown notes. Every tool response includes an Obsidian deep link. Always show this link to the user using the format [obsidian://open?vault=...&file=...](obsidian://open?vault=...&file=...) so it is both clickable and visible as a URL.";
+const ATTACHMENT_INSTRUCTIONS = ATTACHMENTS_ENABLED
+    ? " Images, PDFs, audio and video can be stored as attachments: whenever you can make an HTTP request, use create_attachment_upload and PUT the file to the returned URL; write_attachment (base64) is a slow fallback for tiny files only. Then embed the file in a note with ![[path]]."
+    : "";
+const BASE_INSTRUCTIONS = "Access and manage an Obsidian vault. You can read, write, list, search, move, and delete markdown notes." + ATTACHMENT_INSTRUCTIONS + " Every tool response includes an Obsidian deep link. Always show this link to the user using the format [obsidian://open?vault=...&file=...](obsidian://open?vault=...&file=...) so it is both clickable and visible as a URL.";
 const serverOptions: ConstructorParameters<typeof FastMCP>[0] = {
     name: "obsidian-sync-mcp",
     version: process.env.npm_package_version ?? "0.0.0",
@@ -388,6 +465,41 @@ if (AUTH_TOKEN) {
 
 // --- Tools ---
 registerTools(server, vault, searchIndex, VAULT_NAME, READ_ONLY, WRITE_FOLDERS, COUCHDB_URL ? syncBeforeSearch : undefined);
+
+if (ATTACHMENTS_ENABLED) {
+    const uploadRegistry = new UploadRegistry({ ttlMs: ATTACHMENT_UPLOAD_TTL_SECONDS * 1000 });
+    registerAttachmentTools(server, {
+        vault,
+        searchIndex,
+        vaultName: VAULT_NAME,
+        readOnly: READ_ONLY,
+        writeFolders: WRITE_FOLDERS,
+        allowedExtensions: ATTACHMENT_EXTENSIONS,
+        maxBytes: ATTACHMENT_MAX_BYTES,
+        base64MaxBytes: ATTACHMENT_INLINE_MAX_BYTES,
+        registry: uploadRegistry,
+        baseUrl: BASE_URL,
+    });
+    if (!READ_ONLY) {
+        // The route has no other auth: the single-use token in the URL is the credential.
+        mountAttachmentUpload(server.getApp(), {
+            registry: uploadRegistry,
+            vault,
+            onWritten: (path, size) => {
+                searchIndex.updateAttachment(path, size, Date.now());
+                if (debugLogging) console.log(`[debug] attachment upload: ${path} (${size} bytes)`);
+            },
+            onError: (path, err) => {
+                console.error(`Attachment upload failed${debugLogging ? ` (${path})` : ""}: ${describeError(err, debugLogging)}`);
+            },
+        });
+    }
+    console.log(
+        READ_ONLY
+            ? "Attachments enabled (read-only: get_attachment_metadata only)."
+            : `Attachments enabled: ${ATTACHMENT_WRITE_TOOLS.join(", ")}; uploads up to ${formatBytes(ATTACHMENT_MAX_BYTES)} via ${BASE_URL}/attachments/upload/<token>.`,
+    );
+}
 
 // --- Graceful shutdown ---
 async function shutdown() {

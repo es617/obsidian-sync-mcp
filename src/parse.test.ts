@@ -191,6 +191,28 @@ Also #shared inline`;
         assert.ok(result.links.includes("folder/Linked Note"));
     });
 
+    it("drops #heading, #^block and #page anchors from wikilink targets", () => {
+        const content = "[[Note#Heading]] [[folder/Other#^abc123|alias]] ![[paper.pdf#page=2]] ![[clip.mp4#t=10]] [[#Local heading]]";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["Note", "clip.mp4", "folder/Other", "paper.pdf"]);
+    });
+
+    it("handles anchors combined with aliases, sizes and titles", () => {
+        const cases: Array<[string, string[]]> = [
+            ["[[Note|see #3]]", ["Note"]], // a # in the alias is not an anchor
+            ["[[Note#Heading|alias]]", ["Note"]],
+            ["[[Note#]]", ["Note"]],
+            ["[[Note#a#b]]", ["Note"]],
+            ["![[img.png|300]]", ["img.png"]],
+            ["![[img.png#crop|300]]", ["img.png"]], // anchor and embed size
+            ['![](a.png#x "title")', ["a.png"]],
+            ["[x](#heading)", []], // fragment only: a heading in the same note
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links, links, content);
+        }
+    });
+
     it("parses markdown links to .md files", () => {
         const content = "See [my link](other-note.md) and [another](folder/note.md)";
         const result = parseFrontmatterAndLinks(content);
@@ -198,10 +220,84 @@ Also #shared inline`;
         assert.ok(result.links.includes("folder/note.md"));
     });
 
-    it("ignores non-md markdown links", () => {
-        const content = "See [link](https://example.com) and [img](photo.png)";
+    it("drops a #heading from markdown links to .md files", () => {
+        const content = "[a](other-note.md#Heading) [b](folder/note.md#^block) [c](plain.md)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["folder/note.md", "other-note.md", "plain.md"]);
+    });
+
+    it("ignores URLs and links to files that are neither notes nor attachments", () => {
+        const content = "See [link](https://example.com), [x](file:///etc/passwd), [data](data.json) and [script](x.js)";
         const result = parseFrontmatterAndLinks(content);
         assert.equal(result.links.length, 0);
+    });
+
+    it("records markdown links and embeds to attachments, decoded", () => {
+        const content = [
+            "![](Attachments/shot.png)",
+            "[img](photo.png)",
+            '![alt](my%20image.JPG "title")',
+            "[report](<docs/Q1 report.pdf>)",
+            "![](./rel/clip.mp4)",
+            "![](../up/audio.mp3)",
+        ].join("\n");
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), [
+            "Attachments/shot.png", "docs/Q1 report.pdf", "my image.JPG", "photo.png", "rel/clip.mp4", "up/audio.mp3",
+        ].sort());
+    });
+
+    it("drops #fragments from markdown attachment links but keeps an encoded # in the name", () => {
+        const content = "![](paper.pdf#page=2) [clip](<media/my clip.mp4#t=10>) ![](odd%23name.png)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["media/my clip.mp4", "odd#name.png", "paper.pdf"]);
+    });
+
+    it("parses links in linear time on hostile input", () => {
+        const n = 40000;
+        const hostile = [
+            "[".repeat(2 * n), "[[".repeat(n), "[[a|".repeat(n), "[[a#".repeat(n),
+            "[](a".repeat(n), "[](<".repeat(n), "[a](b.md".repeat(n),
+            "[[a]".repeat(n), "[" + "[a]".repeat(n), "[![a](b)".repeat(n),
+        ];
+        for (const content of hostile) {
+            const start = performance.now();
+            parseFrontmatterAndLinks(content + " [[end]]");
+            const ms = performance.now() - start;
+            // Large enough that quadratic patterns take around 10 s here, so the
+            // limit is far above linear time even on a slow CI runner.
+            assert.ok(ms < 1000, `${JSON.stringify(content.slice(0, 8))}... took ${ms.toFixed(0)} ms`);
+        }
+        assert.deepEqual(parseFrontmatterAndLinks("[](a".repeat(10000) + " [[end]]").links, ["end"]);
+    });
+
+    it("keeps links with long text, aliases or percent-encoded targets", () => {
+        const long = "x".repeat(5000);
+        // 200 CJK characters are 1800 characters encoded but 200 decoded.
+        const cjk = "图".repeat(200) + ".png";
+        const content = [
+            `![${long}](alt.png)`,
+            `[[Note|${long}]]`,
+            `[[Other#${long}]]`,
+            `[${long}](linked.md)`,
+            `![](${encodeURIComponent(cjk)})`,
+        ].join("\n");
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), [cjk, "Note", "Other", "alt.png", "linked.md"].sort());
+    });
+
+    it("still drops attachment targets over the path length limit once decoded", () => {
+        assert.deepEqual(parseFrontmatterAndLinks(`![](${"a".repeat(1001)}.png)`).links, []);
+    });
+
+    it("still finds links next to other brackets", () => {
+        const content = "[see [1]](note.md) [![thumb](t.png)](full.png) [[a]][[b]] ([[c]]) [x](d.md)(e)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["a", "b", "c", "d.md", "full.png", "note.md", "t.png"]);
+    });
+
+    it("does not let a link span lines", () => {
+        const result = parseFrontmatterAndLinks("[[broken\nlink]] [label\n](x.png)");
+        assert.deepEqual(result.links, []);
     });
 
     it("deduplicates links", () => {

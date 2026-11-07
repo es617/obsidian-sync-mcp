@@ -4,14 +4,17 @@
 
 import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
 import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
-import { createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
+import { createTextBlob, createBinaryBlob, readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
+import type { LoadedEntry } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
+import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
 import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
@@ -52,6 +55,8 @@ export class Vault implements VaultBackend {
     // Obfuscation actually in effect after reconciling with the database, which
     // can differ from the configured value.
     private obfuscatePathsEffective = false;
+    // Serializes attachment writes per document id (see writeAttachmentUnlocked).
+    private attachmentLock = new KeyedLock();
 
     constructor(config: VaultConfig) {
         this.config = config;
@@ -208,6 +213,7 @@ export class Vault implements VaultBackend {
         callback: (path: string, content: string | null, mtime?: number) => void,
         onBatch?: (since: string, processed: number) => Promise<void>,
         stats?: { unreadable: number },
+        onAttachment?: AttachmentChangeCallback,
     ): Promise<string> {
         // Paginate _changes in batches to limit memory usage.
         const BATCH_SIZE = 50;
@@ -239,6 +245,12 @@ export class Vault implements VaultBackend {
                         if (stats) stats.unreadable++;
                         continue;
                     }
+                }
+                // Attachments are reported from the metadata doc alone: size and
+                // mtime are on it, so no chunk is ever fetched for them.
+                if (onAttachment && isValidAttachmentPath(path)) {
+                    onAttachment(path, meta.deleted ? null : { size: meta.size ?? 0, mtime: meta.mtime ?? 0 });
+                    continue;
                 }
                 // A deletion doesn't need the body — the decrypted path is enough
                 // to remove the note. Short-circuit so a tombstone whose chunks were
@@ -276,12 +288,32 @@ export class Vault implements VaultBackend {
         return currentSince;
     }
 
-    watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void): void {
-        // catchUp already set this.manipulator.since to the right point
+    watchChanges(callback: (path: string, content: string | null, mtime?: number, seq?: string | number) => void, onAttachment?: AttachmentChangeCallback): void {
+        // catchUp already set this.manipulator.since to the right point.
+        // The interest filter sees the metadata doc before any chunk is loaded:
+        // attachments are reported from it and then filtered out, so their
+        // bytes are never fetched.
+        const filter = (meta: any): boolean => {
+            if (onAttachment) this.reportAttachment(meta, onAttachment);
+            return Vault.mdFilter(meta);
+        };
         this.manipulator.beginWatch(
             (doc, seq) => Vault.docToChange(doc, callback, seq),
-            Vault.mdFilter,
+            filter,
         );
+    }
+
+    private reportAttachment(meta: any, onAttachment: AttachmentChangeCallback): void {
+        const emit = (path: string) => {
+            if (!isValidAttachmentPath(path)) return;
+            onAttachment(path, meta.deleted ? null : { size: meta.size ?? 0, mtime: meta.mtime ?? 0 });
+        };
+        const path = meta.path ?? "";
+        if (isPathProbablyObfuscated(path) && this.passphrase) {
+            decrypt(path, this.passphrase, false).then(emit, () => {});
+        } else {
+            emit(path);
+        }
     }
 
     private validatePath(path: string): void {
@@ -330,8 +362,13 @@ export class Vault implements VaultBackend {
         this.validatePath(to);
         const content = await this.readNote(from);
         if (content === null) return false;
+        if (from === to) return true;
         const wrote = await this.writeNote(to, content);
         if (!wrote) return false;
+        // A case-only rename on a case-insensitive vault (LiveSync's default)
+        // is one document, which the write above already renamed.
+        const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
+        if (fromId === (await this.manipulator.path2id(to as FilePathWithPrefix))) return true;
         return await this.deleteNote(from);
     }
 
@@ -368,4 +405,93 @@ export class Vault implements VaultBackend {
         return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
+    async writeAttachment(path: string, data: Uint8Array, options: WriteOptions = {}): Promise<boolean> {
+        validateAttachmentPath(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.attachmentLock.run([id], () => this.writeAttachmentUnlocked(path, data, options));
+    }
+
+    /**
+     * The library's put always writes over the current revision, so "create
+     * unless it exists" can't be one CouchDB request. Callers hold the
+     * document's lock instead, which covers writes made by this server; a
+     * concurrent write from Obsidian is left to LiveSync's conflict handling.
+     */
+    private async writeAttachmentUnlocked(path: string, data: Uint8Array, { overwrite = false }: WriteOptions): Promise<boolean> {
+        clearHandlers();
+        let ctime = Date.now();
+        const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (existing && !overwrite) throw new AttachmentExistsError(path);
+        if (existing && "ctime" in existing) {
+            ctime = existing.ctime;
+        }
+        // A binary blob makes the library store a "newnote" (binary) entry,
+        // chunked and encrypted exactly as LiveSync does for files added in Obsidian.
+        // Copy into a fresh ArrayBuffer-backed view: the blob type wants one.
+        const blob = createBinaryBlob(new Uint8Array(data));
+        return await this.manipulator.put(path, blob, {
+            ctime,
+            mtime: Date.now(),
+            size: data.byteLength,
+        });
+    }
+
+    async deleteAttachment(path: string): Promise<boolean> {
+        validateAttachmentPath(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.attachmentLock.run([id], async () => {
+            clearHandlers();
+            return await this.manipulator.delete(path);
+        });
+    }
+
+    async moveAttachment(from: string, to: string, { maxBytes, ...options }: MoveOptions = {}): Promise<boolean> {
+        validateAttachmentPath(from);
+        validateAttachmentPath(to);
+        const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
+        const toId = await this.manipulator.path2id(to as FilePathWithPrefix);
+        return await this.attachmentLock.run([fromId, toId], async () => {
+            // Checked from metadata first: a move loads the whole file, and a
+            // file added in Obsidian can be far larger than any upload.
+            const meta = await this.manipulator.get(from as FilePathWithPrefix, true);
+            if (!meta) return false;
+            if (from === to) return true;
+            // Fails closed: a missing or non-numeric size doesn't let the file load.
+            if (maxBytes !== undefined && !(Number.isFinite(meta.size) && meta.size <= maxBytes)) {
+                throw new AttachmentTooLargeError(from, meta.size, maxBytes);
+            }
+            if (fromId !== toId && !options.overwrite && (await this.manipulator.get(to as FilePathWithPrefix, true))) {
+                throw new AttachmentExistsError(to);
+            }
+            const entry = await this.manipulator.get(from as FilePathWithPrefix);
+            if (!entry || !("data" in entry)) return false;
+            const content = readContent(entry as LoadedEntry);
+            const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
+            // The stored size can understate the file; check what was loaded too.
+            if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new AttachmentTooLargeError(from, bytes.byteLength, maxBytes);
+            if (fromId === toId) {
+                // Case-only rename on a case-insensitive vault: one document,
+                // so rewrite it under the new path and delete nothing.
+                return await this.writeAttachmentUnlocked(to, bytes, { overwrite: true });
+            }
+            const wrote = await this.writeAttachmentUnlocked(to, bytes, options);
+            if (!wrote) return false;
+            clearHandlers();
+            let deleted = false;
+            try {
+                deleted = await this.manipulator.delete(from);
+            } catch {
+                // Reported below: the copy exists either way.
+            }
+            if (!deleted) throw new AttachmentMoveIncompleteError(from, to);
+            return true;
+        });
+    }
+
+    async getAttachmentInfo(path: string): Promise<AttachmentInfo | null> {
+        validateAttachmentPath(path);
+        const entry = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (!entry) return null;
+        return { path, size: entry.size, ctime: entry.ctime, mtime: entry.mtime };
+    }
 }

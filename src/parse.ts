@@ -2,11 +2,36 @@
  * Parse Obsidian markdown content for frontmatter, tags, and links.
  */
 
+import { isValidAttachmentPath } from "./attachment-path.js";
+
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
     links: string[];
 }
+
+// Link patterns. Each part stops at a bracket, paren or newline, so a failed
+// match only scans up to the next one. Otherwise it rescans the rest of the
+// note, which is quadratic on input like "[".repeat(20000), and parsing is
+// synchronous and runs on every note at startup. No length cap is needed on
+// top: attachment targets are capped by isValidAttachmentPath after decoding.
+
+// [[wikilinks]]. A #heading, #^block or #page=2 suffix points into the target,
+// so [[Note#Heading]] links Note and ![[paper.pdf#page=2]] embeds paper.pdf.
+// [[#Heading]] (same note) is not a link.
+const WIKILINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
+
+// Markdown link text: plain characters, or one level of [brackets], so
+// [see [1]](note.md) and [![thumb](t.png)](full.png) parse. The two
+// alternatives never match the same character, so this adds no backtracking.
+const LINK_LABEL = String.raw`[^[\]\n]|\[[^[\]\n]*\]`;
+
+// [markdown links](path.md), also with a #heading: [x](path.md#Heading) links path.md.
+const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL})+\]\(([^()#\n]+\.md)(?:#[^()\n]*)?\)`, "g");
+
+// Markdown links and embeds to attachments: ![](Attachments/shot.png),
+// [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title").
+const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL})*)\]\((<[^<>\n]+>|[^()\s]+)(?:\s+"[^"\n]*")?\)`, "g");
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     const frontmatter: Record<string, any> = {};
@@ -63,17 +88,31 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
         tags.add(match[2]);
     }
 
-    // [[wikilinks]]
-    for (const match of content.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)) {
-        links.push(match[1]);
-    }
-
-    // [markdown links](path.md)
-    for (const match of content.matchAll(/\[([^\]]+)\]\(([^)]+\.md)\)/g)) {
-        links.push(match[2]);
-    }
+    for (const match of content.matchAll(WIKILINK)) links.push(match[1]);
+    for (const match of content.matchAll(NOTE_LINK)) links.push(match[1]);
+    addAttachmentLinks(content, links);
 
     return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+}
+
+/**
+ * Add the attachment targets of markdown links in `text` to `links`, recorded
+ * URL-decoded so list_attachments can tell which files are still used. Also
+ * looks inside each link's text once, since matches don't overlap and the
+ * outer link of [![thumb](t.png)](full.png) would hide the inner image.
+ */
+function addAttachmentLinks(text: string, links: string[], nested = false): void {
+    for (const match of text.matchAll(ATTACHMENT_LINK)) {
+        if (!nested && match[1].includes("[")) addAttachmentLinks(match[1], links, true);
+        // Drop a #page=2 fragment, as for wikilinks. Before decoding, since a
+        // literal # in a file name is written %23.
+        let target = match[2].replace(/^<|>$/g, "").replace(/#.*$/, "");
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.endsWith(".md")) continue;
+        // Obsidian URL-decodes markdown link targets (a literal % is written %25).
+        try { target = decodeURIComponent(target); } catch { continue; }
+        target = target.replace(/^(\.\.?\/)+/, "");
+        if (isValidAttachmentPath(target)) links.push(target);
+    }
 }
 
 /**

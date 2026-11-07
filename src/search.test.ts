@@ -348,3 +348,70 @@ describe("SearchIndex content search (search_notes)", () => {
         assert.ok(hits[0].snippet.includes("kanban"));
     });
 });
+
+describe("SearchIndex attachments", () => {
+    it("persists attachments (encrypted) and reloads them, and old files without them still load", async () => {
+        const dir = await mkdtemp(join(tmpdir(), "search-att-"));
+        try {
+            const path = join(dir, "idx.json");
+            const a = new SearchIndex(path, "pass");
+            a.update("n.md", "![[shot.png]]", 1);
+            a.updateAttachment("Attachments/shot.png", 1234, 99);
+            await a.saveToDisk();
+            const b = new SearchIndex(path, "pass");
+            await b.loadFromDisk();
+            assert.deepEqual(b.listAttachments(), [{ path: "Attachments/shot.png", size: 1234, mtime: 99 }]);
+
+            // A file written before attachments existed has no `attachments` key.
+            const { writeFile } = await import("fs/promises");
+            const legacy = join(dir, "legacy.json");
+            await writeFile(legacy, JSON.stringify({ mtimes: { "n.md": 1 }, tags: {}, links: {}, since: "5" }));
+            const c = new SearchIndex(legacy);
+            assert.equal(await c.loadFromDisk(), true);
+            assert.equal(c.attachmentCount, 0);
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("lists by folder, and replace/clear reset the table", () => {
+        const idx = new SearchIndex();
+        idx.updateAttachment("A/x.png", 1, 1);
+        idx.updateAttachment("A-other/y.png", 2, 2);
+        idx.updateAttachment("B/z.pdf", 3, 3);
+        assert.deepEqual(idx.listAttachments("A").map((a) => a.path), ["A/x.png"], "folder-boundary aware");
+        idx.removeAttachment("A/x.png");
+        assert.equal(idx.attachmentCount, 2);
+        idx.replaceAttachments([{ path: "C/c.png", size: 1, mtime: 1 }]);
+        assert.deepEqual(idx.listAttachments().map((a) => a.path), ["C/c.png"]);
+        idx.clear();
+        assert.equal(idx.attachmentCount, 0);
+    });
+
+    it("matches references by file name, case-insensitively, from wikilinks and markdown links", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "![[Shot.PNG|300]]");
+        idx.update("b.md", "![](../Attachments/shot.png)");
+        idx.update("c.md", "[[unrelated]]");
+        assert.deepEqual(idx.getAttachmentReferences("Attachments/shot.png"), ["a.md", "b.md"]);
+        assert.deepEqual(idx.getAttachmentReferences("Elsewhere/other.png"), []);
+        idx.remove("a.md");
+        assert.deepEqual(idx.getAttachmentReferences("Attachments/shot.png"), ["b.md"], "follows note removal");
+    });
+
+    it("counts embeds with a #page or #t anchor as references to the file", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "![[paper.pdf#page=2]]");
+        idx.update("b.md", "![](Attachments/paper.pdf#page=5)");
+        idx.update("c.md", "![[clip.mp4#t=10]]");
+        assert.deepEqual(idx.getAttachmentReferences("Attachments/paper.pdf"), ["a.md", "b.md"]);
+        assert.deepEqual(idx.getAttachmentReferences("media/clip.mp4"), ["c.md"]);
+    });
+
+    it("counts [[Note#Heading]] and [x](Note.md#Heading) as backlinks to the note", () => {
+        const idx = new SearchIndex();
+        idx.update("a.md", "See [[b#Section]] and [[b#^block|here]]");
+        idx.update("c.md", "See [b](b.md#Section)");
+        assert.deepEqual(idx.getBacklinks("b.md"), ["a.md", "c.md"]);
+    });
+});

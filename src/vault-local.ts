@@ -1,10 +1,14 @@
-import { readFile, writeFile, unlink, mkdir, stat, realpath, rename } from "fs/promises";
-import { dirname, resolve, sep } from "path";
-import { realpathSync } from "fs";
+import { readFile, writeFile, unlink, mkdir, stat, lstat, realpath, rename, link, copyFile } from "fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "path";
+import { realpathSync, constants } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
-import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
+import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
+
+// Not defined on Windows, which has no symlinks a non-admin can create anyway.
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export class LocalVault implements VaultBackend {
     private root: string;
@@ -13,47 +17,115 @@ export class LocalVault implements VaultBackend {
         this.root = realpathSync(resolve(vaultPath));
     }
 
-    private async safePath(path: string, isNote = false): Promise<string> {
-        // Note operations must target a real note (.md, no dot-folders, etc.);
-        // folder listing passes a directory and skips this.
-        if (isNote) validateNotePath(path);
+    private async safePath(path: string, kind: "note" | "attachment" | "folder" = "folder", { noSymlink = false } = {}): Promise<string> {
+        // Note operations must target a real note (.md, no dot-folders, etc.)
+        // and attachment operations an allowed media file; folder listing
+        // passes a directory and skips this.
+        if (kind === "note") validateNotePath(path);
+        if (kind === "attachment") validateAttachmentPath(path);
         const full = resolve(this.root, path);
         // Lexical check first (catches ../ without hitting disk)
         if (!full.startsWith(this.root + sep)) {
             throw new Error("Path traversal blocked");
         }
-        // Resolve symlinks and re-check (catches symlink escapes)
+        // Resolve symlinks and re-check (catches symlink escapes). A path
+        // that doesn't exist yet resolves through its nearest existing
+        // ancestor, so a symlinked parent can't redirect a write either.
+        const real = await this.resolveExisting(full);
+        if (!real.startsWith(this.root + sep)) {
+            throw new Error("Path traversal blocked");
+        }
+        // The name was validated, but a symlink inside the vault can point at
+        // a note, a dot-folder or another type, so the target must pass too.
+        if (kind !== "folder" && !this.isValidKind(relative(this.root, real), kind)) {
+            throw new Error("Path traversal blocked");
+        }
+        // realpath fails with ENOENT on a dangling symlink, so it resolves as
+        // a new file, but a write would follow it and create outside the vault.
+        if (await this.hasDanglingSymlink(full)) {
+            throw new Error("Path traversal blocked");
+        }
+        // Writing or deleting through a symlink would act on its target, a
+        // different path from the one the caller named.
+        if (noSymlink && (await this.isSymlink(full))) {
+            throw new Error(`Refusing to modify a symlink: ${path}`);
+        }
+        return real;
+    }
+
+    /**
+     * mkdir for an attachment write to `fullPath` (from safePath), then check
+     * the path again: a folder swapped for a symlink since would redirect the
+     * write. Returns false when mkdir fails.
+     */
+    private async mkdirChecked(path: string, fullPath: string): Promise<boolean> {
         try {
-            const real = await realpath(full);
-            if (!real.startsWith(this.root + sep)) {
-                throw new Error("Path traversal blocked");
-            }
-            return real;
+            await mkdir(dirname(fullPath), { recursive: true });
+        } catch {
+            return false;
+        }
+        if ((await this.safePath(path, "attachment", { noSymlink: true })) !== fullPath) {
+            throw new Error("Path traversal blocked");
+        }
+        return true;
+    }
+
+    private isValidKind(rel: string, kind: "note" | "attachment"): boolean {
+        const path = rel.split(sep).join("/");
+        return kind === "note" ? isValidNotePath(path) : isValidAttachmentPath(path);
+    }
+
+    private async isSymlink(full: string): Promise<boolean> {
+        try {
+            return (await lstat(full)).isSymbolicLink();
         } catch (e: any) {
-            if (e.code !== "ENOENT") throw e;
-            // The file (or a parent) doesn't exist yet. Confirm the nearest
-            // existing ancestor still resolves inside the vault, so a symlinked
-            // parent directory can't redirect a write outside the root.
-            if (!(await this.realpathWithinRoot(dirname(full)))) {
-                throw new Error("Path traversal blocked");
-            }
-            return full;
+            if (e.code === "ENOENT") return false;
+            throw e;
         }
     }
 
-    private async realpathWithinRoot(target: string): Promise<boolean> {
-        let current = target;
+    /**
+     * realpath of `full`, or for a path that doesn't exist yet the realpath of
+     * its nearest existing ancestor joined with the rest.
+     */
+    private async resolveExisting(full: string): Promise<string> {
+        const rest: string[] = [];
+        let current = full;
         for (;;) {
             try {
-                const real = await realpath(current);
-                return real === this.root || real.startsWith(this.root + sep);
+                return join(await realpath(current), ...rest);
             } catch (e: any) {
                 if (e.code !== "ENOENT") throw e;
                 const parent = dirname(current);
-                if (parent === current) return false; // reached filesystem root
+                if (parent === current) return full; // reached filesystem root
+                rest.unshift(basename(current));
                 current = parent;
             }
         }
+    }
+
+    /** Whether `full` or one of its ancestors below the root is a symlink to nothing. */
+    private async hasDanglingSymlink(full: string): Promise<boolean> {
+        for (let current = full; current !== this.root; current = dirname(current)) {
+            let s;
+            try {
+                s = await lstat(current);
+            } catch (e: any) {
+                if (e.code === "ENOENT") continue;
+                throw e;
+            }
+            // The nearest existing entry decides: anything but a symlink is
+            // real, and a resolvable symlink was checked by resolveExisting.
+            if (!s.isSymbolicLink()) return false;
+            try {
+                await realpath(current);
+                return false;
+            } catch (e: any) {
+                if (e.code === "ENOENT") return true;
+                throw e;
+            }
+        }
+        return false;
     }
 
     async init(): Promise<void> {}
@@ -61,7 +133,7 @@ export class LocalVault implements VaultBackend {
     async close(): Promise<void> {}
 
     async readNote(path: string): Promise<string | null> {
-        const fullPath = await this.safePath(path, true);
+        const fullPath = await this.safePath(path, "note");
         try {
             return await readFile(fullPath, "utf-8");
         } catch {
@@ -70,7 +142,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async writeNote(path: string, content: string): Promise<boolean> {
-        const fullPath = await this.safePath(path, true);
+        const fullPath = await this.safePath(path, "note");
         try {
             await mkdir(dirname(fullPath), { recursive: true });
             await writeFile(fullPath, content, "utf-8");
@@ -81,7 +153,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async deleteNote(path: string): Promise<boolean> {
-        const fullPath = await this.safePath(path, true);
+        const fullPath = await this.safePath(path, "note");
         try {
             await unlink(fullPath);
             return true;
@@ -91,8 +163,18 @@ export class LocalVault implements VaultBackend {
     }
 
     async moveNote(from: string, to: string): Promise<boolean> {
-        const fromPath = await this.safePath(from, true);
-        const toPath = await this.safePath(to, true);
+        const fromPath = await this.safePath(from, "note");
+        const toPath = await this.safePath(to, "note");
+        if (fromPath === toPath) {
+            // Same file: a no-op, or a case-only rename on a case-insensitive
+            // filesystem, where toPath is the realpath and has the old case.
+            try {
+                await rename(fromPath, resolve(this.root, to));
+                return true;
+            } catch {
+                return false;
+            }
+        }
         try {
             await mkdir(dirname(toPath), { recursive: true });
             await rename(fromPath, toPath);
@@ -111,7 +193,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async getMetadata(path: string): Promise<NoteInfo | null> {
-        const fullPath = await this.safePath(path, true);
+        const fullPath = await this.safePath(path, "note");
         try {
             const [content, s] = await Promise.all([
                 readFile(fullPath, "utf-8"),
@@ -160,4 +242,107 @@ export class LocalVault implements VaultBackend {
         return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
+    async writeAttachment(path: string, data: Uint8Array, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
+        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
+        if (!(await this.mkdirChecked(path, fullPath))) return false;
+        try {
+            // O_EXCL fails if the file exists, in the same step as the create,
+            // so two concurrent creates can't both succeed. O_NOFOLLOW refuses
+            // a symlink put in place since safePath checked.
+            const flag = constants.O_WRONLY | constants.O_CREAT | (overwrite ? constants.O_TRUNC : constants.O_EXCL) | NOFOLLOW;
+            await writeFile(fullPath, data, { flag });
+            return true;
+        } catch (e: any) {
+            if (e.code === "EEXIST") throw new AttachmentExistsError(path);
+            if (e.code === "ELOOP") throw new Error(`Refusing to modify a symlink: ${path}`);
+            return false;
+        }
+    }
+
+    async deleteAttachment(path: string): Promise<boolean> {
+        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
+        try {
+            await unlink(fullPath);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    async moveAttachment(from: string, to: string, { overwrite = false }: MoveOptions = {}): Promise<boolean> {
+        const fromPath = await this.safePath(from, "attachment", { noSymlink: true });
+        const toPath = await this.safePath(to, "attachment", { noSymlink: true });
+        if (fromPath === toPath) {
+            // Same file, which link below would refuse with EEXIST. rename is a
+            // no-op here, or the case-only rename on a case-insensitive filesystem.
+            try {
+                await rename(fromPath, resolve(this.root, to));
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        if (!(await this.mkdirChecked(to, toPath))) return false;
+        try {
+            if (overwrite) {
+                await rename(fromPath, toPath);
+                return true;
+            }
+            // rename would replace an existing destination; link fails with
+            // EEXIST instead.
+            await link(fromPath, toPath);
+        } catch (e: any) {
+            if (e.code === "EEXIST") throw new AttachmentExistsError(to);
+            // Cross-device, or a filesystem without hard links: copy, then delete.
+            if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(e.code)) return false;
+            try {
+                await copyFile(fromPath, toPath, overwrite ? 0 : constants.COPYFILE_EXCL);
+            } catch (copyErr: any) {
+                if (copyErr.code === "EEXIST") throw new AttachmentExistsError(to);
+                return false;
+            }
+        }
+        // The destination now exists, by link or copy; only the source is left.
+        try {
+            await unlink(fromPath);
+            return true;
+        } catch {
+            throw new AttachmentMoveIncompleteError(from, to);
+        }
+    }
+
+    async getAttachmentInfo(path: string): Promise<AttachmentInfo | null> {
+        const fullPath = await this.safePath(path, "attachment");
+        try {
+            const s = await stat(fullPath);
+            if (!s.isFile()) return null;
+            return { path, size: s.size, ctime: s.birthtimeMs, mtime: s.mtimeMs };
+        } catch {
+            return null;
+        }
+    }
+
+    async listAttachments(): Promise<AttachmentInfo[]> {
+        const results: AttachmentInfo[] = [];
+        try {
+            // Dot-folders (.obsidian, .trash, .git) are never attachments; skip them while walking.
+            for await (const entry of glob("**/*", { cwd: this.root, exclude: (p: any) => String(typeof p === "string" ? p : p.name).split(/[/\\]/).some((seg: string) => seg.startsWith(".")) })) {
+                const path = entry.replace(/\\/g, "/");
+                if (!isValidAttachmentPath(path)) continue;
+                try {
+                    // A symlink out of the vault would leak the target's name and
+                    // size, and one to a note or dot-folder isn't an attachment.
+                    const real = await realpath(resolve(this.root, path));
+                    if (!real.startsWith(this.root + sep) || !this.isValidKind(relative(this.root, real), "attachment")) continue;
+                    const s = await stat(real);
+                    if (s.isFile()) results.push({ path, size: s.size, ctime: s.birthtimeMs, mtime: s.mtimeMs });
+                } catch {
+                    // Vanished between listing and stat, or a dangling symlink.
+                }
+            }
+        } catch {
+            return [];
+        }
+        return results.sort((a, b) => a.path.localeCompare(b.path));
+    }
 }

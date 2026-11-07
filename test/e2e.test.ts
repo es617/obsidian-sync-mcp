@@ -8,7 +8,7 @@ import { mkdtemp, rm, mkdir, writeFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn, type ChildProcess } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { request as httpRequest } from "node:http";
 
 const PORT = 9877;
@@ -379,6 +379,135 @@ describe("E2E: modern-protocol requests must not crash the server", () => {
     it("still serves the legacy session afterwards", async () => {
         const text = await callTool("list_notes", {});
         assert.ok(text.length > 0);
+    });
+});
+
+describe("E2E: attachments", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x7f, 0x80]);
+
+    it("registers no attachment tools unless ATTACHMENTS_ENABLED=true", async () => {
+        const list = await mcpCall("tools/list", {});
+        const tools: string[] = (list?.result?.tools ?? []).map((t: any) => t.name);
+        assert.ok(!tools.some((t) => t.includes("attachment")), tools.join(", "));
+        const resp = await fetch(`http://localhost:${PORT}/attachments/upload/anything`, { method: "PUT", body: png });
+        assert.equal(resp.status, 404);
+    });
+
+    it("uploads through a one-time URL and lands byte-exact in the vault", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", ATTACHMENTS_ENABLED: "true", BASE_URL: `http://localhost:${PORT}`, ATTACHMENT_MAX_BYTES: "1000" });
+        assert.ok(serverLogs.includes("Attachments enabled"), serverLogs);
+        assert.ok(lastInitResult?.result?.instructions?.includes("create_attachment_upload"));
+
+        const out = await callTool("create_attachment_upload", { path: "Attachments/shot.png", size: png.byteLength });
+        const url = out.match(/http:\/\/localhost:\d+\/attachments\/upload\/[A-Za-z0-9_-]+/)?.[0];
+        assert.ok(url, out);
+
+        // POST is not accepted: nothing is written and the token stays valid.
+        const post = await fetch(url, { method: "POST", body: png, headers: { Origin: "https://evil.example" } });
+        assert.ok(post.status >= 400, `POST got ${post.status}`);
+        assert.ok(!existsSync(join(vaultDir, "Attachments/shot.png")));
+
+        // No Authorization header: the token in the URL is the credential.
+        const resp = await fetch(url, { method: "PUT", body: png });
+        assert.equal(resp.status, 201);
+        assert.deepEqual(await resp.json(), { path: "Attachments/shot.png", size: png.byteLength, embed: "![[Attachments/shot.png]]" });
+        assert.deepEqual(new Uint8Array(readFileSync(join(vaultDir, "Attachments/shot.png"))), png);
+
+        const reuse = await fetch(url, { method: "PUT", body: png });
+        assert.equal(reuse.status, 404, "the URL works once");
+
+        await callTool("edit_note", { path: "Welcome.md", content: "![[Attachments/shot.png]]" });
+        const meta = await callTool("get_attachment_metadata", { path: "Attachments/shot.png" });
+        assert.ok(meta.includes(`Size: ${png.byteLength} bytes`), meta);
+        assert.ok(meta.includes("Embedded or linked in: Welcome.md"), meta);
+    });
+
+    it("rejects an upload over ATTACHMENT_MAX_BYTES and writes nothing", async () => {
+        const out = await callTool("create_attachment_upload", { path: "Attachments/big.pdf" });
+        const url = out.match(/http:\/\/\S+\/attachments\/upload\/[A-Za-z0-9_-]+/)![0];
+        const resp = await fetch(url, { method: "PUT", body: new Uint8Array(1001) });
+        assert.equal(resp.status, 413);
+        assert.ok(!existsSync(join(vaultDir, "Attachments/big.pdf")));
+        // Refused from Content-Length alone, so the same URL takes a smaller file.
+        const retry = await fetch(url, { method: "PUT", body: new Uint8Array(10).fill(7) });
+        assert.equal(retry.status, 201);
+        assert.equal(readFileSync(join(vaultDir, "Attachments/big.pdf")).byteLength, 10);
+        await callTool("delete_attachment", { path: "Attachments/big.pdf" });
+    });
+
+    it("lets only one of two concurrent uploads to the same new path succeed", async () => {
+        const urls: string[] = [];
+        for (let i = 0; i < 2; i++) {
+            const out = await callTool("create_attachment_upload", { path: "Attachments/race.png" });
+            urls.push(out.match(/http:\/\/\S+\/attachments\/upload\/[A-Za-z0-9_-]+/)![0]);
+        }
+        const bodies = [new Uint8Array(900).fill(1), new Uint8Array(900).fill(2)];
+        const responses = await Promise.all(urls.map((url, i) => fetch(url, { method: "PUT", body: bodies[i] })));
+        const statuses = responses.map((r) => r.status).sort();
+        assert.deepEqual(statuses, [201, 409]);
+        const winner = bodies[responses.findIndex((r) => r.status === 201)];
+        assert.deepEqual(new Uint8Array(readFileSync(join(vaultDir, "Attachments/race.png"))), winner);
+        await callTool("delete_attachment", { path: "Attachments/race.png" });
+    });
+
+    it("writes small files inline, moves and deletes them, and keeps them out of note listings", async () => {
+        const saved = await callTool("write_attachment", { path: "Attachments/tiny.png", content_base64: Buffer.from(png).toString("base64") });
+        assert.ok(saved.startsWith("Attachment saved"), saved);
+        assert.ok(!(await callTool("list_notes")).includes("tiny.png"));
+        assert.ok((await callTool("move_attachment", { from: "Attachments/tiny.png", to: "Attachments/moved.png" })).startsWith("Moved"));
+        assert.deepEqual(new Uint8Array(readFileSync(join(vaultDir, "Attachments/moved.png"))), png);
+        assert.ok((await callTool("delete_attachment", { path: "Attachments/moved.png" })).startsWith("Deleted"));
+        assert.ok(!existsSync(join(vaultDir, "Attachments/moved.png")));
+    });
+
+    it("list_attachments sees uploads, files present at startup, and files added or removed outside the server", async () => {
+        // The upload from the earlier test is in the index straight away.
+        let out = await callTool("list_attachments", {});
+        assert.ok(out.includes("[Attachments/shot.png]") && out.includes("in Welcome.md"), out);
+
+        // A file dropped in by another program (e.g. Obsidian) shows up via the watcher.
+        await writeFile(join(vaultDir, "Attachments/dropped.pdf"), png);
+        let found = false;
+        for (let i = 0; i < 30 && !found; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            found = (await callTool("list_attachments", { extension: "pdf" })).includes("Attachments/dropped.pdf");
+        }
+        assert.ok(found, "watcher indexed the dropped file");
+        assert.match(await callTool("list_attachments", { unreferenced: true }), /dropped\.pdf\]\(.*\) — unreferenced/);
+
+        // And one deleted outside the server disappears.
+        await unlink(join(vaultDir, "Attachments/dropped.pdf"));
+        let gone = false;
+        for (let i = 0; i < 30 && !gone; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            gone = !(await callTool("list_attachments", {})).includes("dropped.pdf");
+        }
+        assert.ok(gone, "watcher removed the deleted file");
+
+        // After a restart the startup scan finds what is on disk.
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", ATTACHMENTS_ENABLED: "true", BASE_URL: `http://localhost:${PORT}`, ATTACHMENT_MAX_BYTES: "1000" });
+        for (let i = 0; i < 30 && !out.includes("Attachment index built"); i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            out = serverLogs;
+        }
+        assert.ok((await callTool("list_attachments", {})).includes("[Attachments/shot.png]"), "startup scan");
+    });
+
+    it("refuses notes and config files through the attachment tools", async () => {
+        assert.match(await callTool("create_attachment_upload", { path: "Welcome.md" }), /Invalid attachment path/);
+        assert.match(await callTool("write_attachment", { path: ".obsidian/plugins/x/main.js", content_base64: "AQID" }), /Invalid attachment path/);
+    });
+
+    it("exposes only the read tools and no upload route under READ_ONLY", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", ATTACHMENTS_ENABLED: "true", READ_ONLY: "true" });
+        const list = await mcpCall("tools/list", {});
+        const tools: string[] = (list?.result?.tools ?? []).map((t: any) => t.name);
+        assert.deepEqual(tools.filter((t) => t.includes("attachment")).sort(), ["get_attachment_metadata", "list_attachments"]);
+        const resp = await fetch(`http://localhost:${PORT}/attachments/upload/anything`, { method: "PUT", body: png });
+        assert.equal(resp.status, 404);
     });
 });
 

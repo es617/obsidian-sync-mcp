@@ -1,10 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir, unlink, readFile } from "fs/promises";
-import { watch } from "fs";
+import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod } from "fs/promises";
+import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError } from "./vault-backend.js";
 import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
@@ -345,6 +346,265 @@ describe("file watcher integration", () => {
         } finally {
             watcher.close();
             await rm(watchDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("attachments", () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10]);
+
+    it("writes, stats, moves and deletes binary files byte-exact", async () => {
+        assert.equal(await vault.writeAttachment("Attachments/a.png", bytes), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/a.png"))), bytes);
+        const info = await vault.getAttachmentInfo("Attachments/a.png");
+        assert.equal(info?.size, bytes.byteLength);
+
+        assert.equal(await vault.moveAttachment("Attachments/a.png", "Attachments/sub/b.png"), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/a.png"), null);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/sub/b.png"))), bytes);
+
+        assert.equal(await vault.deleteAttachment("Attachments/sub/b.png"), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/sub/b.png"), null);
+    });
+
+    it("is not visible as a note", async () => {
+        await vault.writeAttachment("Attachments/c.pdf", bytes);
+        const notes = await vault.listNotes();
+        assert.equal(notes.some((n) => n.includes("c.pdf")), false);
+        await vault.deleteAttachment("Attachments/c.pdf");
+    });
+
+    it("listAttachments finds media files and skips notes, other files and dot-folders", async () => {
+        await vault.writeAttachment("Attachments/l1.png", bytes);
+        await vault.writeAttachment("deep/er/l2.pdf", bytes);
+        await mkdir(join(tmpDir, ".obsidian/plugins/x"), { recursive: true });
+        await writeFile(join(tmpDir, ".obsidian/plugins/x/hidden.png"), bytes);
+        await writeFile(join(tmpDir, "notes.txt"), "x");
+        const listed = (await vault.listAttachments()).map((a) => a.path);
+        assert.ok(listed.includes("Attachments/l1.png"));
+        assert.ok(listed.includes("deep/er/l2.pdf"));
+        assert.ok(!listed.some((p) => p.includes(".obsidian") || p.endsWith(".md") || p.endsWith(".txt")), listed.join(", "));
+        assert.equal((await vault.listAttachments()).find((a) => a.path === "Attachments/l1.png")?.size, bytes.byteLength);
+        await vault.deleteAttachment("Attachments/l1.png");
+        await vault.deleteAttachment("deep/er/l2.pdf");
+    });
+
+    it("refuses notes, config and traversal through the attachment methods", async () => {
+        await assert.rejects(() => vault.writeAttachment("note.md", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.writeAttachment(".obsidian/plugins/x/main.js", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.writeAttachment("../escape.png", bytes), /Invalid attachment path/);
+        await assert.rejects(() => vault.moveAttachment("a.png", "a.md"), /Invalid attachment path/);
+    });
+
+    it("refuses to replace an existing file unless overwrite is set", async () => {
+        const other = new Uint8Array([1, 2, 3]);
+        await vault.writeAttachment("Attachments/ow.png", bytes);
+        await assert.rejects(() => vault.writeAttachment("Attachments/ow.png", other), AttachmentExistsError);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/ow.png"))), bytes);
+        assert.equal(await vault.writeAttachment("Attachments/ow.png", other, { overwrite: true }), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/ow.png"))), other);
+        await vault.deleteAttachment("Attachments/ow.png");
+    });
+
+    it("lets exactly one of two concurrent creates of the same path win", async () => {
+        const a = new Uint8Array(64 * 1024).fill(1);
+        const b = new Uint8Array(64 * 1024).fill(2);
+        const results = await Promise.allSettled([
+            vault.writeAttachment("Attachments/race.png", a),
+            vault.writeAttachment("Attachments/race.png", b),
+        ]);
+        assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+        const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        assert.ok(rejected.reason instanceof AttachmentExistsError);
+        const winner = results[0].status === "fulfilled" ? a : b;
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/race.png"))), winner);
+        await vault.deleteAttachment("Attachments/race.png");
+    });
+
+    it("moves onto an existing file only with overwrite, keeping both files otherwise", async () => {
+        const other = new Uint8Array([9, 9]);
+        await vault.writeAttachment("Attachments/m1.png", bytes);
+        await vault.writeAttachment("Attachments/m2.png", other);
+        await assert.rejects(() => vault.moveAttachment("Attachments/m1.png", "Attachments/m2.png"), AttachmentExistsError);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m1.png"))), bytes);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m2.png"))), other);
+        assert.equal(await vault.moveAttachment("Attachments/m1.png", "Attachments/m2.png", { overwrite: true }), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/m1.png"), null);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m2.png"))), bytes);
+        await vault.deleteAttachment("Attachments/m2.png");
+    });
+
+    it("renames without loading the file, so the move size limit does not apply", async () => {
+        await vault.writeAttachment("Attachments/huge.mp4", new Uint8Array(4096));
+        assert.equal(await vault.moveAttachment("Attachments/huge.mp4", "Attachments/huge2.mp4", { maxBytes: 1 }), true);
+        assert.equal((await vault.getAttachmentInfo("Attachments/huge2.mp4"))?.size, 4096);
+        await vault.deleteAttachment("Attachments/huge2.mp4");
+    });
+
+    it("keeps the file when moving an attachment or note onto itself", async () => {
+        await vault.writeAttachment("Attachments/self.png", bytes);
+        assert.equal(await vault.moveAttachment("Attachments/self.png", "Attachments/self.png"), true);
+        assert.equal(await vault.moveAttachment("Attachments/self.png", "Attachments/self.png", { overwrite: true }), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/self.png"))), bytes);
+        await vault.deleteAttachment("Attachments/self.png");
+
+        await vault.writeNote("self.md", "still here");
+        assert.equal(await vault.moveNote("self.md", "self.md"), true);
+        assert.equal(await vault.readNote("self.md"), "still here");
+        await vault.deleteNote("self.md");
+    });
+
+    it("renames a note when only the case changes, on a case-insensitive filesystem", async (t) => {
+        await vault.writeNote("Case.md", "x");
+        try {
+            if (!existsSync(join(tmpDir, "case.md"))) return t.skip("case-sensitive filesystem");
+            assert.equal(await vault.moveNote("Case.md", "case.md"), true);
+            assert.ok((await readdir(tmpDir)).includes("case.md"));
+        } finally {
+            await unlink(join(tmpDir, "case.md")).catch(() => {});
+            await unlink(join(tmpDir, "Case.md")).catch(() => {});
+        }
+    });
+
+    it("reports a move whose source could not be deleted, with both files kept", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+        await vault.writeAttachment("locked/src.png", bytes);
+        await chmod(join(tmpDir, "locked"), 0o555);
+        try {
+            await assert.rejects(() => vault.moveAttachment("locked/src.png", "free/dest.png"), AttachmentMoveIncompleteError);
+            assert.ok(existsSync(join(tmpDir, "locked/src.png")));
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "free/dest.png"))), bytes);
+        } finally {
+            await chmod(join(tmpDir, "locked"), 0o755);
+            await rm(join(tmpDir, "locked"), { recursive: true, force: true });
+            await rm(join(tmpDir, "free"), { recursive: true, force: true });
+        }
+    });
+
+    it("blocks an attachment write that escapes via a symlinked directory", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        try {
+            const { symlink } = await import("fs/promises");
+            await symlink(outside, join(tmpDir, "attlink"));
+            await assert.rejects(() => vault.writeAttachment("attlink/x.png", bytes), /Path traversal blocked/);
+        } finally {
+            await unlink(join(tmpDir, "attlink")).catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("blocks writes through a dangling symlink to a file or directory outside the vault", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        const links = ["dangling.png", "dangling.md", "danglingdir"];
+        try {
+            const { symlink } = await import("fs/promises");
+            await symlink(join(outside, "new.png"), join(tmpDir, "dangling.png"));
+            await symlink(join(outside, "new.md"), join(tmpDir, "dangling.md"));
+            await symlink(join(outside, "notyet"), join(tmpDir, "danglingdir"));
+            await assert.rejects(() => vault.writeAttachment("dangling.png", bytes), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeAttachment("dangling.png", bytes, { overwrite: true }), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeNote("dangling.md", "x"), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeAttachment("danglingdir/sub/x.png", bytes), /Path traversal blocked/);
+            assert.equal(existsSync(join(outside, "new.png")), false);
+            assert.equal(existsSync(join(outside, "new.md")), false);
+            assert.equal(existsSync(join(outside, "notyet")), false);
+        } finally {
+            for (const l of links) await unlink(join(tmpDir, l)).catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("still writes a new file through a symlinked directory inside the vault", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, "realdir"), { recursive: true });
+        await symlink(join(tmpDir, "realdir"), join(tmpDir, "innerlink"));
+        try {
+            assert.equal(await vault.writeAttachment("innerlink/ok.png", bytes), true);
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "realdir/ok.png"))), bytes);
+        } finally {
+            await unlink(join(tmpDir, "innerlink")).catch(() => {});
+            await rm(join(tmpDir, "realdir"), { recursive: true, force: true });
+        }
+    });
+
+    it("listAttachments leaves out symlinks that point outside the vault", async () => {
+        const outside = await mkdtemp(join(tmpdir(), "vault-outside-"));
+        try {
+            const { symlink } = await import("fs/promises");
+            await writeFile(join(outside, "secret.png"), bytes);
+            await mkdir(join(outside, "dir"));
+            await writeFile(join(outside, "dir/inner.png"), bytes);
+            await symlink(join(outside, "secret.png"), join(tmpDir, "leak.png"));
+            await symlink(join(outside, "dir"), join(tmpDir, "leakdir"));
+            await symlink(join(outside, "gone.png"), join(tmpDir, "gone.png"));
+            await vault.writeAttachment("Attachments/kept.png", bytes);
+            const listed = (await vault.listAttachments()).map((a) => a.path);
+            assert.ok(listed.includes("Attachments/kept.png"), listed.join(", "));
+            assert.ok(!listed.some((p) => p.startsWith("leak") || p === "gone.png"), listed.join(", "));
+        } finally {
+            for (const l of ["leak.png", "leakdir", "gone.png"]) await unlink(join(tmpDir, l)).catch(() => {});
+            await vault.deleteAttachment("Attachments/kept.png").catch(() => {});
+            await rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it("refuses attachment operations through a symlink to a note or a dot-folder file", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, ".obsidian/plugins"), { recursive: true });
+        await mkdir(join(tmpDir, "Notes"), { recursive: true });
+        await writeFile(join(tmpDir, "Notes/secret.md"), "secret");
+        await writeFile(join(tmpDir, ".obsidian/plugins/main.png"), bytes);
+        await symlink(join(tmpDir, "Notes/secret.md"), join(tmpDir, "tonote.png"));
+        await symlink(join(tmpDir, ".obsidian/plugins/main.png"), join(tmpDir, "todot.png"));
+        await symlink(join(tmpDir, ".obsidian/plugins"), join(tmpDir, "media"));
+        try {
+            for (const link of ["tonote.png", "todot.png", "media/main.png", "media/new.png"]) {
+                await assert.rejects(() => vault.writeAttachment(link, bytes, { overwrite: true }), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.deleteAttachment(link), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.moveAttachment(link, "moved.png"), /Path traversal blocked/, link);
+                await assert.rejects(() => vault.getAttachmentInfo(link), /Path traversal blocked/, link);
+            }
+            await assert.rejects(() => vault.moveAttachment("kept-src.png", "tonote.png", { overwrite: true }), /Path traversal blocked/);
+            assert.equal(await readFile(join(tmpDir, "Notes/secret.md"), "utf8"), "secret");
+            assert.ok(existsSync(join(tmpDir, ".obsidian/plugins/main.png")));
+            assert.equal(existsSync(join(tmpDir, ".obsidian/plugins/new.png")), false);
+            const listed = (await vault.listAttachments()).map((a) => a.path);
+            assert.ok(!listed.some((p) => ["tonote.png", "todot.png"].includes(p) || p.startsWith("media/")), listed.join(", "));
+        } finally {
+            for (const l of ["tonote.png", "todot.png", "media"]) await unlink(join(tmpDir, l)).catch(() => {});
+            await rm(join(tmpDir, ".obsidian"), { recursive: true, force: true });
+            await rm(join(tmpDir, "Notes"), { recursive: true, force: true });
+        }
+    });
+
+    it("refuses to write, delete or move a symlink to another attachment, but reads through it", async () => {
+        const { symlink } = await import("fs/promises");
+        await writeFile(join(tmpDir, "target.png"), bytes);
+        await symlink(join(tmpDir, "target.png"), join(tmpDir, "alias.png"));
+        try {
+            await assert.rejects(() => vault.writeAttachment("alias.png", new Uint8Array([9]), { overwrite: true }), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.deleteAttachment("alias.png"), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.moveAttachment("alias.png", "x.png"), /Refusing to modify a symlink/);
+            await assert.rejects(() => vault.moveAttachment("target.png", "alias.png", { overwrite: true }), /Refusing to modify a symlink/);
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "target.png"))), bytes);
+            assert.equal((await vault.getAttachmentInfo("alias.png"))?.size, bytes.byteLength);
+        } finally {
+            await unlink(join(tmpDir, "alias.png")).catch(() => {});
+            await unlink(join(tmpDir, "target.png")).catch(() => {});
+        }
+    });
+
+    it("refuses a note operation through a symlink to a file that isn't a note", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(tmpDir, ".trash"), { recursive: true });
+        await writeFile(join(tmpDir, ".trash/old.md"), "old");
+        await symlink(join(tmpDir, ".trash/old.md"), join(tmpDir, "trashed.md"));
+        try {
+            await assert.rejects(() => vault.readNote("trashed.md"), /Path traversal blocked/);
+            await assert.rejects(() => vault.writeNote("trashed.md", "new"), /Path traversal blocked/);
+            assert.equal(await readFile(join(tmpDir, ".trash/old.md"), "utf8"), "old");
+        } finally {
+            await unlink(join(tmpDir, "trashed.md")).catch(() => {});
+            await rm(join(tmpDir, ".trash"), { recursive: true, force: true });
         }
     });
 });
