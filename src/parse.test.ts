@@ -197,6 +197,22 @@ Also #shared inline`;
         assert.deepEqual(result.links.sort(), ["Note", "clip.mp4", "folder/Other", "paper.pdf"]);
     });
 
+    it("handles anchors combined with aliases, sizes and titles", () => {
+        const cases: Array<[string, string[]]> = [
+            ["[[Note|see #3]]", ["Note"]], // a # in the alias is not an anchor
+            ["[[Note#Heading|alias]]", ["Note"]],
+            ["[[Note#]]", ["Note"]],
+            ["[[Note#a#b]]", ["Note"]],
+            ["![[img.png|300]]", ["img.png"]],
+            ["![[img.png#crop|300]]", ["img.png"]], // anchor and embed size
+            ['![](a.png#x "title")', ["a.png"]],
+            ["[x](#heading)", []], // fragment only: a heading in the same note
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links, links, content);
+        }
+    });
+
     it("parses markdown links to .md files", () => {
         const content = "See [my link](other-note.md) and [another](folder/note.md)";
         const result = parseFrontmatterAndLinks(content);
