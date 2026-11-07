@@ -39,23 +39,24 @@ const RESERVED_ROOT_FILES = new Set([
  * starting with `.`. `kind` only names the path in error messages.
  */
 export function validateVaultPathShape(path: string, kind: string): void {
-    if (!path || path.length > 1000) {
-        throw new Error(`Invalid ${kind} path`);
-    }
-    if (path.startsWith("/") || path.includes("\0") || path.includes("..")) {
-        throw new Error(`Invalid ${kind} path`);
-    }
-    if (path.includes(":")) {
-        throw new Error(`Invalid ${kind} path: ':' is not allowed`);
-    }
+    const problem = vaultPathShapeProblem(path);
+    if (problem !== null) throw new Error(`Invalid ${kind} path${problem}`);
+}
+
+/**
+ * Why `path` fails validateVaultPathShape, as the suffix of its error message
+ * ("" when there is no detail), or null when it passes. Non-throwing so hot
+ * paths like link parsing don't pay for an exception per rejected target.
+ */
+export function vaultPathShapeProblem(path: string): string | null {
+    if (!path || path.length > 1000) return "";
+    if (path.startsWith("/") || path.includes("\0") || path.includes("..")) return "";
+    if (path.includes(":")) return ": ':' is not allowed";
     for (const segment of path.split(/[/\\]/)) {
-        if (segment === "") {
-            throw new Error(`Invalid ${kind} path: empty path segment`);
-        }
-        if (segment.startsWith(".")) {
-            throw new Error(`Invalid ${kind} path: dot-folders and hidden files (e.g. .obsidian) are not allowed`);
-        }
+        if (segment === "") return ": empty path segment";
+        if (segment.startsWith(".")) return ": dot-folders and hidden files (e.g. .obsidian) are not allowed";
     }
+    return null;
 }
 
 export function validateNotePath(path: string): void {

@@ -9,7 +9,7 @@
  * either notes, executable in Obsidian, or stored by LiveSync as plain text.
  */
 
-import { validateVaultPathShape } from "./note-path.js";
+import { validateVaultPathShape, vaultPathShapeProblem } from "./note-path.js";
 
 /** Binary formats Obsidian embeds natively. SVG is left out on purpose: it is text and can carry script. */
 export const SUPPORTED_ATTACHMENT_EXTENSIONS: readonly string[] = [
@@ -51,7 +51,9 @@ export function attachmentExtension(path: string): string {
     return dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
 }
 
-export function validateAttachmentPath(path: string, allowed: ReadonlySet<string> = new Set(SUPPORTED_ATTACHMENT_EXTENSIONS)): void {
+const SUPPORTED = new Set(SUPPORTED_ATTACHMENT_EXTENSIONS);
+
+export function validateAttachmentPath(path: string, allowed: ReadonlySet<string> = SUPPORTED): void {
     validateVaultPathShape(path, "attachment");
     const ext = attachmentExtension(path);
     if (!ext || !allowed.has(ext)) {
@@ -61,11 +63,8 @@ export function validateAttachmentPath(path: string, allowed: ReadonlySet<string
     }
 }
 
-export function isValidAttachmentPath(path: string, allowed?: ReadonlySet<string>): boolean {
-    try {
-        validateAttachmentPath(path, allowed);
-        return true;
-    } catch {
-        return false;
-    }
+/** Boolean form of validateAttachmentPath. Doesn't throw: link parsing calls it for every link target. */
+export function isValidAttachmentPath(path: string, allowed: ReadonlySet<string> = SUPPORTED): boolean {
+    const ext = attachmentExtension(path);
+    return !!ext && allowed.has(ext) && vaultPathShapeProblem(path) === null;
 }

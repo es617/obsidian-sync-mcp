@@ -238,17 +238,19 @@ Also #shared inline`;
     });
 
     it("parses links in linear time on hostile input", () => {
+        const n = 40000;
         const hostile = [
-            "[".repeat(20000), "[[".repeat(10000), "[[a|".repeat(10000), "[[a#".repeat(10000),
-            "[](a".repeat(10000), "[](<".repeat(10000), "[a](b.md".repeat(10000),
-            "[[a]".repeat(10000), "[" + "[a]".repeat(10000), "[![a](b)".repeat(10000),
+            "[".repeat(2 * n), "[[".repeat(n), "[[a|".repeat(n), "[[a#".repeat(n),
+            "[](a".repeat(n), "[](<".repeat(n), "[a](b.md".repeat(n),
+            "[[a]".repeat(n), "[" + "[a]".repeat(n), "[![a](b)".repeat(n),
         ];
         for (const content of hostile) {
             const start = performance.now();
             parseFrontmatterAndLinks(content + " [[end]]");
             const ms = performance.now() - start;
-            // Unbounded patterns took 0.35-1.5 s on these; the bounded ones take under 50 ms.
-            assert.ok(ms < 200, `${JSON.stringify(content.slice(0, 8))}... took ${ms.toFixed(0)} ms`);
+            // Large enough that quadratic patterns take around 10 s here, so the
+            // limit is far above linear time even on a slow CI runner.
+            assert.ok(ms < 1000, `${JSON.stringify(content.slice(0, 8))}... took ${ms.toFixed(0)} ms`);
         }
         assert.deepEqual(parseFrontmatterAndLinks("[](a".repeat(10000) + " [[end]]").links, ["end"]);
     });
