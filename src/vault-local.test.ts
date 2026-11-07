@@ -1,11 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir, unlink, readFile } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod } from "fs/promises";
 import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
-import { AttachmentExistsError } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError } from "./vault-backend.js";
 import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
@@ -452,6 +452,32 @@ describe("attachments", () => {
         assert.equal(await vault.moveNote("self.md", "self.md"), true);
         assert.equal(await vault.readNote("self.md"), "still here");
         await vault.deleteNote("self.md");
+    });
+
+    it("renames a note when only the case changes, on a case-insensitive filesystem", async (t) => {
+        await vault.writeNote("Case.md", "x");
+        try {
+            if (!existsSync(join(tmpDir, "case.md"))) return t.skip("case-sensitive filesystem");
+            assert.equal(await vault.moveNote("Case.md", "case.md"), true);
+            assert.ok((await readdir(tmpDir)).includes("case.md"));
+        } finally {
+            await unlink(join(tmpDir, "case.md")).catch(() => {});
+            await unlink(join(tmpDir, "Case.md")).catch(() => {});
+        }
+    });
+
+    it("reports a move whose source could not be deleted, with both files kept", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+        await vault.writeAttachment("locked/src.png", bytes);
+        await chmod(join(tmpDir, "locked"), 0o555);
+        try {
+            await assert.rejects(() => vault.moveAttachment("locked/src.png", "free/dest.png"), AttachmentMoveIncompleteError);
+            assert.ok(existsSync(join(tmpDir, "locked/src.png")));
+            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "free/dest.png"))), bytes);
+        } finally {
+            await chmod(join(tmpDir, "locked"), 0o755);
+            await rm(join(tmpDir, "locked"), { recursive: true, force: true });
+            await rm(join(tmpDir, "free"), { recursive: true, force: true });
+        }
     });
 
     it("blocks an attachment write that escapes via a symlinked directory", async () => {

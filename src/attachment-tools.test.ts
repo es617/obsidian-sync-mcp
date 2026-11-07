@@ -5,7 +5,7 @@ import { UploadRegistry, UPLOAD_ROUTE_PREFIX } from "./uploads.js";
 import { memoryAttachments } from "./attachment-test-fixtures.js";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS } from "./attachment-path.js";
 import { SearchIndex } from "./search.js";
-import { AttachmentTooLargeError } from "./vault-backend.js";
+import { AttachmentTooLargeError, AttachmentMoveIncompleteError } from "./vault-backend.js";
 
 type Tool = { name: string; description: string; parameters: any; execute: (args: any) => Promise<string> };
 
@@ -138,17 +138,27 @@ describe("delete_attachment / move_attachment / get_attachment_metadata", () => 
         assert.ok(files.has("big.mp4") && !files.has("x.mp4"));
     });
 
+    it("move refuses a file of unknown size when there is a limit", async () => {
+        const { call, put, vault } = setup();
+        put("odd.mp4", 10);
+        vault.moveAttachment = async (from, _to, options) => {
+            throw new AttachmentTooLargeError(from, NaN, options!.maxBytes!);
+        };
+        assert.match(await call("move_attachment", { from: "odd.mp4", to: "x.mp4" }), /of unknown size, so it may be over the 1000 B limit/);
+    });
+
     it("move reports a copy left behind when the source could not be deleted", async () => {
         const { call, files, put, vault, searchIndex } = setup();
         put("a.png", 4);
         vault.moveAttachment = async (from, to) => {
             files.set(to, files.get(from)!);
-            return false;
+            throw new AttachmentMoveIncompleteError(from, to);
         };
         assert.match(await call("move_attachment", { from: "a.png", to: "b.png" }), /Copied a.png to b.png, but could not delete a.png/);
         assert.deepEqual(searchIndex.listAttachments().map((a) => a.path), ["a.png", "b.png"]);
+        // A plain failure is not reported as a copy, even when both files exist.
         vault.moveAttachment = async () => false;
-        assert.match(await call("move_attachment", { from: "a.png", to: "c.png" }), /^Failed to move: a.png → c.png$/);
+        assert.match(await call("move_attachment", { from: "a.png", to: "b.png", overwrite: true }), /^Failed to move: a.png → b.png$/);
     });
 
     it("metadata and delete report missing files", async () => {

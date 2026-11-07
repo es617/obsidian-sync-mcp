@@ -43,6 +43,14 @@ export class AttachmentTooLargeError extends Error {
     }
 }
 
+/** A copying move wrote the destination but could not delete the source, so both exist. */
+export class AttachmentMoveIncompleteError extends Error {
+    constructor(readonly from: string, readonly to: string) {
+        super(`Copied ${from} to ${to}, but could not delete ${from}`);
+        this.name = "AttachmentMoveIncompleteError";
+    }
+}
+
 /** A write or move without `overwrite` found a file already at the destination. */
 export class AttachmentExistsError extends Error {
     constructor(readonly path: string) {

@@ -11,7 +11,7 @@ import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileMani
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import { AttachmentExistsError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
 import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
@@ -456,7 +456,10 @@ export class Vault implements VaultBackend {
             const meta = await this.manipulator.get(from as FilePathWithPrefix, true);
             if (!meta) return false;
             if (from === to) return true;
-            if (maxBytes !== undefined && meta.size > maxBytes) throw new AttachmentTooLargeError(from, meta.size, maxBytes);
+            // Fails closed: a missing or non-numeric size doesn't let the file load.
+            if (maxBytes !== undefined && !(Number.isFinite(meta.size) && meta.size <= maxBytes)) {
+                throw new AttachmentTooLargeError(from, meta.size, maxBytes);
+            }
             if (fromId !== toId && !options.overwrite && (await this.manipulator.get(to as FilePathWithPrefix, true))) {
                 throw new AttachmentExistsError(to);
             }
@@ -464,6 +467,8 @@ export class Vault implements VaultBackend {
             if (!entry || !("data" in entry)) return false;
             const content = readContent(entry as LoadedEntry);
             const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
+            // The stored size can understate the file; check what was loaded too.
+            if (maxBytes !== undefined && bytes.byteLength > maxBytes) throw new AttachmentTooLargeError(from, bytes.byteLength, maxBytes);
             if (fromId === toId) {
                 // Case-only rename on a case-insensitive vault: one document,
                 // so rewrite it under the new path and delete nothing.
@@ -472,7 +477,14 @@ export class Vault implements VaultBackend {
             const wrote = await this.writeAttachmentUnlocked(to, bytes, options);
             if (!wrote) return false;
             clearHandlers();
-            return await this.manipulator.delete(from);
+            let deleted = false;
+            try {
+                deleted = await this.manipulator.delete(from);
+            } catch {
+                // Reported below: the copy exists either way.
+            }
+            if (!deleted) throw new AttachmentMoveIncompleteError(from, to);
+            return true;
         });
     }
 

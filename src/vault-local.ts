@@ -5,7 +5,10 @@ import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
-import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
+
+// Not defined on Windows, which has no symlinks a non-admin can create anyway.
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export class LocalVault implements VaultBackend {
     private root: string;
@@ -48,6 +51,23 @@ export class LocalVault implements VaultBackend {
             throw new Error(`Refusing to modify a symlink: ${path}`);
         }
         return real;
+    }
+
+    /**
+     * mkdir for an attachment write to `fullPath` (from safePath), then check
+     * the path again: a folder swapped for a symlink since would redirect the
+     * write. Returns false when mkdir fails.
+     */
+    private async mkdirChecked(path: string, fullPath: string): Promise<boolean> {
+        try {
+            await mkdir(dirname(fullPath), { recursive: true });
+        } catch {
+            return false;
+        }
+        if ((await this.safePath(path, "attachment", { noSymlink: true })) !== fullPath) {
+            throw new Error("Path traversal blocked");
+        }
+        return true;
     }
 
     private isValidKind(rel: string, kind: "note" | "attachment"): boolean {
@@ -145,6 +165,16 @@ export class LocalVault implements VaultBackend {
     async moveNote(from: string, to: string): Promise<boolean> {
         const fromPath = await this.safePath(from, "note");
         const toPath = await this.safePath(to, "note");
+        if (fromPath === toPath) {
+            // Same file: a no-op, or a case-only rename on a case-insensitive
+            // filesystem, where toPath is the realpath and has the old case.
+            try {
+                await rename(fromPath, resolve(this.root, to));
+                return true;
+            } catch {
+                return false;
+            }
+        }
         try {
             await mkdir(dirname(toPath), { recursive: true });
             await rename(fromPath, toPath);
@@ -214,14 +244,17 @@ export class LocalVault implements VaultBackend {
 
     async writeAttachment(path: string, data: Uint8Array, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
         const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
+        if (!(await this.mkdirChecked(path, fullPath))) return false;
         try {
-            await mkdir(dirname(fullPath), { recursive: true });
-            // "wx" (O_EXCL) fails if the file exists, in the same step as the
-            // create, so two concurrent creates can't both succeed.
-            await writeFile(fullPath, data, { flag: overwrite ? "w" : "wx" });
+            // O_EXCL fails if the file exists, in the same step as the create,
+            // so two concurrent creates can't both succeed. O_NOFOLLOW refuses
+            // a symlink put in place since safePath checked.
+            const flag = constants.O_WRONLY | constants.O_CREAT | (overwrite ? constants.O_TRUNC : constants.O_EXCL) | NOFOLLOW;
+            await writeFile(fullPath, data, { flag });
             return true;
         } catch (e: any) {
             if (e.code === "EEXIST") throw new AttachmentExistsError(path);
+            if (e.code === "ELOOP") throw new Error(`Refusing to modify a symlink: ${path}`);
             return false;
         }
     }
@@ -249,17 +282,15 @@ export class LocalVault implements VaultBackend {
                 return false;
             }
         }
+        if (!(await this.mkdirChecked(to, toPath))) return false;
         try {
-            await mkdir(dirname(toPath), { recursive: true });
             if (overwrite) {
                 await rename(fromPath, toPath);
-            } else {
-                // rename would replace an existing destination; link fails
-                // with EEXIST instead.
-                await link(fromPath, toPath);
-                await unlink(fromPath);
+                return true;
             }
-            return true;
+            // rename would replace an existing destination; link fails with
+            // EEXIST instead.
+            await link(fromPath, toPath);
         } catch (e: any) {
             if (e.code === "EEXIST") throw new AttachmentExistsError(to);
             // Cross-device, or a filesystem without hard links: copy, then delete.
@@ -270,12 +301,13 @@ export class LocalVault implements VaultBackend {
                 if (copyErr.code === "EEXIST") throw new AttachmentExistsError(to);
                 return false;
             }
-            try {
-                await unlink(fromPath);
-                return true;
-            } catch {
-                return false;
-            }
+        }
+        // The destination now exists, by link or copy; only the source is left.
+        try {
+            await unlink(fromPath);
+            return true;
+        } catch {
+            throw new AttachmentMoveIncompleteError(from, to);
         }
     }
 
