@@ -5,6 +5,7 @@ import { watch } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
+import { AttachmentExistsError } from "./vault-backend.js";
 import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
@@ -393,6 +394,57 @@ describe("attachments", () => {
         await assert.rejects(() => vault.writeAttachment(".obsidian/plugins/x/main.js", bytes), /Invalid attachment path/);
         await assert.rejects(() => vault.writeAttachment("../escape.png", bytes), /Invalid attachment path/);
         await assert.rejects(() => vault.moveAttachment("a.png", "a.md"), /Invalid attachment path/);
+    });
+
+    it("refuses to replace an existing file unless overwrite is set", async () => {
+        const other = new Uint8Array([1, 2, 3]);
+        await vault.writeAttachment("Attachments/ow.png", bytes);
+        await assert.rejects(() => vault.writeAttachment("Attachments/ow.png", other), AttachmentExistsError);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/ow.png"))), bytes);
+        assert.equal(await vault.writeAttachment("Attachments/ow.png", other, { overwrite: true }), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/ow.png"))), other);
+        await vault.deleteAttachment("Attachments/ow.png");
+    });
+
+    it("lets exactly one of two concurrent creates of the same path win", async () => {
+        const a = new Uint8Array(64 * 1024).fill(1);
+        const b = new Uint8Array(64 * 1024).fill(2);
+        const results = await Promise.allSettled([
+            vault.writeAttachment("Attachments/race.png", a),
+            vault.writeAttachment("Attachments/race.png", b),
+        ]);
+        assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+        const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        assert.ok(rejected.reason instanceof AttachmentExistsError);
+        const winner = results[0].status === "fulfilled" ? a : b;
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/race.png"))), winner);
+        await vault.deleteAttachment("Attachments/race.png");
+    });
+
+    it("moves onto an existing file only with overwrite, keeping both files otherwise", async () => {
+        const other = new Uint8Array([9, 9]);
+        await vault.writeAttachment("Attachments/m1.png", bytes);
+        await vault.writeAttachment("Attachments/m2.png", other);
+        await assert.rejects(() => vault.moveAttachment("Attachments/m1.png", "Attachments/m2.png"), AttachmentExistsError);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m1.png"))), bytes);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m2.png"))), other);
+        assert.equal(await vault.moveAttachment("Attachments/m1.png", "Attachments/m2.png", { overwrite: true }), true);
+        assert.equal(await vault.getAttachmentInfo("Attachments/m1.png"), null);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/m2.png"))), bytes);
+        await vault.deleteAttachment("Attachments/m2.png");
+    });
+
+    it("keeps the file when moving an attachment or note onto itself", async () => {
+        await vault.writeAttachment("Attachments/self.png", bytes);
+        assert.equal(await vault.moveAttachment("Attachments/self.png", "Attachments/self.png"), true);
+        assert.equal(await vault.moveAttachment("Attachments/self.png", "Attachments/self.png", { overwrite: true }), true);
+        assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "Attachments/self.png"))), bytes);
+        await vault.deleteAttachment("Attachments/self.png");
+
+        await vault.writeNote("self.md", "still here");
+        assert.equal(await vault.moveNote("self.md", "self.md"), true);
+        assert.equal(await vault.readNote("self.md"), "still here");
+        await vault.deleteNote("self.md");
     });
 
     it("blocks an attachment write that escapes via a symlinked directory", async () => {

@@ -18,6 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
+import { AttachmentExistsError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
 import { randomBytes } from "node:crypto";
@@ -46,7 +47,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -343,6 +344,56 @@ step("Attachments: encrypted + obfuscated binary round-trip");
     await assert.rejects(() => reader.writeAttachment("obsydian_livesync_version", bytes), /Invalid attachment path/);
     await reader.close();
     console.log(`attachment: ${entry.children.length} encrypted chunks, byte-exact after reopen, move and delete`);
+}
+
+// --- Overwrite protection and same-document moves ---
+// Plain ids so the stored path is readable; LiveSync's default is
+// case-insensitive, so ids are lowercased and Foo.png / foo.png are one doc.
+step("Attachments/notes: atomic create, move onto itself, case-only rename");
+{
+    const v = new Vault({ ...base, database: "movevault", passphrase });
+    await v.init();
+    const a = new Uint8Array(randomBytes(4096));
+    const b = new Uint8Array(randomBytes(4096));
+
+    // Two concurrent creates of one path: exactly one wins, the other is refused.
+    const results = await Promise.allSettled([v.writeAttachment("A/race.png", a), v.writeAttachment("A/race.png", b)]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "one create wins");
+    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof AttachmentExistsError, String(lost.reason));
+    const winner = results[0].status === "fulfilled" ? a : b;
+    const stored: any = await (v as any).manipulator.get("A/race.png");
+    assert.ok(Buffer.from(readContent(stored) as ArrayBuffer).equals(Buffer.from(winner)), "the winner's bytes are stored");
+    await assert.rejects(() => v.writeAttachment("A/race.png", b), AttachmentExistsError);
+    assert.equal(await v.writeAttachment("A/race.png", b, { overwrite: true }), true);
+
+    // Moving onto an existing file needs overwrite; refusing keeps both files.
+    assert.equal(await v.writeAttachment("A/other.png", a), true);
+    await assert.rejects(() => v.moveAttachment("A/race.png", "A/other.png"), AttachmentExistsError);
+    assert.ok(await v.getAttachmentInfo("A/race.png"), "source kept after a refused move");
+    assert.ok(await v.getAttachmentInfo("A/other.png"), "destination kept after a refused move");
+
+    // Onto itself, with overwrite: the file must survive.
+    assert.equal(await v.moveAttachment("A/other.png", "A/other.png", { overwrite: true }), true);
+    assert.equal((await v.getAttachmentInfo("A/other.png"))?.size, a.byteLength, "moving onto itself keeps the file");
+
+    // Case-only rename maps to the same doc: the file survives under the new name.
+    assert.equal(await v.moveAttachment("A/other.png", "A/Other.png"), true);
+    const renamed: any = await (v as any).manipulator.get("A/Other.png");
+    assert.ok(renamed && !renamed.deleted, "file survives a case-only rename");
+    assert.equal(renamed.path, "A/Other.png", "stored path takes the new case");
+    assert.ok(Buffer.from(readContent(renamed) as ArrayBuffer).equals(Buffer.from(a)), "bytes intact after the rename");
+
+    // Same for notes.
+    assert.equal(await v.writeNote("N/Self.md", "keep me"), true);
+    assert.equal(await v.moveNote("N/Self.md", "N/Self.md"), true);
+    assert.equal(await v.readNote("N/Self.md"), "keep me", "moving a note onto itself keeps it");
+    assert.equal(await v.moveNote("N/Self.md", "N/self.md"), true);
+    assert.equal(await v.readNote("N/self.md"), "keep me", "note survives a case-only rename");
+    assert.ok((await v.listNotes()).includes("N/self.md"), "listed under the new case");
+    assert.ok(!(await v.listNotes()).includes("N/Self.md"), "old case gone");
+    await v.close();
+    console.log("atomic create, refused overwrite on move, self-move and case-only renames keep the file");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

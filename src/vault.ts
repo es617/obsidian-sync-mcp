@@ -11,7 +11,8 @@ import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileMani
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import type { VaultBackend, NoteInfo, NoteListing, AttachmentInfo, AttachmentChangeCallback } from "./vault-backend.js";
+import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
 import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
@@ -54,6 +55,8 @@ export class Vault implements VaultBackend {
     // Obfuscation actually in effect after reconciling with the database, which
     // can differ from the configured value.
     private obfuscatePathsEffective = false;
+    // Serializes attachment writes per document id (see writeAttachmentUnlocked).
+    private attachmentLock = new KeyedLock();
 
     constructor(config: VaultConfig) {
         this.config = config;
@@ -359,8 +362,13 @@ export class Vault implements VaultBackend {
         this.validatePath(to);
         const content = await this.readNote(from);
         if (content === null) return false;
+        if (from === to) return true;
         const wrote = await this.writeNote(to, content);
         if (!wrote) return false;
+        // A case-only rename on a case-insensitive vault (LiveSync's default)
+        // is one document, which the write above already renamed.
+        const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
+        if (fromId === (await this.manipulator.path2id(to as FilePathWithPrefix))) return true;
         return await this.deleteNote(from);
     }
 
@@ -397,11 +405,23 @@ export class Vault implements VaultBackend {
         return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
-    async writeAttachment(path: string, data: Uint8Array): Promise<boolean> {
+    async writeAttachment(path: string, data: Uint8Array, options: WriteOptions = {}): Promise<boolean> {
         validateAttachmentPath(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.attachmentLock.run([id], () => this.writeAttachmentUnlocked(path, data, options));
+    }
+
+    /**
+     * The library's put always writes over the current revision, so "create
+     * unless it exists" can't be one CouchDB request. Callers hold the
+     * document's lock instead, which covers writes made by this server; a
+     * concurrent write from Obsidian is left to LiveSync's conflict handling.
+     */
+    private async writeAttachmentUnlocked(path: string, data: Uint8Array, { overwrite = false }: WriteOptions): Promise<boolean> {
         clearHandlers();
         let ctime = Date.now();
         const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (existing && !overwrite) throw new AttachmentExistsError(path);
         if (existing && "ctime" in existing) {
             ctime = existing.ctime;
         }
@@ -418,20 +438,34 @@ export class Vault implements VaultBackend {
 
     async deleteAttachment(path: string): Promise<boolean> {
         validateAttachmentPath(path);
-        clearHandlers();
-        return await this.manipulator.delete(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.attachmentLock.run([id], async () => {
+            clearHandlers();
+            return await this.manipulator.delete(path);
+        });
     }
 
-    async moveAttachment(from: string, to: string): Promise<boolean> {
+    async moveAttachment(from: string, to: string, options: WriteOptions = {}): Promise<boolean> {
         validateAttachmentPath(from);
         validateAttachmentPath(to);
-        const entry = await this.manipulator.get(from as FilePathWithPrefix);
-        if (!entry || !("data" in entry)) return false;
-        const content = readContent(entry as LoadedEntry);
-        const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
-        const wrote = await this.writeAttachment(to, bytes);
-        if (!wrote) return false;
-        return await this.deleteAttachment(from);
+        const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
+        const toId = await this.manipulator.path2id(to as FilePathWithPrefix);
+        return await this.attachmentLock.run([fromId, toId], async () => {
+            const entry = await this.manipulator.get(from as FilePathWithPrefix);
+            if (!entry || !("data" in entry)) return false;
+            if (from === to) return true;
+            const content = readContent(entry as LoadedEntry);
+            const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
+            if (fromId === toId) {
+                // Case-only rename on a case-insensitive vault: one document,
+                // so rewrite it under the new path and delete nothing.
+                return await this.writeAttachmentUnlocked(to, bytes, { overwrite: true });
+            }
+            const wrote = await this.writeAttachmentUnlocked(to, bytes, options);
+            if (!wrote) return false;
+            clearHandlers();
+            return await this.manipulator.delete(from);
+        });
     }
 
     async getAttachmentInfo(path: string): Promise<AttachmentInfo | null> {

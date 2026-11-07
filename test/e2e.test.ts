@@ -426,6 +426,21 @@ describe("E2E: attachments", () => {
         assert.ok(!existsSync(join(vaultDir, "Attachments/big.pdf")));
     });
 
+    it("lets only one of two concurrent uploads to the same new path succeed", async () => {
+        const urls: string[] = [];
+        for (let i = 0; i < 2; i++) {
+            const out = await callTool("create_attachment_upload", { path: "Attachments/race.png" });
+            urls.push(out.match(/http:\/\/\S+\/attachments\/upload\/[A-Za-z0-9_-]+/)![0]);
+        }
+        const bodies = [new Uint8Array(900).fill(1), new Uint8Array(900).fill(2)];
+        const responses = await Promise.all(urls.map((url, i) => fetch(url, { method: "PUT", body: bodies[i] })));
+        const statuses = responses.map((r) => r.status).sort();
+        assert.deepEqual(statuses, [201, 409]);
+        const winner = bodies[responses.findIndex((r) => r.status === 201)];
+        assert.deepEqual(new Uint8Array(readFileSync(join(vaultDir, "Attachments/race.png"))), winner);
+        await callTool("delete_attachment", { path: "Attachments/race.png" });
+    });
+
     it("writes small files inline, moves and deletes them, and keeps them out of note listings", async () => {
         const saved = await callTool("write_attachment", { path: "Attachments/tiny.png", content_base64: Buffer.from(png).toString("base64") });
         assert.ok(saved.startsWith("Attachment saved"), saved);

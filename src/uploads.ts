@@ -12,12 +12,12 @@
  * The token is the credential for the upload route: 32 random bytes, valid for
  * one request and a few minutes, and only for the path it was minted for. All
  * policy (path validation, WRITE_FOLDERS, size limit, overwrite) is decided
- * when the handle is created and re-checked where it can change (overwrite).
+ * when the handle is created, and overwrite is checked again at write time.
  */
 
 import { randomBytes } from "crypto";
 import type { Hono } from "hono";
-import type { VaultBackend } from "./vault-backend.js";
+import { AttachmentExistsError, type VaultBackend } from "./vault-backend.js";
 
 export const UPLOAD_ROUTE_PREFIX = "/attachments/upload/";
 
@@ -150,13 +150,13 @@ export function mountAttachmentUpload(app: Hono, { registry, vault, onWritten }:
             return c.json({ error: `Upload is ${data.byteLength} bytes but ${handle.expectedSize} were declared` }, 400);
         }
         try {
-            // Re-check: something may have been written there since the handle was made.
-            if (!handle.overwrite && (await vault.getAttachmentInfo(handle.path))) {
-                return c.json({ error: `Attachment already exists: ${handle.path}` }, 409);
-            }
-            const ok = await vault.writeAttachment(handle.path, data);
+            // Overwrite is checked again here: a file may have appeared since the handle was made.
+            const ok = await vault.writeAttachment(handle.path, data, { overwrite: handle.overwrite });
             if (!ok) return c.json({ error: `Failed to write attachment: ${handle.path}` }, 500);
         } catch (err) {
+            if (err instanceof AttachmentExistsError) {
+                return c.json({ error: `Attachment already exists: ${handle.path}` }, 409);
+            }
             return c.json({ error: `Failed to write attachment: ${(err as Error).message}` }, 500);
         }
         onWritten?.(handle.path, data.byteLength);

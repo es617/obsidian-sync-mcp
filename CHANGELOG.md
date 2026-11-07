@@ -10,6 +10,9 @@
 - Markdown links and embeds that point at attachment files (`![](Attachments/shot.png)`, `[report](<docs/Q1 report.pdf>)`) are now recorded as links, URL-decoded, like `![[shot.png]]` already was. They show up under "Outgoing links" in `get_note_metadata`.
 - Link targets no longer keep a `#heading`, `#^block` or `#page=2` suffix: `[[Note#Heading]]` and `[x](Note.md#Heading)` now count as backlinks to the note, and `![[paper.pdf#page=2]]` / `![](clip.mp4#t=10)` count as uses of the file. `[[#Heading]]` (a heading in the same note) is not recorded as a link.
 
+### Fixes
+- `move_note` in CouchDB mode no longer deletes the note when the source and destination are the same document: the same path, or a case-only rename (`Foo.md` → `foo.md`) on a vault with LiveSync's default case-insensitive file names. A case-only rename now renames the note.
+
 ## 0.10.0
 
 This release hardens the default Docker and docker-compose deployment and speeds up startup on large CouchDB vaults. **It contains breaking changes to the Docker/compose defaults** — see the upgrade note.

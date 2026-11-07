@@ -22,6 +22,19 @@ export interface AttachmentInfo {
 /** An attachment appeared or changed (info), or was deleted (null). */
 export type AttachmentChangeCallback = (path: string, info: { size: number; mtime: number } | null) => void;
 
+export interface WriteOptions {
+    /** Replace an existing file. Default false. */
+    overwrite?: boolean;
+}
+
+/** A write or move without `overwrite` found a file already at the destination. */
+export class AttachmentExistsError extends Error {
+    constructor(readonly path: string) {
+        super(`Attachment already exists: ${path}`);
+        this.name = "AttachmentExistsError";
+    }
+}
+
 export interface VaultBackend {
     init(): Promise<void>;
     close(): Promise<void>;
@@ -32,10 +45,14 @@ export interface VaultBackend {
     getMetadata(path: string): Promise<NoteInfo | null>;
     listNotes(folder?: string): Promise<string[]>;
     listNotesWithMtime(folder?: string): Promise<NoteListing[]>;
-    /** Binary attachments (see attachment-path.ts). Paths are validated by the backend too. */
-    writeAttachment(path: string, data: Uint8Array): Promise<boolean>;
+    /**
+     * Binary attachments (see attachment-path.ts). Paths are validated by the backend too.
+     * Without `overwrite`, writing or moving onto an existing file throws
+     * AttachmentExistsError, checked in the same step as the write.
+     */
+    writeAttachment(path: string, data: Uint8Array, options?: WriteOptions): Promise<boolean>;
     deleteAttachment(path: string): Promise<boolean>;
-    moveAttachment(from: string, to: string): Promise<boolean>;
+    moveAttachment(from: string, to: string, options?: WriteOptions): Promise<boolean>;
     getAttachmentInfo(path: string): Promise<AttachmentInfo | null>;
     /** Every attachment in the vault. Local mode only; CouchDB mode learns them from the change feed. */
     listAttachments?(): Promise<AttachmentInfo[]>;

@@ -1,11 +1,11 @@
-import { readFile, writeFile, unlink, mkdir, stat, realpath, rename } from "fs/promises";
+import { readFile, writeFile, unlink, mkdir, stat, realpath, rename, link, copyFile } from "fs/promises";
 import { dirname, resolve, sep } from "path";
-import { realpathSync } from "fs";
+import { realpathSync, constants } from "fs";
 import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
-import type { VaultBackend, NoteInfo, NoteListing, AttachmentInfo } from "./vault-backend.js";
+import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions } from "./vault-backend.js";
 
 export class LocalVault implements VaultBackend {
     private root: string;
@@ -163,13 +163,16 @@ export class LocalVault implements VaultBackend {
         return results.sort((a, b) => a.path.localeCompare(b.path));
     }
 
-    async writeAttachment(path: string, data: Uint8Array): Promise<boolean> {
+    async writeAttachment(path: string, data: Uint8Array, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
         const fullPath = await this.safePath(path, "attachment");
         try {
             await mkdir(dirname(fullPath), { recursive: true });
-            await writeFile(fullPath, data);
+            // "wx" (O_EXCL) fails if the file exists, in the same step as the
+            // create, so two concurrent creates can't both succeed.
+            await writeFile(fullPath, data, { flag: overwrite ? "w" : "wx" });
             return true;
-        } catch {
+        } catch (e: any) {
+            if (e.code === "EEXIST") throw new AttachmentExistsError(path);
             return false;
         }
     }
@@ -184,19 +187,41 @@ export class LocalVault implements VaultBackend {
         }
     }
 
-    async moveAttachment(from: string, to: string): Promise<boolean> {
+    async moveAttachment(from: string, to: string, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
         const fromPath = await this.safePath(from, "attachment");
         const toPath = await this.safePath(to, "attachment");
+        if (fromPath === toPath) {
+            // Same file, which link below would refuse with EEXIST. rename is a
+            // no-op here, or the case-only rename on a case-insensitive filesystem.
+            try {
+                await rename(fromPath, resolve(this.root, to));
+                return true;
+            } catch {
+                return false;
+            }
+        }
         try {
             await mkdir(dirname(toPath), { recursive: true });
-            await rename(fromPath, toPath);
+            if (overwrite) {
+                await rename(fromPath, toPath);
+            } else {
+                // rename would replace an existing destination; link fails
+                // with EEXIST instead.
+                await link(fromPath, toPath);
+                await unlink(fromPath);
+            }
             return true;
         } catch (e: any) {
-            if (e.code !== "EXDEV") return false;
-            // Cross-device: fall back to copy-delete
+            if (e.code === "EEXIST") throw new AttachmentExistsError(to);
+            // Cross-device, or a filesystem without hard links: copy, then delete.
+            if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(e.code)) return false;
             try {
-                const data = await readFile(fromPath);
-                await writeFile(toPath, data);
+                await copyFile(fromPath, toPath, overwrite ? 0 : constants.COPYFILE_EXCL);
+            } catch (copyErr: any) {
+                if (copyErr.code === "EEXIST") throw new AttachmentExistsError(to);
+                return false;
+            }
+            try {
                 await unlink(fromPath);
                 return true;
             } catch {

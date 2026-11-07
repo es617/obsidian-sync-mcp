@@ -10,7 +10,7 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
-import type { VaultBackend } from "./vault-backend.js";
+import { AttachmentExistsError, type VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 import { isPathWritable } from "./write-scope.js";
 import { validateAttachmentPath, attachmentExtension } from "./attachment-path.js";
@@ -248,10 +248,15 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             if (data.byteLength > base64MaxBytes) {
                 return `File is ${formatBytes(data.byteLength)}, over the inline limit of ${formatBytes(base64MaxBytes)}. Use create_attachment_upload instead.`;
             }
-            if (!overwrite && (await vault.getAttachmentInfo(path))) {
-                return `Attachment already exists: ${path}. Pass overwrite=true to replace it, or choose another path.`;
+            let ok: boolean;
+            try {
+                ok = await vault.writeAttachment(path, data, { overwrite: !!overwrite });
+            } catch (err) {
+                if (err instanceof AttachmentExistsError) {
+                    return `Attachment already exists: ${path}. Pass overwrite=true to replace it, or choose another path.`;
+                }
+                throw err;
             }
-            const ok = await vault.writeAttachment(path, data);
             if (!ok) return `Failed to write attachment: ${path}`;
             searchIndex.updateAttachment(path, data.byteLength, Date.now());
             return `Attachment saved: ${path} (${formatBytes(data.byteLength)})\nEmbed: ![[${path}]]\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
@@ -292,10 +297,15 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             if (denied) return denied;
             const source = await vault.getAttachmentInfo(from);
             if (!source) return `Attachment not found: ${from}`;
-            if (!overwrite && (await vault.getAttachmentInfo(to))) {
-                return `Attachment already exists: ${to}. Pass overwrite=true to replace it.`;
+            let ok: boolean;
+            try {
+                ok = await vault.moveAttachment(from, to, { overwrite: !!overwrite });
+            } catch (err) {
+                if (err instanceof AttachmentExistsError) {
+                    return `Attachment already exists: ${to}. Pass overwrite=true to replace it.`;
+                }
+                throw err;
             }
-            const ok = await vault.moveAttachment(from, to);
             if (!ok) return `Failed to move: ${from} → ${to}`;
             searchIndex.removeAttachment(from);
             searchIndex.updateAttachment(to, source.size, Date.now());
