@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
+
+This release adds opt-in support for binary attachments (images, PDFs, audio and video) in both filesystem and CouchDB mode, and fixes several link-parsing and local-mode path issues found while reviewing it. Attachments are off unless `ATTACHMENTS_ENABLED=true`, so existing deployments are unchanged.
 
 ### Features
-- **Binary attachments (#21), opt-in with `ATTACHMENTS_ENABLED=true`.** Agents can store images, PDFs, audio and video in the vault and embed them in notes with `![[path]]`. New tools: `create_attachment_upload`, `write_attachment`, `move_attachment`, `delete_attachment`, `get_attachment_metadata`, `list_attachments`. Large files go through a single-use upload URL (`PUT BASE_URL/attachments/upload/<token>`) so the bytes never pass through the model; `write_attachment` takes base64 as a fallback for tiny files (default limit 32 KB, about 13k output tokens). In CouchDB mode files are written through livesync-commonlib as LiveSync binary entries (chunked, encrypted, path-obfuscated), so they sync like files added in Obsidian. `READ_ONLY` and `WRITE_FOLDERS` apply; overwriting needs `overwrite=true`. Limits: `ATTACHMENT_MAX_BYTES`, `ATTACHMENT_INLINE_MAX_BYTES`, `ATTACHMENT_UPLOAD_TTL_SECONDS`, `ATTACHMENT_EXTENSIONS`.
+- **Binary attachments (#21), opt-in with `ATTACHMENTS_ENABLED=true`.** Agents can store images, PDFs, audio and video in the vault and embed them in notes with `![[path]]`. New tools: `create_attachment_upload`, `write_attachment`, `move_attachment`, `delete_attachment`, `get_attachment_metadata`, `list_attachments`. Large files go through a single-use upload URL (`PUT BASE_URL/attachments/upload/<token>`) so the bytes never pass through the model; `write_attachment` takes base64 as a fallback for tiny files (default limit 32 KB, about 13k output tokens). In CouchDB mode files are written through livesync-commonlib as LiveSync binary entries (chunked, encrypted, path-obfuscated), so they sync like files added in Obsidian. `READ_ONLY` and `WRITE_FOLDERS` apply; overwriting needs `overwrite=true`. Limits: `ATTACHMENT_MAX_BYTES`, `ATTACHMENT_INLINE_MAX_BYTES`, `ATTACHMENT_UPLOAD_TTL_SECONDS`, `ATTACHMENT_EXTENSIONS`. Requested by @axsuul, contributed by @hallgeirl (#56).
 - `list_attachments` lists attachments with size, date and how many notes use each, with folder/name/extension filters, sorting by name, date or size, and `unreferenced=true` to find files no note uses. It is served from the metadata index: attachment paths, sizes and mtimes are learned from the CouchDB change feed without downloading file contents (or, in filesystem mode, from a startup scan and the file watcher) and persisted with the rest of the index.
 
 ### Changes
@@ -16,6 +18,17 @@
 - Local mode: a symlink inside the vault could point a note or attachment operation at a file its name doesn't allow, such as `a.png` → a note or `.obsidian/` file, which the attachment tools could then overwrite or delete. The resolved path now has to pass the same checks as the name, and the attachment tools refuse to write, delete or move a symlink itself.
 - `move_note` in CouchDB mode no longer deletes the note when the source and destination are the same document: the same path, or a case-only rename (`Foo.md` → `foo.md`) on a vault with LiveSync's default case-insensitive file names. A case-only rename now renames the note.
 - Local mode: a case-only `move_note` (`Foo.md` → `foo.md`) on a case-insensitive filesystem reported success but kept the old name. It now renames the file.
+
+### Dependencies
+- Bump `zod` to v4 and refresh the lockfile to clear `npm audit` findings (#53).
+- Bump the pinned `node:22-slim` base image digest (#51, #54, Dependabot).
+
+### CI
+- Bump `docker/login-action` (#55, Dependabot).
+
+### Upgrade note
+- No action is needed. To enable attachments, set `ATTACHMENTS_ENABLED=true` and make sure `BASE_URL` is reachable by your agents, since upload URLs are served from it. If a reverse proxy allowlists paths, match the exact upload URL rather than a prefix (see the README).
+- Backlinks now include links with a `#heading` or `#^block` suffix and markdown links such as `[x](Note.md#Heading)`, so `get_note_metadata` may show more backlinks than before. The index rebuilds itself at startup.
 
 ## 0.10.0
 
