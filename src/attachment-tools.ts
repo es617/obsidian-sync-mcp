@@ -10,7 +10,7 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
-import { AttachmentExistsError, type VaultBackend } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentTooLargeError, type VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 import { isPathWritable } from "./write-scope.js";
 import { validateAttachmentPath, attachmentExtension } from "./attachment-path.js";
@@ -299,14 +299,24 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             if (!source) return `Attachment not found: ${from}`;
             let ok: boolean;
             try {
-                ok = await vault.moveAttachment(from, to, { overwrite: !!overwrite });
+                ok = await vault.moveAttachment(from, to, { overwrite: !!overwrite, maxBytes });
             } catch (err) {
                 if (err instanceof AttachmentExistsError) {
                     return `Attachment already exists: ${to}. Pass overwrite=true to replace it.`;
                 }
+                if (err instanceof AttachmentTooLargeError) {
+                    return `Attachment is ${formatBytes(err.size)}, over the ${formatBytes(maxBytes)} limit for moving it here. Move it in Obsidian instead.`;
+                }
                 throw err;
             }
-            if (!ok) return `Failed to move: ${from} → ${to}`;
+            if (!ok) {
+                // A copying move can fail after the copy is written, leaving both.
+                if (from !== to && (await vault.getAttachmentInfo(from)) && (await vault.getAttachmentInfo(to))) {
+                    searchIndex.updateAttachment(to, source.size, Date.now());
+                    return `Copied ${from} to ${to}, but could not delete ${from}. Both exist now; delete it with delete_attachment if needed.`;
+                }
+                return `Failed to move: ${from} → ${to}`;
+            }
             searchIndex.removeAttachment(from);
             searchIndex.updateAttachment(to, source.size, Date.now());
             const backlinks = searchIndex.getAttachmentReferences(from);

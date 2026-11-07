@@ -11,7 +11,7 @@ import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileMani
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
 import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
@@ -445,15 +445,23 @@ export class Vault implements VaultBackend {
         });
     }
 
-    async moveAttachment(from: string, to: string, options: WriteOptions = {}): Promise<boolean> {
+    async moveAttachment(from: string, to: string, { maxBytes, ...options }: MoveOptions = {}): Promise<boolean> {
         validateAttachmentPath(from);
         validateAttachmentPath(to);
         const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
         const toId = await this.manipulator.path2id(to as FilePathWithPrefix);
         return await this.attachmentLock.run([fromId, toId], async () => {
+            // Checked from metadata first: a move loads the whole file, and a
+            // file added in Obsidian can be far larger than any upload.
+            const meta = await this.manipulator.get(from as FilePathWithPrefix, true);
+            if (!meta) return false;
+            if (from === to) return true;
+            if (maxBytes !== undefined && meta.size > maxBytes) throw new AttachmentTooLargeError(from, meta.size, maxBytes);
+            if (fromId !== toId && !options.overwrite && (await this.manipulator.get(to as FilePathWithPrefix, true))) {
+                throw new AttachmentExistsError(to);
+            }
             const entry = await this.manipulator.get(from as FilePathWithPrefix);
             if (!entry || !("data" in entry)) return false;
-            if (from === to) return true;
             const content = readContent(entry as LoadedEntry);
             const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
             if (fromId === toId) {

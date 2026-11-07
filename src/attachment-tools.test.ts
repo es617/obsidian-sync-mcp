@@ -5,6 +5,7 @@ import { UploadRegistry, UPLOAD_ROUTE_PREFIX } from "./uploads.js";
 import { memoryAttachments } from "./attachment-test-fixtures.js";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS } from "./attachment-path.js";
 import { SearchIndex } from "./search.js";
+import { AttachmentTooLargeError } from "./vault-backend.js";
 
 type Tool = { name: string; description: string; parameters: any; execute: (args: any) => Promise<string> };
 
@@ -40,7 +41,7 @@ function setup(overrides: Partial<AttachmentToolOptions> = {}) {
         files.set(path, { data: new Uint8Array(size), ctime: 1, mtime });
         searchIndex.updateAttachment(path, size, mtime);
     };
-    return { tools, files, registry, call, embed, put, searchIndex };
+    return { tools, files, registry, call, embed, put, searchIndex, vault };
 }
 
 const b64 = (arr: number[]) => Buffer.from(arr).toString("base64");
@@ -118,6 +119,36 @@ describe("delete_attachment / move_attachment / get_attachment_metadata", () => 
         assert.match(out, /still embed the old path: note.md/);
         assert.equal(files.has("a.png"), false);
         assert.deepEqual(searchIndex.listAttachments().map((a) => [a.path, a.size]), [["b.png", 1], ["c.png", 4]], "index follows the move");
+    });
+
+    it("move passes the size limit to the backend and explains a refusal", async () => {
+        const { call, files, put, vault } = setup();
+        put("big.mp4", 1500);
+        const seen: any[] = [];
+        const original = vault.moveAttachment.bind(vault);
+        vault.moveAttachment = async (from, to, options) => {
+            seen.push(options);
+            if (options?.maxBytes !== undefined && files.get(from)!.data.byteLength > options.maxBytes) {
+                throw new AttachmentTooLargeError(from, files.get(from)!.data.byteLength, options.maxBytes);
+            }
+            return original(from, to, options);
+        };
+        assert.match(await call("move_attachment", { from: "big.mp4", to: "x.mp4" }), /over the 1000 B limit for moving it here/);
+        assert.deepEqual(seen, [{ overwrite: false, maxBytes: 1000 }]);
+        assert.ok(files.has("big.mp4") && !files.has("x.mp4"));
+    });
+
+    it("move reports a copy left behind when the source could not be deleted", async () => {
+        const { call, files, put, vault, searchIndex } = setup();
+        put("a.png", 4);
+        vault.moveAttachment = async (from, to) => {
+            files.set(to, files.get(from)!);
+            return false;
+        };
+        assert.match(await call("move_attachment", { from: "a.png", to: "b.png" }), /Copied a.png to b.png, but could not delete a.png/);
+        assert.deepEqual(searchIndex.listAttachments().map((a) => a.path), ["a.png", "b.png"]);
+        vault.moveAttachment = async () => false;
+        assert.match(await call("move_attachment", { from: "a.png", to: "c.png" }), /^Failed to move: a.png → c.png$/);
     });
 
     it("metadata and delete report missing files", async () => {

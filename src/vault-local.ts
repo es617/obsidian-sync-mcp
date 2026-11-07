@@ -5,7 +5,7 @@ import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
-import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions } from "./vault-backend.js";
+import { AttachmentExistsError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
 
 export class LocalVault implements VaultBackend {
     private root: string;
@@ -216,7 +216,7 @@ export class LocalVault implements VaultBackend {
         }
     }
 
-    async moveAttachment(from: string, to: string, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
+    async moveAttachment(from: string, to: string, { overwrite = false }: MoveOptions = {}): Promise<boolean> {
         const fromPath = await this.safePath(from, "attachment");
         const toPath = await this.safePath(to, "attachment");
         if (fromPath === toPath) {

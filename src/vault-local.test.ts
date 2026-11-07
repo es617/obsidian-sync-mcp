@@ -434,6 +434,13 @@ describe("attachments", () => {
         await vault.deleteAttachment("Attachments/m2.png");
     });
 
+    it("renames without loading the file, so the move size limit does not apply", async () => {
+        await vault.writeAttachment("Attachments/huge.mp4", new Uint8Array(4096));
+        assert.equal(await vault.moveAttachment("Attachments/huge.mp4", "Attachments/huge2.mp4", { maxBytes: 1 }), true);
+        assert.equal((await vault.getAttachmentInfo("Attachments/huge2.mp4"))?.size, 4096);
+        await vault.deleteAttachment("Attachments/huge2.mp4");
+    });
+
     it("keeps the file when moving an attachment or note onto itself", async () => {
         await vault.writeAttachment("Attachments/self.png", bytes);
         assert.equal(await vault.moveAttachment("Attachments/self.png", "Attachments/self.png"), true);

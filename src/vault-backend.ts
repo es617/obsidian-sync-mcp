@@ -27,6 +27,22 @@ export interface WriteOptions {
     overwrite?: boolean;
 }
 
+export interface MoveOptions extends WriteOptions {
+    /**
+     * Largest file a backend may load into memory to move it. CouchDB mode
+     * copies the bytes (read, write, delete); local mode renames and ignores it.
+     */
+    maxBytes?: number;
+}
+
+/** A move would have to load a file larger than `MoveOptions.maxBytes`. */
+export class AttachmentTooLargeError extends Error {
+    constructor(readonly path: string, readonly size: number, readonly limit: number) {
+        super(`Attachment is ${size} bytes, over the ${limit}-byte limit for moving it: ${path}`);
+        this.name = "AttachmentTooLargeError";
+    }
+}
+
 /** A write or move without `overwrite` found a file already at the destination. */
 export class AttachmentExistsError extends Error {
     constructor(readonly path: string) {
@@ -52,7 +68,7 @@ export interface VaultBackend {
      */
     writeAttachment(path: string, data: Uint8Array, options?: WriteOptions): Promise<boolean>;
     deleteAttachment(path: string): Promise<boolean>;
-    moveAttachment(from: string, to: string, options?: WriteOptions): Promise<boolean>;
+    moveAttachment(from: string, to: string, options?: MoveOptions): Promise<boolean>;
     getAttachmentInfo(path: string): Promise<AttachmentInfo | null>;
     /** Every attachment in the vault. Local mode only; CouchDB mode learns them from the change feed. */
     listAttachments?(): Promise<AttachmentInfo[]>;

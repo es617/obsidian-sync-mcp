@@ -18,7 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
-import { AttachmentExistsError } from "../src/vault-backend.js";
+import { AttachmentExistsError, AttachmentTooLargeError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
 import { randomBytes } from "node:crypto";
@@ -372,6 +372,18 @@ step("Attachments/notes: atomic create, move onto itself, case-only rename");
     await assert.rejects(() => v.moveAttachment("A/race.png", "A/other.png"), AttachmentExistsError);
     assert.ok(await v.getAttachmentInfo("A/race.png"), "source kept after a refused move");
     assert.ok(await v.getAttachmentInfo("A/other.png"), "destination kept after a refused move");
+
+    // Moving copies the bytes here, so a file over maxBytes is refused from
+    // its metadata, before any chunk is loaded, and stays where it was.
+    const manipTL = (v as any).manipulator;
+    const fullGets: string[] = [];
+    const origGet = manipTL.get.bind(manipTL);
+    manipTL.get = (p: string, metaOnly?: boolean) => { if (!metaOnly) fullGets.push(p); return origGet(p, metaOnly); };
+    await assert.rejects(() => v.moveAttachment("A/race.png", "A/big-moved.png", { maxBytes: 100 }), AttachmentTooLargeError);
+    manipTL.get = origGet;
+    assert.deepEqual(fullGets, [], "a refused move loads no chunks");
+    assert.ok(await v.getAttachmentInfo("A/race.png"), "source kept after a refused move");
+    assert.equal(await v.getAttachmentInfo("A/big-moved.png"), null, "nothing written");
 
     // Onto itself, with overwrite: the file must survive.
     assert.equal(await v.moveAttachment("A/other.png", "A/other.png", { overwrite: true }), true);
