@@ -356,9 +356,13 @@ This software is provided as-is under the [MIT license](https://github.com/es617
 git clone --recursive https://github.com/es617/obsidian-sync-mcp.git
 cd obsidian-sync-mcp
 npm install && npm run build
-npm test          # unit tests
-npm run test:e2e  # integration tests
+npm test              # unit tests
+npm run test:e2e      # integration tests
+npm run test:couchdb  # CouchDB harness (needs a throwaway CouchDB on localhost:5985)
+npm run test:smoke    # full smoke test: built server over MCP against CouchDB, all vault configurations
 ```
+
+The CouchDB tests drop and recreate their own databases, so never point them at a real vault. Start a throwaway CouchDB with `docker run -d -p 5985:5984 -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=test couchdb:3`. Set `TEST_PATH_NORMALIZATION=legacy` to run the harness on legacy path identity.
 
 ---
 
