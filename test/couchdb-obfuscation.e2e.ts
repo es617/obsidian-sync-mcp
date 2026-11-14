@@ -20,7 +20,8 @@ import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
 import { AttachmentExistsError, AttachmentTooLargeError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
-import { readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
+import { readContent, createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
+import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
 import { randomBytes } from "node:crypto";
 
 const base = {
@@ -47,7 +48,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -406,6 +407,31 @@ step("Attachments/notes: atomic create, move onto itself, case-only rename");
     assert.ok(!(await v.listNotes()).includes("N/Self.md"), "old case gone");
     await v.close();
     console.log("atomic create, refused overwrite on move, self-move and case-only renames keep the file");
+}
+
+step("NFC path identity: vault declared nfc-path-identity-v1 (LiveSync 1.0.49+ default) is detected");
+{
+    // Seed as a LiveSync 1.0.49+ client would: NFC identity, declared on first write.
+    const nfd = "Notes/Cafe\u0301.md";
+    const nfc = nfd.normalize("NFC");
+    const cfg = { ...base, database: "nfcvault" };
+    const seeder = new DirectFileManipulator((Vault as any).buildOptions(cfg, false, undefined, 1));
+    await seeder.ready.promise;
+    await seeder.put(nfd, createTextBlob("accented"), { ctime: Date.now(), mtime: Date.now() }, "newnote");
+    await seeder.close();
+    const versionDoc: any = await (await fetch(`${base.couchdbUrl}/nfcvault/obsydian_livesync_version`, { headers: auth })).json();
+    assert.ok(versionDoc.used_features?.includes("nfc-path-identity-v1"), `feature declared: ${JSON.stringify(versionDoc)}`);
+
+    // Before the fix this failed: "Unknown features are in use: nfc-path-identity-v1".
+    const v = new Vault(cfg);
+    await v.init();
+    assert.equal((v as any).pathNormalizationVersion, 1, "NFC identity detected");
+    assert.equal(await v.readNote(nfd), "accented", "read by the stored (NFD) spelling");
+    assert.equal(await v.readNote(nfc), "accented", "read by the NFC-equivalent spelling");
+    assert.equal(await v.writeNote("Notes/new.md", "hi"), true);
+    assert.equal(await v.readNote("Notes/new.md"), "hi");
+    await v.close();
+    console.log("NFC vault opens; NFC-equivalent paths resolve to the same note");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

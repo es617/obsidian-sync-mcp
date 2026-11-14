@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Vaults created with LiveSync 1.0.49+ failed to open (#58)** with `Unknown features are in use: nfc-path-identity-v1`. New LiveSync databases use Unicode NFC path identity by default, which the pinned livesync-commonlib (0.1.34) did not know. The server now reads the database's path identity at startup and opens NFC vaults with the matching setting; legacy vaults are unchanged. On an NFC vault, NFC and NFD spellings of a path (e.g. `Café.md` typed on macOS vs. Linux) resolve to the same note.
+- CouchDB mode: closing a vault connection, including the automatic reopen when `COUCHDB_OBFUSCATE_PROPERTIES` is corrected at startup, left livesync-commonlib's internal changes feed running. On an encrypted vault that stale connection could take over the shared sync-parameters cache, after which every encrypt/decrypt failed with `Failed to fetch synchronisation parameters`. The feed is now stopped explicitly on close.
+
+### Dependencies
+- Bump livesync-commonlib from 0.1.34 to 0.5.0 (adds `@vrtmrz/value-store`; `octagonal-wheels` to 0.1.56).
+
 ## 0.11.0
 
 This release adds opt-in support for binary attachments (images, PDFs, audio and video) in both filesystem and CouchDB mode, and fixes several link-parsing and local-mode path issues found while reviewing it. Attachments are off unless `ATTACHMENTS_ENABLED=true`, so existing deployments are unchanged.

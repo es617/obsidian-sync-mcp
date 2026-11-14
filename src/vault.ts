@@ -10,6 +10,9 @@ import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/ty
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
+import { PouchDB } from "../lib/livesync-commonlib/src/pouchdb/pouchdb-http.ts";
+import { inspectDatabasePathIdentity } from "../lib/livesync-commonlib/src/pouchdb/pathIdentityCompatibility.ts";
+import type { EntryDoc } from "../lib/livesync-commonlib/src/common/types.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
 import { KeyedLock } from "./keyed-lock.js";
@@ -55,6 +58,10 @@ export class Vault implements VaultBackend {
     // Obfuscation actually in effect after reconciling with the database, which
     // can differ from the configured value.
     private obfuscatePathsEffective = false;
+    // Path identity declared by the database: 0 = legacy, 1 = Unicode NFC
+    // (`nfc-path-identity-v1`, the default for databases created by LiveSync
+    // 1.0.49+). Detected in init(); the library rejects a mismatch.
+    private pathNormalizationVersion: 0 | 1 = 0;
     // Serializes attachment writes per document id (see writeAttachmentUnlocked).
     private attachmentLock = new KeyedLock();
 
@@ -63,7 +70,7 @@ export class Vault implements VaultBackend {
         this.passphrase = config.passphrase;
     }
 
-    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean, idDerivationKey?: string): DirectFileManipulatorOptions {
+    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean, idDerivationKey: string | undefined, pathNormalizationVersion: 0 | 1): DirectFileManipulatorOptions {
         return {
             url: config.couchdbUrl,
             username: config.couchdbUser,
@@ -75,6 +82,7 @@ export class Vault implements VaultBackend {
             enableCompression: false,
             handleFilenameCaseSensitive: !!config.caseSensitive,
             doNotUseFixedRevisionForChunks: false,
+            pathNormalizationVersion,
             ...idDerivationOptions(obfuscatePaths, idDerivationKey),
         };
     }
@@ -91,7 +99,9 @@ export class Vault implements VaultBackend {
             username: this.config.couchdbUser,
             password: this.config.couchdbPassword,
         });
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, this.obfuscatePathsEffective, this.idDerivationKey));
+        this.pathNormalizationVersion = await this.detectPathIdentity();
+        if (this.pathNormalizationVersion === 1) console.log("Vault uses Unicode NFC path identity (nfc-path-identity-v1).");
+        this.manipulator = new DirectFileManipulator(this.options(this.obfuscatePathsEffective));
         await this.awaitManipulatorReady();
         await this.reconcileObfuscation();
         if (this.idDerivationKey && !this.obfuscatePathsEffective) {
@@ -99,6 +109,29 @@ export class Vault implements VaultBackend {
                 "Warning: COUCHDB_ID_DERIVATION_KEY is set but this vault does not use path obfuscation; " +
                 "the ID key only applies to obfuscated vaults and is ignored.",
             );
+        }
+    }
+
+    private options(obfuscatePaths: boolean): DirectFileManipulatorOptions {
+        return Vault.buildOptions(this.config, obfuscatePaths, this.idDerivationKey, this.pathNormalizationVersion);
+    }
+
+    /**
+     * Read the database's path identity declaration (legacy vs Unicode NFC)
+     * so the manipulator is opened with the matching setting. Read-only: it
+     * never declares a feature. An empty database keeps legacy identity, the
+     * library default.
+     */
+    private async detectPathIdentity(): Promise<0 | 1> {
+        const db = new PouchDB<EntryDoc>(`${this.config.couchdbUrl.replace(/\/+$/, "")}/${this.config.database}`, {
+            auth: { username: this.config.couchdbUser, password: this.config.couchdbPassword },
+            skip_setup: true,
+        });
+        try {
+            const inspection = await inspectDatabasePathIdentity(db);
+            return inspection.status === "configured" ? inspection.pathNormalizationVersion : 0;
+        } finally {
+            await db.close();
         }
     }
 
@@ -160,8 +193,8 @@ export class Vault implements VaultBackend {
                   "Disabling path obfuscation automatically — set COUCHDB_OBFUSCATE_PROPERTIES=false to silence this warning.",
         );
         this.obfuscatePathsEffective = actual;
-        await this.manipulator.close();
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual, this.idDerivationKey));
+        await Vault.closeManipulator(this.manipulator);
+        this.manipulator = new DirectFileManipulator(this.options(actual));
         await this.awaitManipulatorReady();
     }
 
@@ -192,8 +225,27 @@ export class Vault implements VaultBackend {
     }
 
     async close(): Promise<void> {
-        this.manipulator.endWatch();
-        await this.manipulator.close();
+        await Vault.closeManipulator(this.manipulator);
+    }
+
+    /**
+     * Close a manipulator and stop its internal changes feed. The library tears
+     * its managers down on PouchDB's "close" event, but PouchDB emits "closed",
+     * so without this the feed outlives close() and keeps decrypting incoming
+     * changes. After clearHandlers() that dead instance can win the race to
+     * re-create the shared sync-parameters handler, binding it to a closed
+     * database: every later salt fetch then fails. Reproduced as an
+     * intermittent crash in the CouchDB harness; the reopen in
+     * reconcileObfuscation is exposed to the same race.
+     */
+    private static async closeManipulator(manipulator: DirectFileManipulator): Promise<void> {
+        manipulator.endWatch();
+        try {
+            await manipulator.liveSyncLocalDB.managers.teardownManagers();
+        } catch {
+            // Managers were never created (initialisation failed); nothing to stop.
+        }
+        await manipulator.close();
     }
 
     private static mdFilter(meta: any): boolean {

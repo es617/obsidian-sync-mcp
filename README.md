@@ -63,7 +63,7 @@ docker run -p 8787:8787 \
   ghcr.io/es617/obsidian-sync-mcp:latest
 ```
 
-Set `COUCHDB_PASSPHRASE` if you use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from "Show current recovery code") so the server can resolve note paths. Set `BASE_URL` to your public URL (required for OAuth callbacks when agents connect over HTTPS).
+Set `COUCHDB_PASSPHRASE` if you use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from "Show current recovery code") so the server can resolve note paths. Unicode NFC path identity (the default for databases created with LiveSync 1.0.49+) is detected from the database automatically. Set `BASE_URL` to your public URL (required for OAuth callbacks when agents connect over HTTPS).
 
 Your MCP endpoint is `https://your-app.fly.dev/mcp` (Fly.io) or `https://your-server:8787/mcp` (Docker behind HTTPS).
 
@@ -171,7 +171,7 @@ VAULT_NAME=MyVault \
 npx obsidian-sync-mcp
 ```
 
-Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`) so the server can resolve note paths.
+Omit `COUCHDB_PASSPHRASE` if you don't use E2E encryption in LiveSync. Set `COUCHDB_OBFUSCATE_PROPERTIES=true` if "Obfuscate Properties" is also enabled in your LiveSync settings. For an existing vault the server detects the actual setting from the database at startup and corrects a mismatch with a warning; only for a brand-new empty database does the value need to match your LiveSync settings. If the vault was created with LiveSync 1.0.33+ and path obfuscation, also set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`) so the server can resolve note paths. Unicode NFC path identity (the default for databases created with LiveSync 1.0.49+) is detected from the database automatically.
 
 **Or with Docker:**
 
