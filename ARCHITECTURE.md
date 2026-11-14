@@ -25,6 +25,8 @@ The MCP server sits between CouchDB (or the local filesystem) and AI agents. It 
 - Uses `DirectFileManipulator` from [livesync-commonlib](https://github.com/vrtmrz/livesync-commonlib) to read/write CouchDB documents
 - Handles E2E encryption (decrypt on read, encrypt on write) when `COUCHDB_PASSPHRASE` is set
 - Handles chunk reassembly (large notes are split into chunks by LiveSync)
+- Path identity: reads the database's declaration (`nfc-path-identity-v1` for LiveSync 1.0.49+ vaults) before opening `DirectFileManipulator` and passes the matching `pathNormalizationVersion`; an empty database follows `COUCHDB_PATH_NORMALIZATION` (`auto` → NFC). Obfuscation and the ID scheme are reconciled against the database the same way
+- Closing a manipulator also tears down its managers explicitly: the library listens for PouchDB's `close` event, but PouchDB emits `closed`, so its internal `_changes` feed would otherwise outlive `close()`
 - Startup: loads persisted index, catches up via CouchDB `_changes` feed from stored `since` sequence
 - Live watcher: `_changes` feed with `live: true` for real-time updates
 

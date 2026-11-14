@@ -15,6 +15,7 @@ import { parseAttachmentExtensions, isValidAttachmentPath } from "./attachment-p
 import { registerAttachmentTools, ATTACHMENT_WRITE_TOOLS, formatBytes } from "./attachment-tools.js";
 import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
 import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
+import { parsePathNormalization, type PathNormalizationSetting } from "./path-identity-config.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -39,6 +40,7 @@ const COUCHDB_PASSPHRASE = process.env.COUCHDB_PASSPHRASE || undefined;
 const COUCHDB_OBFUSCATE_PROPERTIES = process.env.COUCHDB_OBFUSCATE_PROPERTIES === "true";
 const COUCHDB_ID_DERIVATION_KEY = process.env.COUCHDB_ID_DERIVATION_KEY || undefined;
 const COUCHDB_CASE_SENSITIVE = process.env.COUCHDB_CASE_SENSITIVE === "true";
+const COUCHDB_PATH_NORMALIZATION = process.env.COUCHDB_PATH_NORMALIZATION;
 const VAULT_NAME = process.env.VAULT_NAME ?? "MyVault";
 const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
@@ -109,6 +111,13 @@ if (VAULT_PATH) {
         process.exit(1);
     }
     const { Vault } = await import("./vault.js");
+    let pathNormalization: PathNormalizationSetting;
+    try {
+        pathNormalization = parsePathNormalization(COUCHDB_PATH_NORMALIZATION);
+    } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+    }
     vault = new Vault({
         couchdbUrl: COUCHDB_URL,
         couchdbUser: COUCHDB_USER,
@@ -118,6 +127,7 @@ if (VAULT_PATH) {
         obfuscatePaths: COUCHDB_OBFUSCATE_PROPERTIES,
         idDerivationKey: COUCHDB_ID_DERIVATION_KEY,
         caseSensitive: COUCHDB_CASE_SENSITIVE,
+        pathNormalization,
     });
     console.log(`Remote mode: ${redactCredentials(COUCHDB_URL)}`);
 } else {
