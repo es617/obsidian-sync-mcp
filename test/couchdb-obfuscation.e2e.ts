@@ -9,6 +9,8 @@
  *     -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=test couchdb:3
  *
  * Override with TEST_COUCHDB_URL / TEST_COUCHDB_USER / TEST_COUCHDB_PASSWORD.
+ * TEST_PATH_NORMALIZATION=legacy runs the general scenarios on legacy path
+ * identity instead of the NFC default for empty databases.
  * (Runs via tsup bundling — plain tsx won't resolve the svelte/pouchdb stubs.)
  *
  * Seeds an obfuscated vault and a plain vault through the same
@@ -28,6 +30,9 @@ const base = {
     couchdbUrl: process.env.TEST_COUCHDB_URL ?? "http://localhost:5985",
     couchdbUser: process.env.TEST_COUCHDB_USER ?? "admin",
     couchdbPassword: process.env.TEST_COUCHDB_PASSWORD ?? "test",
+    // Path identity the general scenarios run under (their databases start
+    // empty). CI runs the harness once per mode; the NFC steps below set their own.
+    pathNormalization: (process.env.TEST_PATH_NORMALIZATION ?? "auto") as "auto" | "nfc" | "legacy",
 };
 const passphrase = "banana123";
 
@@ -48,7 +53,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -414,7 +419,7 @@ step("NFC path identity: vault declared nfc-path-identity-v1 (LiveSync 1.0.49+ d
     // Seed as a LiveSync 1.0.49+ client would: NFC identity, declared on first write.
     const nfd = "Notes/Cafe\u0301.md";
     const nfc = nfd.normalize("NFC");
-    const cfg = { ...base, database: "nfcvault" };
+    const cfg = { ...base, database: "nfcvault", pathNormalization: "auto" as const };
     const seeder = new DirectFileManipulator((Vault as any).buildOptions(cfg, false, undefined, 1));
     await seeder.ready.promise;
     await seeder.put(nfd, createTextBlob("accented"), { ctime: Date.now(), mtime: Date.now() }, "newnote");
@@ -432,6 +437,45 @@ step("NFC path identity: vault declared nfc-path-identity-v1 (LiveSync 1.0.49+ d
     assert.equal(await v.readNote("Notes/new.md"), "hi");
     await v.close();
     console.log("NFC vault opens; NFC-equivalent paths resolve to the same note");
+}
+
+step("NFC path identity: empty database defaults to NFC, legacy override, mismatch refused");
+{
+    const versionFeatures = async (db: string): Promise<string[]> => {
+        const res = await fetch(`${base.couchdbUrl}/${db}/obsydian_livesync_version`, { headers: auth });
+        return res.ok ? (((await res.json()) as any).used_features ?? []) : [];
+    };
+
+    // auto (default) on an empty database: NFC, declared by the first write.
+    const fresh = new Vault({ ...base, database: "freshnfc", pathNormalization: "auto" });
+    await fresh.init();
+    assert.equal((fresh as any).pathNormalizationVersion, 1, "empty database defaults to NFC");
+    assert.equal(await fresh.writeNote("Notes/first.md", "x"), true);
+    await fresh.close();
+    assert.ok((await versionFeatures("freshnfc")).includes("nfc-path-identity-v1"), "first write declared NFC");
+
+    // legacy override on an empty database: no NFC declaration, and auto follows it on reopen.
+    const legacy = new Vault({ ...base, database: "freshlegacy", pathNormalization: "legacy" });
+    await legacy.init();
+    assert.equal((legacy as any).pathNormalizationVersion, 0);
+    assert.equal(await legacy.writeNote("Notes/first.md", "x"), true);
+    await legacy.close();
+    assert.ok(!(await versionFeatures("freshlegacy")).includes("nfc-path-identity-v1"), "legacy database not declared NFC");
+    const reopened = new Vault({ ...base, database: "freshlegacy", pathNormalization: "auto" });
+    await reopened.init();
+    assert.equal((reopened as any).pathNormalizationVersion, 0, "auto follows a populated legacy database");
+    await reopened.close();
+
+    // An explicit setting that contradicts a populated database fails before connecting.
+    await assert.rejects(
+        () => new Vault({ ...base, database: "freshnfc", pathNormalization: "legacy" }).init(),
+        /COUCHDB_PATH_NORMALIZATION=legacy but this database uses nfc path identity/,
+    );
+    await assert.rejects(
+        () => new Vault({ ...base, database: "freshlegacy", pathNormalization: "nfc" }).init(),
+        /COUCHDB_PATH_NORMALIZATION=nfc but this database uses legacy path identity/,
+    );
+    console.log("empty → NFC by default, legacy override honoured, contradicting setting refused");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

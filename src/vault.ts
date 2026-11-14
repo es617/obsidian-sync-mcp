@@ -11,7 +11,7 @@ import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileMani
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
 import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncParamsHandler.ts";
 import { PouchDB } from "../lib/livesync-commonlib/src/pouchdb/pouchdb-http.ts";
-import { inspectDatabasePathIdentity } from "../lib/livesync-commonlib/src/pouchdb/pathIdentityCompatibility.ts";
+import { inspectDatabasePathIdentity, type PathIdentityInspection } from "../lib/livesync-commonlib/src/pouchdb/pathIdentityCompatibility.ts";
 import type { EntryDoc } from "../lib/livesync-commonlib/src/common/types.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
@@ -23,6 +23,7 @@ import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
 import { classifyIds, type IdFormat } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
+import { resolvePathIdentity, type PathNormalizationSetting } from "./path-identity-config.js";
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -44,6 +45,12 @@ export interface VaultConfig {
      * with that option on, otherwise obfuscated document IDs won't resolve.
      */
     caseSensitive?: boolean;
+    /**
+     * COUCHDB_PATH_NORMALIZATION: "auto" (default) follows the database and
+     * picks NFC for an empty one; "nfc" / "legacy" force a choice for an empty
+     * database and must match an existing one.
+     */
+    pathNormalization?: PathNormalizationSetting;
 }
 
 export class Vault implements VaultBackend {
@@ -99,8 +106,10 @@ export class Vault implements VaultBackend {
             username: this.config.couchdbUser,
             password: this.config.couchdbPassword,
         });
-        this.pathNormalizationVersion = await this.detectPathIdentity();
-        if (this.pathNormalizationVersion === 1) console.log("Vault uses Unicode NFC path identity (nfc-path-identity-v1).");
+        const pathIdentity = resolvePathIdentity(this.config.pathNormalization ?? "auto", await this.inspectPathIdentity());
+        this.pathNormalizationVersion = pathIdentity.version;
+        if (pathIdentity.notice) console.warn(pathIdentity.notice);
+        else if (pathIdentity.version === 1) console.log("Vault uses Unicode NFC path identity (nfc-path-identity-v1).");
         this.manipulator = new DirectFileManipulator(this.options(this.obfuscatePathsEffective));
         await this.awaitManipulatorReady();
         await this.reconcileObfuscation();
@@ -119,17 +128,16 @@ export class Vault implements VaultBackend {
     /**
      * Read the database's path identity declaration (legacy vs Unicode NFC)
      * so the manipulator is opened with the matching setting. Read-only: it
-     * never declares a feature. An empty database keeps legacy identity, the
-     * library default.
+     * never declares a feature; with NFC, the first write to an empty database
+     * declares it.
      */
-    private async detectPathIdentity(): Promise<0 | 1> {
+    private async inspectPathIdentity(): Promise<PathIdentityInspection> {
         const db = new PouchDB<EntryDoc>(`${this.config.couchdbUrl.replace(/\/+$/, "")}/${this.config.database}`, {
             auth: { username: this.config.couchdbUser, password: this.config.couchdbPassword },
             skip_setup: true,
         });
         try {
-            const inspection = await inspectDatabasePathIdentity(db);
-            return inspection.status === "configured" ? inspection.pathNormalizationVersion : 0;
+            return await inspectDatabasePathIdentity(db);
         } finally {
             await db.close();
         }
