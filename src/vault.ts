@@ -128,8 +128,8 @@ export class Vault implements VaultBackend {
     /**
      * Read the database's path identity declaration (legacy vs Unicode NFC)
      * so the manipulator is opened with the matching setting. Read-only: it
-     * never declares a feature; with NFC, the first write to an empty database
-     * declares it.
+     * never declares a feature itself; DirectFileManipulator then declares the
+     * chosen identity in an empty database when it opens it.
      */
     private async inspectPathIdentity(): Promise<PathIdentityInspection> {
         const db = new PouchDB<EntryDoc>(`${this.config.couchdbUrl.replace(/\/+$/, "")}/${this.config.database}`, {

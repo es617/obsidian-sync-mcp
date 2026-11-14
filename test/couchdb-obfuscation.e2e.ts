@@ -446,13 +446,13 @@ step("NFC path identity: empty database defaults to NFC, legacy override, mismat
         return res.ok ? (((await res.json()) as any).used_features ?? []) : [];
     };
 
-    // auto (default) on an empty database: NFC, declared by the first write.
+    // auto (default) on an empty database: NFC, declared when the server opens it.
     const fresh = new Vault({ ...base, database: "freshnfc", pathNormalization: "auto" });
     await fresh.init();
     assert.equal((fresh as any).pathNormalizationVersion, 1, "empty database defaults to NFC");
     assert.equal(await fresh.writeNote("Notes/first.md", "x"), true);
     await fresh.close();
-    assert.ok((await versionFeatures("freshnfc")).includes("nfc-path-identity-v1"), "first write declared NFC");
+    assert.ok((await versionFeatures("freshnfc")).includes("nfc-path-identity-v1"), "NFC declared");
 
     // legacy override on an empty database: no NFC declaration, and auto follows it on reopen.
     const legacy = new Vault({ ...base, database: "freshlegacy", pathNormalization: "legacy" });
