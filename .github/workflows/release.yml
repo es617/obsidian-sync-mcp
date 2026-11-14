@@ -1,0 +1,96 @@
+name: Release
+
+# Manual release, e.g. from a phone: Actions → Release → Run workflow.
+#
+# Tags main's latest commit with v<version from package.json>, then starts
+# CI/CD on that tag, which runs the usual release, npm and Docker jobs.
+# A tag pushed with GITHUB_TOKEN does not trigger workflows by itself, so
+# CI/CD is dispatched explicitly on the tag ref.
+#
+# Do the version bump commit first; this workflow never edits files.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push the tag
+      actions: write   # dispatch CI/CD on the tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          for f in server.json package-lock.json; do
+            if ! grep -q "\"version\": \"${VERSION}\"" "$f"; then
+              echo "::error::$f does not have version ${VERSION}; do the bump commit first."
+              exit 1
+            fi
+          done
+          if ! grep -q "^## ${VERSION}\$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${VERSION}' section; do the bump commit first."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Tag ${TAG} already exists. Bump the version for a new release."
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG} from ${GITHUB_SHA}"
+
+      - name: Wait for CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The push run for main's latest commit must have passed. Waits up to
+          # 20 minutes if it is still running (e.g. right after a merge).
+          for i in $(seq 1 80); do
+            RUN=$(gh run list --workflow cicd.yml --commit "$GITHUB_SHA" --event push \
+                    --limit 1 --json status,conclusion,url \
+                    --jq '.[0] // empty | "\(.status) \(.conclusion) \(.url)"')
+            set -- $RUN
+            if [ -z "$RUN" ]; then
+              echo "No CI/CD run for ${GITHUB_SHA} yet, waiting..."
+            elif [ "$1" = "completed" ]; then
+              if [ "$2" = "success" ]; then
+                echo "CI passed: $3"
+                exit 0
+              fi
+              echo "::error::CI on ${GITHUB_SHA} finished with '$2': $3"
+              exit 1
+            else
+              echo "CI is $1, waiting... $3"
+            fi
+            sleep 15
+          done
+          echo "::error::Timed out waiting for CI on ${GITHUB_SHA}."
+          exit 1
+
+      - name: Create tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Start CI/CD on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh workflow run cicd.yml --ref "$TAG"
+          echo "### Tagged ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "CI/CD is now running on ${TAG} (release, npm, Docker): ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/cicd.yml" >> "$GITHUB_STEP_SUMMARY"

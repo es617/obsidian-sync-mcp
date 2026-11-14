@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # Started by release.yml on a new tag (a tag pushed with GITHUB_TOKEN
+  # does not trigger the push event); runs exactly like a tag push.
+  workflow_dispatch:
 
 # Read-only by default (this also covers pull_request runs); jobs that
 # publish request only the scopes they need.

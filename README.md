@@ -364,6 +364,11 @@ npm run test:smoke    # full smoke test: built server over MCP against CouchDB, 
 
 The CouchDB tests drop and recreate their own databases, so never point them at a real vault. Start a throwaway CouchDB with `docker run -d -p 5985:5984 -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=test couchdb:3`. Set `TEST_PATH_NORMALIZATION=legacy` to run the harness on legacy path identity.
 
+### Releasing
+
+1. Commit the version bump to main: `package.json`, `package-lock.json`, `server.json`, and a `## <version>` section in `CHANGELOG.md`.
+2. Either push a `v<version>` tag, or run the **Release** workflow (Actions → Release → Run workflow, which also works from a phone browser). The workflow checks the versions match, waits for CI on main's latest commit to pass, creates the tag and starts CI/CD on it, which publishes the GitHub release, the npm package and the Docker image.
+
 ---
 
 ## License
