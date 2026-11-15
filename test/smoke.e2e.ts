@@ -270,6 +270,8 @@ for (const { label, d } of MATRIX) {
     await resetDb(db);
     const dev = await openDevice(db, d);
     for (const [p, t] of Object.entries(SEED)) await devicePut(dev, p, t);
+    // Obfuscation auto-correction needs at least 20 notes to override a setting.
+    for (let n = 0; n < 20; n++) await devicePut(dev, `Filler/note-${n}.md`, `filler ${n}`);
     await closeDevice(dev);
     await check(`${label}: database declares the expected path identity`, async () => {
         assert.equal((await versionFeatures(db)).includes("nfc-path-identity-v1"), d.nfc);

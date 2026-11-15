@@ -52,8 +52,15 @@ async function rawAllDocIds(db: string): Promise<string[]> {
     return ((await res.json()) as any).rows.map((r: any) => r.id);
 }
 
+// Auto-correction needs at least ID_SAMPLE_MINIMUM notes to override a setting,
+// so vaults that exercise it get this many extra notes.
+const FILLER = 20;
+async function seedFiller(v: Vault, n = FILLER) {
+    for (let i = 0; i < n; i++) assert.equal(await v.writeNote(`Filler/note-${i}.md`, `filler ${i}`), true);
+}
+
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault", "smallvault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -67,8 +74,9 @@ step("Seed obfvault with obfuscatePaths=true");
     assert.equal(await v.writeNote(NOTE_CYRILLIC, "# Тест\nprivet"), true);
     assert.equal(await v.writeNote(NOTE_DAILY, "daily entry"), true);
     assert.equal(await v.readNote(NOTE_CYRILLIC), "# Тест\nprivet");
+    await seedFiller(v);
     await v.close();
-    console.log("seeded 2 notes, read-back OK");
+    console.log(`seeded ${2 + FILLER} notes, read-back OK`);
 }
 
 // Confirm the raw _ids really are obfuscated (f: prefix)
@@ -77,7 +85,7 @@ step("Raw doc IDs in obfvault");
     const rows = await rawAllDocIds("obfvault");
     console.log(rows.join("\n"));
     const fileIds = rows.filter((id) => id.startsWith("f:"));
-    assert.equal(fileIds.length, 2, "expected exactly 2 f:-prefixed file docs");
+    assert.equal(fileIds.length, 2 + FILLER, `expected exactly ${2 + FILLER} f:-prefixed file docs`);
 }
 
 // --- Test 2: issue #10 repro — obfuscated vault, flag off ---
@@ -87,7 +95,7 @@ step("Test 2: open obfvault with obfuscatePaths=false (expect warning + auto-ena
     await v.init();
     const content = await v.readNote(NOTE_CYRILLIC);
     assert.equal(content, "# Тест\nprivet", "read_note must resolve after auto-correction");
-    const listed = await v.listNotes();
+    const listed = (await v.listNotes()).filter((p) => !p.startsWith("Filler/"));
     assert.deepEqual(listed.sort(), [NOTE_DAILY, NOTE_CYRILLIC].sort());
     assert.equal(await v.writeNote("Inbox/written-under-wrong-flag.md", "hello"), true);
     await v.close();
@@ -102,7 +110,7 @@ step("Test 2b: write under corrected settings produced an f: doc");
     const fileIds = rows.filter((id) => id.startsWith("f:"));
     const plaintextIds = rows.filter((id) => id.includes(".md"));
     console.log(`f: docs: ${fileIds.length}, plaintext-path docs: ${plaintextIds.length}`);
-    assert.equal(fileIds.length, 3, "expected 3 f:-prefixed file docs after write");
+    assert.equal(fileIds.length, 3 + FILLER, `expected ${3 + FILLER} f:-prefixed file docs after write`);
     assert.equal(plaintextIds.length, 0, "no plaintext-id file docs may exist");
 }
 
@@ -113,8 +121,9 @@ step("Seed plainvault with obfuscatePaths=false");
     await v.init();
     assert.equal(await v.writeNote(NOTE_DAILY, "plain vault daily"), true);
     assert.equal(await v.writeNote("Notes/hello.md", "world"), true);
+    await seedFiller(v);
     await v.close();
-    console.log("seeded 2 notes");
+    console.log(`seeded ${2 + FILLER} notes`);
 }
 
 // --- Test 3: reverse mismatch — plain vault, flag on ---
@@ -167,6 +176,7 @@ step("Test 5: seed keyedvault with COUCHDB_ID_DERIVATION_KEY and read back");
     await v.init();
     assert.equal(await v.writeNote(NOTE_KEYED, "# Keyed\nbody"), true);
     assert.equal(await v.readNote(NOTE_KEYED), "# Keyed\nbody", "read_note must resolve with the keyed scheme");
+    await seedFiller(v);
     await v.close();
     console.log("v1 write + read-back OK");
 }
@@ -476,6 +486,78 @@ step("NFC path identity: empty database defaults to NFC, legacy override, mismat
         /COUCHDB_PATH_NORMALIZATION=nfc but this database uses legacy path identity/,
     );
     console.log("empty → NFC by default, legacy override honoured, contradicting setting refused");
+}
+
+async function captureWarnings<T>(fn: () => Promise<T>): Promise<{ result: T; warnings: string[] }> {
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...a: unknown[]) => { warnings.push(a.join(" ")); origWarn(...a); };
+    try {
+        return { result: await fn(), warnings };
+    } finally {
+        console.warn = origWarn;
+    }
+}
+
+step("#62: internal-file docs (i:f:) at the head of the feed don't flip a correct obfuscation setting");
+{
+    // As LiveSync with hidden-file sync: .obsidian files are stored first, under the i: namespace.
+    const cfg = { ...base, database: "internalvault", passphrase };
+    const device = new DirectFileManipulator({ ...(Vault as any).buildOptions(cfg, true, undefined, 0), syncInternalFiles: true });
+    await device.ready.promise;
+    for (let i = 0; i < 30; i++) {
+        await device.put(`i:.obsidian/plugins/plugin-${i}/data.json`, createTextBlob(`{"n":${i}}`), { ctime: Date.now(), mtime: Date.now() }, "plain");
+    }
+    await device.liveSyncLocalDB.managers.teardownManagers();
+    await device.close();
+    const internal = (await rawAllDocIds("internalvault")).filter((id) => id.startsWith("i:"));
+    assert.ok(internal.length >= 30 && internal.every((id) => id.startsWith("i:f:")), `internal docs are i:f: — got ${internal.slice(0, 3).join(", ")}`);
+
+    const seeder = new Vault({ ...cfg, obfuscatePaths: true });
+    await seeder.init();
+    assert.equal(await seeder.writeNote("Notes/real.md", "real note"), true);
+    await seedFiller(seeder);
+    await seeder.close();
+
+    // Old check: the first 20 file docs were all i:f: → "plain" → obfuscation switched off.
+    const { result: v, warnings } = await captureWarnings(async () => {
+        const v = new Vault({ ...cfg, obfuscatePaths: true });
+        await v.init();
+        return v;
+    });
+    assert.deepEqual(warnings.filter((w) => w.includes("COUCHDB_OBFUSCATE_PROPERTIES")), [], "no override or mismatch warning");
+    assert.equal((v as any).obfuscatePathsEffective, true, "obfuscation stays on");
+    assert.equal(await v.readNote("Notes/real.md"), "real note");
+    await v.close();
+
+    // And a wrong setting on the same vault is still corrected.
+    const { result: v2, warnings: w2 } = await captureWarnings(async () => {
+        const v2 = new Vault({ ...cfg, obfuscatePaths: false });
+        await v2.init();
+        return v2;
+    });
+    assert.ok(w2.some((w) => w.includes("Enabling path obfuscation automatically")), "wrong setting still auto-corrected");
+    assert.equal(await v2.readNote("Notes/real.md"), "real note");
+    await v2.close();
+    console.log("internal-file docs ignored; correct setting kept, wrong setting still corrected");
+}
+
+step("#62: fewer than 20 notes → configured setting kept, with a warning");
+{
+    const cfg = { ...base, database: "smallvault", passphrase };
+    const seeder = new Vault({ ...cfg, obfuscatePaths: true });
+    await seeder.init();
+    for (let i = 0; i < 3; i++) assert.equal(await seeder.writeNote(`Small/n${i}.md`, `n${i}`), true);
+    await seeder.close();
+    const { result: v, warnings } = await captureWarnings(async () => {
+        const v = new Vault({ ...cfg, obfuscatePaths: false });
+        await v.init();
+        return v;
+    });
+    assert.equal((v as any).obfuscatePathsEffective, false, "not overridden on a 3-note sample");
+    assert.ok(warnings.some((w) => /3 note document\(s\) in this vault look obfuscated\. Keeping the configured value/.test(w)), warnings.join("\n"));
+    await v.close();
+    console.log("small vault: setting kept, disagreement reported");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

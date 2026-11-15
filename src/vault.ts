@@ -21,7 +21,7 @@ import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path
 import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
-import { classifyIds, type IdFormat } from "./id-format.js";
+import { classifyIds, isNamespacedId, ID_SAMPLE_TARGET, ID_SAMPLE_MINIMUM } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
 import { resolvePathIdentity, type PathNormalizationSetting } from "./path-identity-config.js";
 
@@ -175,8 +175,21 @@ export class Vault implements VaultBackend {
      */
     private async reconcileObfuscation(): Promise<void> {
         const configured = !!this.config.obfuscatePaths;
-        const format = await this.detectIdFormat();
+        const ids = await this.sampleNoteIds();
+        const format = classifyIds(ids);
         if (format === "empty") return;
+        if (format === "insufficient") {
+            // Too few notes to override an explicit setting on; only point out a disagreement.
+            const lean = classifyIds(ids, 1);
+            if ((lean === "obfuscated") !== configured) {
+                console.warn(
+                    `Warning: COUCHDB_OBFUSCATE_PROPERTIES=${configured} but the ${ids.length} note document(s) in this vault look ` +
+                    `${lean === "obfuscated" ? "obfuscated" : "plaintext"}. Keeping the configured value: fewer than ${ID_SAMPLE_MINIMUM} notes ` +
+                    "are too few to correct it automatically. If notes are not found, check the setting against LiveSync.",
+                );
+            }
+            return;
+        }
         if (format === "mixed") {
             console.warn(
                 "Warning: vault contains both obfuscated and plaintext document IDs. " +
@@ -206,15 +219,17 @@ export class Vault implements VaultBackend {
         await this.awaitManipulatorReady();
     }
 
-    /** Sample file-entry docs from the changes feed and classify their IDs. */
-    private async detectIdFormat(): Promise<IdFormat> {
-        const SAMPLE_TARGET = 20;
+    /**
+     * Sample note-document IDs from the changes feed, oldest first. Internal-file
+     * documents (`i:...`) are skipped: their prefix hides the ID format (#62).
+     */
+    private async sampleNoteIds(): Promise<string[]> {
         const BATCH_SIZE = 100;
         const db = this.manipulator.liveSyncLocalDB.localDatabase;
         const ids: string[] = [];
         let since: string | number = 0;
 
-        while (ids.length < SAMPLE_TARGET) {
+        while (ids.length < ID_SAMPLE_TARGET) {
             const result = await db.changes({
                 since,
                 limit: BATCH_SIZE,
@@ -223,13 +238,13 @@ export class Vault implements VaultBackend {
                 live: false,
             });
             for (const change of result.results) {
-                if (ids.length >= SAMPLE_TARGET) break;
-                ids.push(change.id);
+                if (ids.length >= ID_SAMPLE_TARGET) break;
+                if (!isNamespacedId(change.id)) ids.push(change.id);
             }
             if (result.results.length < BATCH_SIZE) break;
             since = result.last_seq;
         }
-        return classifyIds(ids);
+        return ids;
     }
 
     async close(): Promise<void> {
