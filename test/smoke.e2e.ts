@@ -357,6 +357,56 @@ for (const mode of ["auto", "legacy"] as const) {
 }
 
 // --- Server modes: auth, read-only, write folders, attachments -------------
+// --- MCP transport: newer clients and charset (#16, #18) -------------------
+console.log("\n=== MCP transport: client generations and charset ===");
+{
+    // #18: a dependency bump once broke every newer client (Claude) while
+    // /healthz stayed green. Exercise the newer client package too, in the
+    // negotiating mode real clients use, and check every MCP response declares
+    // charset=utf-8 (#16: clients that default to Latin-1 showed mojibake).
+    const d = { ...MATRIX[7].d, db: "smoke_m7" };
+    const s = await startServer(serverEnv(d));
+    try {
+        const recording = (types: Set<string>) => async (input: any, init?: any) => {
+            const res = await fetch(input, init);
+            const ct = res.headers.get("content-type");
+            if (ct) types.add(ct);
+            return res;
+        };
+        const url = new URL(`http://127.0.0.1:${s.port}/mcp`);
+        const checkTypes = (types: Set<string>) => {
+            assert.ok(types.size > 0, "no responses recorded");
+            for (const t of types) assert.match(t, /;\s*charset=utf-8/i, `missing charset: ${t}`);
+        };
+        await check("SDK 1.x client: Cyrillic read, every response declares charset=utf-8", async () => {
+            const types = new Set<string>();
+            const c = new Client({ name: "smoke-v1", version: "1" });
+            await c.connect(new StreamableHTTPClientTransport(url, { fetch: recording(types) as any }));
+            assert.match(await call(c, "read_note", { path: "Inbox/Тест.md" }), /Кириллица/);
+            await c.close();
+            checkTypes(types);
+        });
+        for (const mode of ["legacy", "auto"] as const) {
+            await check(`MCP client 2.x (versionNegotiation=${mode}): connects, reads, charset=utf-8`, async () => {
+                const v2: any = await import("@modelcontextprotocol/client");
+                const types = new Set<string>();
+                const c = new v2.Client({ name: `smoke-v2-${mode}`, version: "1" }, { versionNegotiation: { mode } });
+                await c.connect(new v2.StreamableHTTPClientTransport(url, { fetch: recording(types) }));
+                assert.ok((await c.listTools()).tools.some((t: any) => t.name === "read_note"));
+                const r = await c.callTool({ name: "read_note", arguments: { path: "Inbox/Тест.md" } });
+                assert.match((r.content ?? []).map((x: any) => x.text ?? "").join(""), /Кириллица/);
+                await c.close();
+                checkTypes(types);
+            });
+        }
+        await check("server logged no transport errors", async () => {
+            assert.doesNotMatch(s.log(), /modern handler error|TypeError/);
+        });
+    } finally {
+        await stopServer(s);
+    }
+}
+
 console.log("\n=== Server modes (on E2EE+obfuscated+ID key / NFC) ===");
 {
     const db = "smoke_m7";
