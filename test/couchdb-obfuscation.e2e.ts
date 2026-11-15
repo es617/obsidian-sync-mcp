@@ -53,7 +53,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -476,6 +476,60 @@ step("NFC path identity: empty database defaults to NFC, legacy override, mismat
         /COUCHDB_PATH_NORMALIZATION=nfc but this database uses legacy path identity/,
     );
     console.log("empty → NFC by default, legacy override honoured, contradicting setting refused");
+}
+
+async function captureWarnings<T>(fn: () => Promise<T>): Promise<{ result: T; warnings: string[] }> {
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...a: unknown[]) => { warnings.push(a.join(" ")); origWarn(...a); };
+    try {
+        return { result: await fn(), warnings };
+    } finally {
+        console.warn = origWarn;
+    }
+}
+
+step("#62: internal-file docs (i:f:) at the head of the feed don't flip a correct obfuscation setting");
+{
+    // As LiveSync with hidden-file sync: .obsidian files are stored first, under the i: namespace.
+    const cfg = { ...base, database: "internalvault", passphrase };
+    const device = new DirectFileManipulator({ ...(Vault as any).buildOptions(cfg, true, undefined, 0), syncInternalFiles: true });
+    await device.ready.promise;
+    for (let i = 0; i < 30; i++) {
+        await device.put(`i:.obsidian/plugins/plugin-${i}/data.json`, createTextBlob(`{"n":${i}}`), { ctime: Date.now(), mtime: Date.now() }, "plain");
+    }
+    await device.liveSyncLocalDB.managers.teardownManagers();
+    await device.close();
+    const internal = (await rawAllDocIds("internalvault")).filter((id) => id.startsWith("i:"));
+    assert.ok(internal.length >= 30 && internal.every((id) => id.startsWith("i:f:")), `internal docs are i:f: — got ${internal.slice(0, 3).join(", ")}`);
+
+    const seeder = new Vault({ ...cfg, obfuscatePaths: true });
+    await seeder.init();
+    assert.equal(await seeder.writeNote("Notes/real.md", "real note"), true);
+    for (let i = 0; i < 25; i++) assert.equal(await seeder.writeNote(`Notes/n${i}.md`, `n${i}`), true);
+    await seeder.close();
+
+    // Old check: the first 20 file docs were all i:f: → "plain" → obfuscation switched off.
+    const { result: v, warnings } = await captureWarnings(async () => {
+        const v = new Vault({ ...cfg, obfuscatePaths: true });
+        await v.init();
+        return v;
+    });
+    assert.deepEqual(warnings.filter((w) => w.includes("COUCHDB_OBFUSCATE_PROPERTIES")), [], "no override or mismatch warning");
+    assert.equal((v as any).obfuscatePathsEffective, true, "obfuscation stays on");
+    assert.equal(await v.readNote("Notes/real.md"), "real note");
+    await v.close();
+
+    // And a wrong setting on the same vault is still corrected.
+    const { result: v2, warnings: w2 } = await captureWarnings(async () => {
+        const v2 = new Vault({ ...cfg, obfuscatePaths: false });
+        await v2.init();
+        return v2;
+    });
+    assert.ok(w2.some((w) => w.includes("Enabling path obfuscation automatically")), "wrong setting still auto-corrected");
+    assert.equal(await v2.readNote("Notes/real.md"), "real note");
+    await v2.close();
+    console.log("internal-file docs ignored; correct setting kept, wrong setting still corrected");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

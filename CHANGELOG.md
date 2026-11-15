@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Obfuscation auto-detection could switch off a correct `COUCHDB_OBFUSCATE_PROPERTIES=true` (#62)**, after which `read_note` and `edit_note` returned "Note not found" for every note until a restart. With LiveSync's hidden-file sync on, its documents (`i:f:...` IDs when obfuscated) were counted as plaintext, and the check sampled only the first 20 file documents, so the result depended on how many of those were hidden-file documents. LiveSync's namespaced file documents (hidden-file sync `i:`, customization sync `ix:`, plugin store `ps:`) are now left out of the sample, which collects up to 100 notes. Reported with a detailed analysis by @goichiro-y.
+
 ## 0.12.0
 
 This release fixes vaults created with Self-hosted LiveSync 1.0.49+ failing to open (#58). Those vaults use Unicode NFC path identity, which the previous livesync-commonlib did not support. The library moves from 0.1.34 to 0.5.0, the server detects each vault's path identity at startup, and a new `COUCHDB_PATH_NORMALIZATION` setting covers brand-new empty databases. Existing vaults behave as before.
