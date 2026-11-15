@@ -1,6 +1,6 @@
 # MCP server image — used by CI to publish to ghcr.io
 # Base pinned by digest (multi-arch index for node:22-slim); bump it deliberately.
-FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 
 WORKDIR /app
 
