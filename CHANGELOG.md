@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.12.1
 
 ### Fixes
-- **Obfuscation auto-detection could switch off a correct `COUCHDB_OBFUSCATE_PROPERTIES=true` (#62)**, after which `read_note` and `edit_note` returned "Note not found" for every note until a restart. With LiveSync's hidden-file sync on, its documents (`i:f:...` IDs when obfuscated) were counted as plaintext, and the check sampled only the first 20 file documents, so the result depended on how many of those were hidden-file documents. LiveSync's namespaced file documents (hidden-file sync `i:`, customization sync `ix:`, plugin store `ps:`) are now left out of the sample, which collects up to 100 notes. Reported with a detailed analysis by @goichiro-y.
+- Obfuscation auto-detection could turn off a correct `COUCHDB_OBFUSCATE_PROPERTIES=true` on vaults using LiveSync's hidden-file sync, so every note read failed until a restart (#62). Those documents are now ignored when detecting, and the check samples up to 100 notes. Thanks @goichiro-y.
 
 ## 0.12.0
 
