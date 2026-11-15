@@ -21,7 +21,7 @@ import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path
 import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
-import { classifyIds, isNamespacedId, ID_SAMPLE_TARGET, ID_SAMPLE_MINIMUM } from "./id-format.js";
+import { classifyIds, isNamespacedId, ID_SAMPLE_TARGET } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
 import { resolvePathIdentity, type PathNormalizationSetting } from "./path-identity-config.js";
 
@@ -175,21 +175,8 @@ export class Vault implements VaultBackend {
      */
     private async reconcileObfuscation(): Promise<void> {
         const configured = !!this.config.obfuscatePaths;
-        const ids = await this.sampleNoteIds();
-        const format = classifyIds(ids);
+        const format = classifyIds(await this.sampleNoteIds());
         if (format === "empty") return;
-        if (format === "insufficient") {
-            // Too few notes to override an explicit setting on; only point out a disagreement.
-            const lean = classifyIds(ids, 1);
-            if ((lean === "obfuscated") !== configured) {
-                console.warn(
-                    `Warning: COUCHDB_OBFUSCATE_PROPERTIES=${configured} but the ${ids.length} note document(s) in this vault look ` +
-                    `${lean === "obfuscated" ? "obfuscated" : "plaintext"}. Keeping the configured value: fewer than ${ID_SAMPLE_MINIMUM} notes ` +
-                    "are too few to correct it automatically. If notes are not found, check the setting against LiveSync.",
-                );
-            }
-            return;
-        }
         if (format === "mixed") {
             console.warn(
                 "Warning: vault contains both obfuscated and plaintext document IDs. " +
@@ -220,8 +207,9 @@ export class Vault implements VaultBackend {
     }
 
     /**
-     * Sample note-document IDs from the changes feed, oldest first. Internal-file
-     * documents (`i:...`) are skipped: their prefix hides the ID format (#62).
+     * Sample note-document IDs from the changes feed, oldest first. Namespaced
+     * file documents (`i:`, `ix:`, `ps:`) are skipped: their prefix hides the ID
+     * format (#62).
      */
     private async sampleNoteIds(): Promise<string[]> {
         const BATCH_SIZE = 100;
