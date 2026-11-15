@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- MCP responses now declare `charset=utf-8`, so clients that default to Latin-1 no longer show Cyrillic or CJK text as mojibake (#16). This bumps mcp-proxy to 6.10, which also handles newer MCP clients without the crash that forced the 0.6.4 revert (#18).
+
 ## 0.12.1
 
 ### Fixes
