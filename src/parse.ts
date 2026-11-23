@@ -33,6 +33,12 @@ const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL})+\]\(([^()#\n]+\.md)(
 // [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title").
 const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL})*)\]\((<[^<>\n]+>|[^()\s]+)(?:\s+"[^"\n]*")?\)`, "g");
 
+// A YAML scalar may be quoted: tags: ["a", 'b'] holds the strings a and b.
+function unquote(value: string): string {
+    const m = value.match(/^(["'])(.*)\1$/);
+    return m ? m[2].trim() : value;
+}
+
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     const frontmatter: Record<string, any> = {};
     const tags = new Set<string>();
@@ -49,7 +55,7 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
                 if (inTagsList) {
                     const listItem = line.match(/^\s+-\s+(.+)/);
                     if (listItem) {
-                        const trimmed = listItem[1].trim();
+                        const trimmed = unquote(listItem[1].trim());
                         if (trimmed) tags.add(trimmed);
                         continue;
                     }
@@ -67,7 +73,7 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
                         // Inline: tags: [a, b] or tags: a, b
                         const tagValues = value.replace(/[[\]]/g, "");
                         for (const t of tagValues.split(",")) {
-                            const trimmed = t.trim();
+                            const trimmed = unquote(t.trim());
                             if (trimmed) tags.add(trimmed);
                         }
                     } else {
@@ -88,7 +94,12 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
         tags.add(match[2]);
     }
 
-    for (const match of content.matchAll(WIKILINK)) links.push(match[1]);
+    // Inside a table Obsidian writes [[note\|alias]]: the backslash escapes the
+    // pipe and is not part of the target.
+    for (const match of content.matchAll(WIKILINK)) {
+        const target = match[1];
+        links.push(target.endsWith("\\") ? target.slice(0, -1) : target);
+    }
     for (const match of content.matchAll(NOTE_LINK)) links.push(match[1]);
     addAttachmentLinks(content, links);
 
