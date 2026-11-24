@@ -9,8 +9,8 @@
 
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { dirname } from "path";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
-import { parseFrontmatterAndLinks } from "./parse.js";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "crypto";
+import { PARSER_VERSION, parseFrontmatterAndLinks } from "./parse.js";
 import { isValidNotePath } from "./note-path.js";
 
 
@@ -84,6 +84,11 @@ export class SearchIndex {
     private content = new Map<string, string>();
     /** Frontmatter `title:` per path, when present — searched together with the path. */
     private titles = new Map<string, string>();
+    /**
+     * Hash of the text each note's tags, links and title were parsed from.
+     * Persisted, so the startup rebuild skips parsing notes that haven't changed.
+     */
+    private hashes = new Map<string, string>();
     /** Binary attachments (path -> size and mtime). Metadata only: their bytes are never read for the index. */
     private attachments = new Map<string, AttachmentEntry>();
     private saving = false;
@@ -123,6 +128,12 @@ export class SearchIndex {
                     this.backlinks.get(key)!.add(path);
                 }
             }
+            // Hashes and titles from another parser version are dropped, so
+            // those notes are parsed again by the startup rebuild.
+            if (data.parser === PARSER_VERSION) {
+                for (const [path, h] of Object.entries(data.hashes ?? {})) this.hashes.set(path, h as string);
+                for (const [path, t] of Object.entries(data.titles ?? {})) this.titles.set(path, t as string);
+            }
             for (const [path, v] of Object.entries(data.attachments ?? {})) {
                 const [size, mtime] = v as [number, number];
                 this.attachments.set(path, { size, mtime });
@@ -145,6 +156,9 @@ export class SearchIndex {
                 mtimes: Object.fromEntries(this.mtimes),
                 tags: Object.fromEntries(this.tags),
                 links: Object.fromEntries(this.links),
+                parser: PARSER_VERSION,
+                hashes: Object.fromEntries(this.hashes),
+                titles: Object.fromEntries(this.titles),
                 attachments: Object.fromEntries([...this.attachments].map(([p, a]) => [p, [a.size, a.mtime]])),
                 since: this._since,
             });
@@ -167,18 +181,23 @@ export class SearchIndex {
      * catch-up both write here without coordinating, so a write whose mtime is
      * not newer than the one recorded for text already held is skipped: a
      * stale copy can never replace a newer one. Mtimes loaded from disk carry
-     * no text, so the startup rebuild still fills them in.
+     * no text, so the startup rebuild still fills them in; when the text's
+     * hash matches the one saved, the saved tags, links and title are kept
+     * and the note isn't parsed again.
      */
     update(path: string, content: string, mtime?: number): void {
         if (mtime !== undefined && this.content.has(path) && mtime <= (this.mtimes.get(path) ?? -Infinity)) return;
-        if (this.knownPaths.has(path)) {
-            this.clearBacklinks(path);
-        }
+        const hash = createHash("sha1").update(content).digest("base64");
+        const unchanged = this.knownPaths.has(path) && this.hashes.get(path) === hash;
         this.knownPaths.add(path);
         if (mtime !== undefined) this.mtimes.set(path, mtime);
         // Same code path for the startup catch-up, the watcher and the
         // pre-search catch-up: whatever updates metadata also updates content.
         this.content.set(path, content);
+        if (unchanged) return;
+
+        this.clearBacklinks(path);
+        this.hashes.set(path, hash);
         const parsed = parseFrontmatterAndLinks(content);
         const title = parsed.frontmatter["title"];
         if (typeof title === "string" && title.trim().length > 0) {
@@ -211,6 +230,7 @@ export class SearchIndex {
             this.tags.delete(path);
             this.content.delete(path);
             this.titles.delete(path);
+            this.hashes.delete(path);
             this.clearBacklinks(path);
         }
     }

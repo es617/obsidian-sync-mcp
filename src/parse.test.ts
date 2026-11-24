@@ -308,6 +308,12 @@ Also #shared inline`;
         assert.deepEqual(result.tags, ["real"]);
     });
 
+    it("does not read escaped or entity-encoded tags and links", () => {
+        const result = parseFrontmatterAndLinks("\\#escaped &#35;entity #tag \\[\\[escaped]] [[a\\|alias]] [[link]]");
+        assert.deepEqual(result.tags, ["tag"]);
+        assert.deepEqual(result.links.sort(), ["a", "link"]);
+    });
+
     it("treats a backslash-escaped backtick as literal", () => {
         assert.deepEqual(parseFrontmatterAndLinks("\\`[[a]]\\` [[b]]").links.sort(), ["a", "b"]);
         // The rest of an escaped run still opens a span: \``x` is a literal ` and then code `x`.

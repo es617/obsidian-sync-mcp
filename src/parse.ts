@@ -6,6 +6,12 @@ import MarkdownIt, { type Token } from "markdown-it";
 import { parse as parseYaml } from "yaml";
 import { isValidAttachmentPath } from "./attachment-path.js";
 
+/**
+ * Bump whenever parseFrontmatterAndLinks returns something different for the
+ * same note, so metadata saved by an older parser is re-parsed, not reused.
+ */
+export const PARSER_VERSION = 2;
+
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
@@ -25,7 +31,9 @@ const TAG = /(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu;
 
 // CommonMark plus GFM tables. Raw HTML is recognised, so a backtick inside a
 // tag's attribute can't open a code span; text between tags is still read.
+// text_join is off so escapes and entities stay separate tokens (see readBody).
 const markdown = new MarkdownIt({ html: true, linkify: false });
+markdown.core.ruler.disable("text_join");
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     content = content.replace(/\r\n/g, "\n");
@@ -90,6 +98,10 @@ function readBody(tokens: Token[], links: string[]): string {
             switch (token.type) {
                 case "inline": visit(token.children ?? []); break;
                 case "text": text += token.content; break;
+                // An escape or entity is kept as written, so \#x isn't a tag
+                // and \[\[x]] isn't a link, as in Obsidian. An escaped pipe is
+                // a pipe: [[note\|alias]] links note.
+                case "text_special": text += token.content === "|" ? "|" : token.markup; break;
                 // A code span leaves a "|", which can't start a tag or a
                 // wikilink target, so its neighbours don't join up:
                 // `x`#tag isn't a tag, [[note|`alias`]] still links note.
