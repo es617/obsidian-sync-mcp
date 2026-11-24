@@ -9,6 +9,7 @@
 - `WRITE_FOLDERS` configs that used to start can now stop the server with an error: an unknown permission after `:`, a folder listed twice (including case variants such as `Raw,raw`), or a folder that can never match a path (a backslash, or an empty, `.` or `..` segment).
 - `/` in `WRITE_FOLDERS` used to be ignored. It now means the vault root, so `WRITE_FOLDERS=MCP,/` makes the whole vault writable instead of only `MCP`. Remove `/` to keep the old behaviour.
 - `move_note` no longer replaces an existing note at the destination (see Fixes).
+- Local mode with `WRITE_FOLDERS` set: notes and attachments reached through a symlink (to a file or a folder) can still be read, but writing, deleting or moving them is refused. The permission check sees the requested path, so a symlink `MCP/alias.md` -> `Raw/a.md` would otherwise let a write in `MCP/` change a create-only note. Without `WRITE_FOLDERS`, symlinks behave as before.
 - Local mode: moves of notes and attachments now hard-link the file to the destination and then remove the source, instead of `rename()`, because `rename()` replaces an existing destination. Filesystems without hard links fall back to copy-then-delete. If the source can't be removed, the move is undone and reported as failed.
 
 ### Fixes

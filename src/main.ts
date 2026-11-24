@@ -110,7 +110,8 @@ let vault: VaultBackend;
 
 if (VAULT_PATH) {
     const { LocalVault } = await import("./vault-local.js");
-    vault = new LocalVault(VAULT_PATH);
+    // The WRITE_FOLDERS check sees requested paths, so writes must not follow symlinks elsewhere.
+    vault = new LocalVault(VAULT_PATH, { refuseSymlinkWrites: WRITE_FOLDERS !== null });
     console.log(`Local mode: ${VAULT_PATH}`);
 } else if (COUCHDB_URL) {
     if (!COUCHDB_PASSWORD) {

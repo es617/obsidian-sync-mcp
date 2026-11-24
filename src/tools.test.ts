@@ -153,6 +153,25 @@ describe("WRITE_FOLDERS permissions on note tools", () => {
         );
     });
 
+    it("issue #65 config: Raw is write-once but Raw/Ideas allows updates", async () => {
+        const { vault, call } = await setup("Wiki,Raw:create,Raw/Ideas:create+update");
+        assert.match(await call("write_note", { path: "Raw/Ideas/idea.md", content: "status: new" }), /Note saved/);
+        assert.match(await call("write_note", { path: "Raw/Ideas/idea.md", content: "status: done" }), /Note saved/);
+        assert.match(await call("edit_note", { path: "Raw/Ideas/idea.md", content: "more" }), /Note edited/);
+        assert.match(await call("delete_note", { path: "Raw/Ideas/idea.md" }), /Raw\/Ideas\/ allows only create\+update, so .* can't be deleted or moved/);
+        assert.match(await call("write_note", { path: "Raw/Ideas/sub/deeper.md", content: "v1" }), /Note saved/);
+        assert.match(await call("write_note", { path: "Raw/Ideas/sub/deeper.md", content: "v2" }), /Note saved/, "applies to subfolders too");
+        assert.match(await call("write_note", { path: "Raw/source.md", content: "v1" }), /Note saved/);
+        assert.match(await call("write_note", { path: "Raw/source.md", content: "v2" }), /Raw\/ allows only create/);
+        assert.match(await call("edit_note", { path: "Raw/source.md", content: "x" }), /Raw\/ allows only create/);
+        assert.match(await call("write_note", { path: "Raw/IdeasArchive/x.md", content: "v1" }), /Note saved/);
+        assert.match(await call("write_note", { path: "Raw/IdeasArchive/x.md", content: "v2" }), /Raw\/ allows only create/, "folder-boundary aware");
+        // Moving between the two needs delete at the source, which neither grants.
+        assert.match(await call("move_note", { from: "Raw/source.md", to: "Raw/Ideas/source.md" }), /can't be deleted or moved/);
+        assert.match(await call("move_note", { from: "Raw/Ideas/sub/deeper.md", to: "Raw/deeper.md" }), /can't be deleted or moved/);
+        assert.equal(await vault.readNote("Raw/source.md"), "v1");
+    });
+
     it("tool descriptions list the permissions", async () => {
         const { tools } = await setup("MCP,Raw:create");
         const desc = tools.find((t) => t.name === "write_note").description;

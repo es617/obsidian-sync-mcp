@@ -552,6 +552,21 @@ describe("E2E: WRITE_FOLDERS permissions", () => {
         assert.match(await callTool("write_note", { path: "daily/x.md", content: "x" }), /outside the writable folders/);
     });
 
+    it("refuses writes through a symlink while WRITE_FOLDERS is set", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(vaultDir, "Raw"), { recursive: true });
+        await mkdir(join(vaultDir, "MCP"), { recursive: true });
+        await writeFile(join(vaultDir, "Raw/linked.md"), "original");
+        await symlink("../Raw/linked.md", join(vaultDir, "MCP/linked-alias.md"));
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", WRITE_FOLDERS: "MCP,Raw:create" });
+        const resp = await mcpCall("tools/call", { name: "write_note", arguments: { path: "MCP/linked-alias.md", content: "TAMPERED" } });
+        const text = resp?.error?.message ?? resp?.result?.content?.[0]?.text ?? "";
+        assert.match(text, /through a symlink/, JSON.stringify(resp));
+        assert.equal(await readFile(join(vaultDir, "Raw/linked.md"), "utf-8"), "original");
+        assert.equal(await callTool("read_note", { path: "MCP/linked-alias.md" }).then((t) => t.includes("original")), true, "reads still follow it");
+    });
+
     it("an unknown permission stops the server at startup", async () => {
         await stopServer();
         const child = spawn(NODE_BIN, ["dist/main.js"], {

@@ -16,8 +16,33 @@ export class LocalVault implements VaultBackend {
     protected linkFile = link;
     protected unlinkSource = unlink;
 
-    constructor(vaultPath: string) {
+    private refuseSymlinkWrites: boolean;
+
+    /**
+     * `refuseSymlinkWrites`: refuse to write, delete or move through a symlink
+     * (file or folder) anywhere on the path. Set when WRITE_FOLDERS is, because
+     * the permission check sees the requested path: a symlink MCP/alias.md ->
+     * Raw/a.md would otherwise let a write in MCP/ change a create-only note.
+     */
+    constructor(vaultPath: string, { refuseSymlinkWrites = false }: { refuseSymlinkWrites?: boolean } = {}) {
         this.root = realpathSync(resolve(vaultPath));
+        this.refuseSymlinkWrites = refuseSymlinkWrites;
+    }
+
+    /**
+     * safePath for a write, delete or move. With refuseSymlinkWrites, the
+     * resolved path must be the requested one; only case and Unicode form may
+     * differ (case-insensitive file systems return the on-disk spelling).
+     */
+    private async writePath(path: string, kind: "note" | "attachment", options: { noSymlink?: boolean } = {}): Promise<string> {
+        const real = await this.safePath(path, kind, options);
+        if (this.refuseSymlinkWrites) {
+            const same = (s: string) => s.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\//, "").normalize("NFC").toLowerCase();
+            if (same(relative(this.root, real).split(sep).join("/")) !== same(path)) {
+                throw new Error(`Refusing to modify a file through a symlink while WRITE_FOLDERS is set: ${path}`);
+            }
+        }
+        return real;
     }
 
     private async safePath(path: string, kind: "note" | "attachment" | "folder" = "folder", { noSymlink = false } = {}): Promise<string> {
@@ -145,7 +170,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async writeNote(path: string, content: string, { mode = "upsert" }: NoteWriteOptions = {}): Promise<boolean> {
-        const fullPath = await this.safePath(path, "note");
+        const fullPath = await this.writePath(path, "note");
         // O_EXCL refuses an existing file and a missing O_CREAT refuses a
         // missing one, each in the same step as the write.
         const flag =
@@ -164,7 +189,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async deleteNote(path: string): Promise<boolean> {
-        const fullPath = await this.safePath(path, "note");
+        const fullPath = await this.writePath(path, "note");
         try {
             await unlink(fullPath);
             return true;
@@ -238,8 +263,8 @@ export class LocalVault implements VaultBackend {
     }
 
     async moveNote(from: string, to: string): Promise<boolean> {
-        const fromPath = await this.safePath(from, "note");
-        const toPath = await this.safePath(to, "note");
+        const fromPath = await this.writePath(from, "note");
+        const toPath = await this.writePath(to, "note");
         if (fromPath === toPath) {
             // Same file: a no-op, or a case-only rename on a case-insensitive
             // filesystem, where toPath is the realpath and has the old case.
@@ -316,7 +341,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async writeAttachment(path: string, data: Uint8Array, { overwrite = false }: WriteOptions = {}): Promise<boolean> {
-        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
+        const fullPath = await this.writePath(path, "attachment", { noSymlink: true });
         if (!(await this.mkdirChecked(path, fullPath))) return false;
         try {
             // O_EXCL fails if the file exists, in the same step as the create,
@@ -333,7 +358,7 @@ export class LocalVault implements VaultBackend {
     }
 
     async deleteAttachment(path: string): Promise<boolean> {
-        const fullPath = await this.safePath(path, "attachment", { noSymlink: true });
+        const fullPath = await this.writePath(path, "attachment", { noSymlink: true });
         try {
             await unlink(fullPath);
             return true;
@@ -343,8 +368,8 @@ export class LocalVault implements VaultBackend {
     }
 
     async moveAttachment(from: string, to: string, { overwrite = false }: MoveOptions = {}): Promise<boolean> {
-        const fromPath = await this.safePath(from, "attachment", { noSymlink: true });
-        const toPath = await this.safePath(to, "attachment", { noSymlink: true });
+        const fromPath = await this.writePath(from, "attachment", { noSymlink: true });
+        const toPath = await this.writePath(to, "attachment", { noSymlink: true });
         if (fromPath === toPath) {
             // Same file, which link below would refuse with EEXIST. rename is a
             // no-op here, or the case-only rename on a case-insensitive filesystem.

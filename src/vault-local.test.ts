@@ -821,3 +821,54 @@ describe("moves never leave two names for one file", () => {
         }
     });
 });
+
+describe("refuseSymlinkWrites (set when WRITE_FOLDERS is)", () => {
+    let root: string;
+    before(async () => {
+        const { symlink } = await import("fs/promises");
+        root = await mkdtemp(join(tmpdir(), "vault-symlink-"));
+        await mkdir(join(root, "Raw"), { recursive: true });
+        await mkdir(join(root, "MCP"), { recursive: true });
+        await writeFile(join(root, "Raw/a.md"), "original");
+        await writeFile(join(root, "Raw/a.png"), "png");
+        await symlink("../Raw/a.md", join(root, "MCP/alias.md"));
+        await symlink("../Raw/a.png", join(root, "MCP/alias.png"));
+        await symlink("../Raw", join(root, "MCP/rawdir"));
+    });
+    after(async () => {
+        await rm(root, { recursive: true, force: true });
+    });
+
+    it("off by default: a symlinked note is written through, as before", async () => {
+        const plain = new LocalVault(root);
+        assert.equal(await plain.readNote("MCP/alias.md"), "original");
+        await plain.writeNote("MCP/alias.md", "original");
+        assert.equal(await readFile(join(root, "Raw/a.md"), "utf-8"), "original");
+    });
+
+    it("on: writes, edits, deletes and moves through a file or folder symlink are refused", async () => {
+        const strict = new LocalVault(root, { refuseSymlinkWrites: true });
+        const refused = /through a symlink while WRITE_FOLDERS is set/;
+        await assert.rejects(() => strict.writeNote("MCP/alias.md", "TAMPERED"), refused);
+        await assert.rejects(() => strict.writeNote("MCP/alias.md", "TAMPERED", { mode: "update" }), refused);
+        await assert.rejects(() => strict.writeNote("MCP/rawdir/a.md", "TAMPERED"), refused);
+        await assert.rejects(() => strict.writeNote("MCP/rawdir/new.md", "x", { mode: "create" }), refused, "a new file under a symlinked folder too");
+        await assert.rejects(() => strict.deleteNote("MCP/alias.md"), refused);
+        await assert.rejects(() => strict.moveNote("MCP/alias.md", "MCP/b.md"), refused);
+        await assert.rejects(() => strict.moveNote("MCP/rawdir/a.md", "MCP/b.md"), refused);
+        await assert.rejects(() => strict.writeAttachment("MCP/rawdir/b.png", new Uint8Array([1])), refused);
+        await assert.rejects(() => strict.deleteAttachment("MCP/rawdir/a.png"), refused);
+        await assert.rejects(() => strict.moveAttachment("MCP/rawdir/a.png", "MCP/b.png"), refused);
+        assert.equal(await readFile(join(root, "Raw/a.md"), "utf-8"), "original");
+        assert.ok(existsSync(join(root, "Raw/a.png")));
+        assert.equal(existsSync(join(root, "Raw/new.md")), false);
+    });
+
+    it("on: reads through symlinks still work, and ordinary writes are unaffected", async () => {
+        const strict = new LocalVault(root, { refuseSymlinkWrites: true });
+        assert.equal(await strict.readNote("MCP/alias.md"), "original");
+        assert.equal(await strict.writeNote("MCP/plain.md", "x", { mode: "create" }), true);
+        assert.equal(await strict.moveNote("MCP/plain.md", "MCP/deep/plain.md"), true);
+        assert.equal(await strict.deleteNote("MCP/deep/plain.md"), true);
+    });
+});
