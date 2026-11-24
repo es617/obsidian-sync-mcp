@@ -65,6 +65,7 @@ single: 'it''s'
 double: "say \"hi\"\tthen"
 padded: "  kept  "
 unknown: "C:\Users"
+commented: "My Note" # draft
 two: "a" and "b"
 lone: 'open
 ---
@@ -73,7 +74,8 @@ Text`;
         assert.equal(fm.single, "it's");
         assert.equal(fm.double, 'say "hi"\tthen');
         assert.equal(fm.padded, "  kept  ");
-        assert.equal(fm.unknown, String.raw`C:\Users`);
+        assert.equal(fm.unknown, String.raw`"C:\Users"`, "an escape not decoded here keeps the value as written");
+        assert.equal(fm.commented, "My Note");
         assert.equal(fm.two, `"a" and "b"`);
         assert.equal(fm.lone, "'open");
     });
@@ -144,10 +146,18 @@ Text #${nfdTag} here`;
         assert.deepEqual(result.tags, ["before", "after"]);
     });
 
-    it("treats an unclosed fence as running to the end", () => {
-        const content = "#kept\n```\n#lost\n#also-lost";
+    it("leaves a fence with no closer as text", () => {
+        // CommonMark runs it to the end, but then one stray ``` hides every
+        // later tag and link, and a missed link is worse than an extra one.
+        const content = "#kept\n```\n#also-kept [[Link]]";
         const result = parseFrontmatterAndLinks(content);
-        assert.deepEqual(result.tags, ["kept"]);
+        assert.deepEqual(result.tags, ["kept", "also-kept"]);
+        assert.deepEqual(result.links, ["Link"]);
+    });
+
+    it("masks fences in list items and callouts", () => {
+        const content = "- ```bash\n  [[in-list]]\n  ```\n- see [[Next]]\n> [!note]\n> ```\n> [[in-callout]]\n> ```\n\nMore [[After]]";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["After", "Next"]);
     });
 
     it("leaves an unmatched backtick run as literal text", () => {
@@ -266,9 +276,33 @@ Also #shared inline`;
         }
     });
 
-    it("still masks a code span that wraps within a paragraph or quote", () => {
-        const content = "See `[[a]]\ncontinued` and\n> quoted `[[b]]\n> still` [[c]]\n- item `[[d]]\n  wrapped` [[e]]";
-        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["c", "e"]);
+    it("keeps code spans to one line, and to one cell in a table row", () => {
+        const cases: [string, string[]][] = [
+            ["Title `x\n===\n[[Setext]] `y`", ["Setext"]],
+            ["a `x\n***\n[[Break]] `y`", ["Break"]],
+            ["> - a `x\n> - see [[Callout]] `y`", ["Callout"]],
+            ["[^1]: `x\n[^2]: [[Footnote]] `y`", ["Footnote"]],
+            ["| a | b |\n|---|---|\n| `x | [[Cell]] | y` |", ["Cell"]],
+            ["| `[[a\\|b]]` | `[[c]]` |", []],
+            // The cost: a span that wraps is missed, and its closing backtick
+            // then pairs with the next one, so a link in code is indexed.
+            ["See `[[wrapped\nspan]]` and `[[in-code]]`", ["in-code"]],
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), links.sort(), content);
+        }
+    });
+
+    it("reads CRLF notes like LF ones", () => {
+        const result = parseFrontmatterAndLinks("---\r\ntitle: \"T\"\r\ncmd: `ls\r\ntags: [a]\r\n---\r\n[[Body]] `x`\r\n");
+        assert.equal(result.frontmatter.title, "T");
+        assert.deepEqual(result.tags, ["a"]);
+        assert.deepEqual(result.links, ["Body"]);
+    });
+
+    it("does not read inline #tags from frontmatter values", () => {
+        const result = parseFrontmatterAndLinks("---\ncolor: #ff0000\nnote: see #idea\n---\nBody #real");
+        assert.deepEqual(result.tags, ["real"]);
     });
 
     it("treats a backslash-escaped backtick as literal", () => {
