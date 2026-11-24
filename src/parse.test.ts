@@ -52,6 +52,13 @@ Content`;
         assert.deepEqual(list.tags.sort(), ["alpha", "beta/gamma", "delta"]);
     });
 
+    it("strips YAML quotes from frontmatter values", () => {
+        const result = parseFrontmatterAndLinks(`---\ntitle: "My Note"\nstatus: 'draft'\nnote: it's "fine"\n---\nText`);
+        assert.equal(result.frontmatter.title, "My Note");
+        assert.equal(result.frontmatter.status, "draft");
+        assert.equal(result.frontmatter.note, `it's "fine"`);
+    });
+
     it("keeps a lone or mismatched quote in a tag", () => {
         const result = parseFrontmatterAndLinks(`---\ntags: ["alpha', it's]\n---\nText`);
         assert.ok(result.tags.includes(`"alpha'`));
@@ -209,6 +216,18 @@ Also #shared inline`;
         const content = "| Note | Where |\n| --- | --- |\n| [[folder/note\\|label]] | [[other\\|x]] |";
         const result = parseFrontmatterAndLinks(content);
         assert.deepEqual(result.links.sort(), ["folder/note", "other"]);
+    });
+
+    it("ignores links written inside code", () => {
+        const content = "Use `[[span]]` or `[x](span.md)`.\n\n```md\n[[fenced]] ![](fenced.png)\n```\n\n[[real]]";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links, ["real"]);
+    });
+
+    it("keeps links whose label contains code", () => {
+        const content = "[`run`](scripts/run.md) [[note|`alias`]] ![`shot`](img/shot.png)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["img/shot.png", "note", "scripts/run.md"]);
     });
 
     it("drops #heading, #^block and #page anchors from wikilink targets", () => {

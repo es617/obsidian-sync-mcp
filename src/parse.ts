@@ -33,7 +33,8 @@ const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL})+\]\(([^()#\n]+\.md)(
 // [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title").
 const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL})*)\]\((<[^<>\n]+>|[^()\s]+)(?:\s+"[^"\n]*")?\)`, "g");
 
-// A YAML scalar may be quoted: tags: ["a", 'b'] holds the strings a and b.
+// A YAML scalar may be quoted: tags: ["a", 'b'] holds the strings a and b,
+// and title: "My Note" the string My Note.
 function unquote(value: string): string {
     const m = value.match(/^(["'])(.*)\1$/);
     return m ? m[2].trim() : value;
@@ -64,7 +65,7 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
 
                 const match = line.match(/^([\p{L}\p{N}_][\p{L}\p{M}\p{N}_-]*)\s*:\s*(.+)/u);
                 if (match) {
-                    frontmatter[match[1]] = match[2].trim();
+                    frontmatter[match[1]] = unquote(match[2].trim());
                 }
                 // Frontmatter tags (inline: [a, b] or start of multi-line list)
                 if (/^tags\s*:/.test(line)) {
@@ -89,19 +90,22 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     // contain at least one non-numerical character ("#1984 isn't a valid tag,
     // but #y1984 is" — obsidian.md/help/tags), so code spans and fenced blocks
     // are masked out first and all-digit matches are dropped.
-    for (const match of maskCode(content).matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
+    // Links are read from the same masked text: Obsidian does not link [[x]]
+    // or [x](x.md) written inside code either.
+    const masked = maskCode(content);
+    for (const match of masked.matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
         if (/^\p{Nd}+$/u.test(match[2])) continue;
         tags.add(match[2]);
     }
 
     // Inside a table Obsidian writes [[note\|alias]]: the backslash escapes the
     // pipe and is not part of the target.
-    for (const match of content.matchAll(WIKILINK)) {
+    for (const match of masked.matchAll(WIKILINK)) {
         const target = match[1];
         links.push(target.endsWith("\\") ? target.slice(0, -1) : target);
     }
-    for (const match of content.matchAll(NOTE_LINK)) links.push(match[1]);
-    addAttachmentLinks(content, links);
+    for (const match of masked.matchAll(NOTE_LINK)) links.push(match[1]);
+    addAttachmentLinks(masked, links);
 
     return { frontmatter, tags: [...tags], links: [...new Set(links)] };
 }
