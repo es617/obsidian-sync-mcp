@@ -36,7 +36,8 @@
         "test": "node --import tsx --test 'src/**/*.test.ts'",
         "test:e2e": "node --import tsx --test test/e2e.test.ts",
         "test:couchdb": "tsup test/couchdb-obfuscation.e2e.ts --out-dir .harness-tmp && node .harness-tmp/couchdb-obfuscation.e2e.js",
-        "test:smoke": "npm run build && tsup test/smoke.e2e.ts --out-dir .harness-tmp && node .harness-tmp/smoke.e2e.js"
+        "test:smoke": "npm run build && tsup test/smoke.e2e.ts --out-dir .harness-tmp && node .harness-tmp/smoke.e2e.js",
+        "test:vault-stub": "tsup test/vault-notes.stub.e2e.ts --out-dir .harness-tmp && node --test .harness-tmp/vault-notes.stub.e2e.js"
     },
     "dependencies": {
         "@vrtmrz/value-store": "^0.1.0",

@@ -1,11 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod, stat } from "fs/promises";
 import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
-import { AttachmentExistsError, AttachmentMoveIncompleteError } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, NoteExistsError, NoteNotFoundError } from "./vault-backend.js";
 import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
@@ -121,6 +121,127 @@ describe("moveNote", () => {
 
     it("returns false if source doesn't exist", async () => {
         assert.equal(await vault.moveNote("nope.md", "dest.md"), false);
+    });
+
+    it("never replaces an existing note at the destination", async () => {
+        await vault.writeNote("noreplace/src.md", "src");
+        await vault.writeNote("noreplace/dest.md", "dest");
+        await assert.rejects(() => vault.moveNote("noreplace/src.md", "noreplace/dest.md"), NoteExistsError);
+        assert.equal(await vault.readNote("noreplace/src.md"), "src");
+        assert.equal(await vault.readNote("noreplace/dest.md"), "dest");
+    });
+});
+
+describe("writeNote modes", () => {
+    it("create: writes a new note, refuses an existing one", async () => {
+        assert.equal(await vault.writeNote("modes/new/a.md", "v1", { mode: "create" }), true);
+        await assert.rejects(() => vault.writeNote("modes/new/a.md", "v2", { mode: "create" }), NoteExistsError);
+        assert.equal(await vault.readNote("modes/new/a.md"), "v1");
+    });
+
+    it("create: of two concurrent creates only one succeeds", async () => {
+        const results = await Promise.allSettled([
+            vault.writeNote("modes/race.md", "one", { mode: "create" }),
+            vault.writeNote("modes/race.md", "two", { mode: "create" }),
+        ]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+    });
+
+    it("update: replaces an existing note, refuses a missing one without creating it", async () => {
+        await vault.writeNote("modes/u.md", "long original content");
+        assert.equal(await vault.writeNote("modes/u.md", "short", { mode: "update" }), true);
+        assert.equal(await vault.readNote("modes/u.md"), "short", "truncated, not overlaid");
+        await assert.rejects(() => vault.writeNote("modes/missing/u.md", "x", { mode: "update" }), NoteNotFoundError);
+        assert.equal(existsSync(join(tmpDir, "modes/missing")), false, "no folder created either");
+    });
+
+    it("upsert (explicit or default) creates folders and replaces", async () => {
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v1", { mode: "upsert" }), true);
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v2", { mode: "upsert" }), true);
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v3", {}), true);
+        assert.equal(await vault.readNote("modes/up/deep/a.md"), "v3");
+    });
+
+    it("errors carry the vault-relative path", async () => {
+        await vault.writeNote("modes/err.md", "x");
+        await assert.rejects(() => vault.writeNote("modes/err.md", "y", { mode: "create" }), (e: any) => e instanceof NoteExistsError && e.path === "modes/err.md" && e.message === "Note already exists: modes/err.md");
+        await assert.rejects(() => vault.writeNote("modes/nope.md", "y", { mode: "update" }), (e: any) => e instanceof NoteNotFoundError && e.path === "modes/nope.md" && e.message === "Note not found: modes/nope.md");
+    });
+
+    it("create: many concurrent creates, exactly one winner whose content is stored", async () => {
+        const contents = Array.from({ length: 8 }, (_, i) => `writer ${i}`);
+        const results = await Promise.allSettled(contents.map((c) => vault.writeNote("modes/many.md", c, { mode: "create" })));
+        const winners = results.flatMap((r, i) => (r.status === "fulfilled" ? [i] : []));
+        assert.equal(winners.length, 1);
+        for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof NoteExistsError);
+        assert.equal(await vault.readNote("modes/many.md"), contents[winners[0]]);
+    });
+
+    it("update: a note deleted first is not recreated by a racing update", async () => {
+        await vault.writeNote("modes/del.md", "x");
+        await vault.deleteNote("modes/del.md");
+        await assert.rejects(() => vault.writeNote("modes/del.md", "y", { mode: "update" }), NoteNotFoundError);
+        assert.equal(await vault.readNote("modes/del.md"), null);
+    });
+});
+
+describe("moveNote without replacing", () => {
+    it("moves into a new folder and leaves a single link to the file", async () => {
+        await vault.writeNote("nr/a.md", "content");
+        assert.equal(await vault.moveNote("nr/a.md", "nr2/sub/a.md"), true);
+        assert.equal(existsSync(join(tmpDir, "nr/a.md")), false);
+        assert.equal((await stat(join(tmpDir, "nr2/sub/a.md"))).nlink, 1, "the source link was removed");
+        assert.equal(await vault.readNote("nr2/sub/a.md"), "content");
+    });
+
+    it("refuses an existing destination in another folder, carrying the destination path", async () => {
+        await vault.writeNote("nr/x.md", "x");
+        await vault.writeNote("nr-other/x.md", "other");
+        await assert.rejects(() => vault.moveNote("nr/x.md", "nr-other/x.md"), (e: any) => e instanceof NoteExistsError && e.path === "nr-other/x.md");
+        assert.equal(await vault.readNote("nr/x.md"), "x");
+        assert.equal(await vault.readNote("nr-other/x.md"), "other");
+        assert.equal((await stat(join(tmpDir, "nr/x.md"))).nlink, 1, "no stray link left behind");
+    });
+
+    it("of two concurrent moves onto one new path, one wins and the other source stays", async () => {
+        await vault.writeNote("nr/race1.md", "one");
+        await vault.writeNote("nr/race2.md", "two");
+        const results = await Promise.allSettled([vault.moveNote("nr/race1.md", "nr/won.md"), vault.moveNote("nr/race2.md", "nr/won.md")]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+        const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        assert.ok(lost.reason instanceof NoteExistsError);
+        const winner = results[0].status === "fulfilled" ? "one" : "two";
+        const loserPath = winner === "one" ? "nr/race2.md" : "nr/race1.md";
+        assert.equal(await vault.readNote("nr/won.md"), winner);
+        assert.equal(await vault.readNote(loserPath), winner === "one" ? "two" : "one");
+    });
+
+    it("a move racing a create of the destination never overwrites it", async () => {
+        await vault.writeNote("nr/mover.md", "mover");
+        const results = await Promise.allSettled([
+            vault.moveNote("nr/mover.md", "nr/target.md"),
+            vault.writeNote("nr/target.md", "creator", { mode: "create" }),
+        ]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+        const target = await vault.readNote("nr/target.md");
+        if (results[0].status === "fulfilled") assert.equal(target, "mover");
+        else {
+            assert.equal(target, "creator");
+            assert.equal(await vault.readNote("nr/mover.md"), "mover");
+        }
+    });
+
+    it("onto itself is a no-op that keeps the note", async () => {
+        await vault.writeNote("nr/self.md", "self");
+        assert.equal(await vault.moveNote("nr/self.md", "nr/self.md"), true);
+        assert.equal(await vault.readNote("nr/self.md"), "self");
+    });
+
+    it("a case-only rename works and leaves one file under the new name", async () => {
+        await vault.writeNote("nr-case/note.md", "case");
+        assert.equal(await vault.moveNote("nr-case/note.md", "nr-case/Note.md"), true);
+        assert.deepEqual(await readdir(join(tmpDir, "nr-case")), ["Note.md"]);
+        assert.equal(await vault.readNote("nr-case/Note.md"), "case");
     });
 });
 
@@ -466,13 +587,17 @@ describe("attachments", () => {
         }
     });
 
-    it("reports a move whose source could not be deleted, with both files kept", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+    it("undoes a move whose source could not be deleted, so no second name is left", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+        // The destination is a hard link to the source; keeping both names would
+        // let a write to one change the other (e.g. a create-only folder's file).
+        // A copy that can't delete its source still reports AttachmentMoveIncompleteError
+        // (see "moves never leave two names for one file").
         await vault.writeAttachment("locked/src.png", bytes);
         await chmod(join(tmpDir, "locked"), 0o555);
         try {
-            await assert.rejects(() => vault.moveAttachment("locked/src.png", "free/dest.png"), AttachmentMoveIncompleteError);
+            assert.equal(await vault.moveAttachment("locked/src.png", "free/dest.png"), false);
             assert.ok(existsSync(join(tmpDir, "locked/src.png")));
-            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "free/dest.png"))), bytes);
+            assert.equal(existsSync(join(tmpDir, "free/dest.png")), false);
         } finally {
             await chmod(join(tmpDir, "locked"), 0o755);
             await rm(join(tmpDir, "locked"), { recursive: true, force: true });
@@ -606,5 +731,148 @@ describe("attachments", () => {
             await unlink(join(tmpDir, "trashed.md")).catch(() => {});
             await rm(join(tmpDir, ".trash"), { recursive: true, force: true });
         }
+    });
+});
+
+describe("moves never leave two names for one file", () => {
+    /** A LocalVault whose link/unlink can be made to fail, as on Windows with the file open or on FUSE mounts. */
+    class FlakyVault extends LocalVault {
+        failUnlink = false;
+        linkError: string | null = null;
+        constructor(root: string) {
+            super(root);
+            const realUnlink = this.unlinkSource;
+            const realLink = this.linkFile;
+            this.unlinkSource = (async (p: any) => {
+                if (this.failUnlink) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+                return realUnlink(p);
+            }) as any;
+            this.linkFile = (async (a: any, b: any) => {
+                if (this.linkError) throw Object.assign(new Error("no links"), { code: this.linkError });
+                return realLink(a, b);
+            }) as any;
+        }
+    }
+    let root: string;
+    let flaky: FlakyVault;
+    before(async () => {
+        root = await mkdtemp(join(tmpdir(), "vault-flaky-"));
+        flaky = new FlakyVault(root);
+    });
+    after(async () => {
+        await rm(root, { recursive: true, force: true });
+    });
+
+    it("note: a failed source delete undoes the link", async () => {
+        await flaky.writeNote("MCP/x.md", "x");
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveNote("MCP/x.md", "Raw/new.md"), false);
+        } finally {
+            flaky.failUnlink = false;
+        }
+        assert.equal(existsSync(join(root, "Raw/new.md")), false, "destination link removed");
+        assert.equal(await flaky.readNote("MCP/x.md"), "x");
+    });
+
+    it("note: a failed source delete after a copy removes the copy", async () => {
+        await flaky.writeNote("MCP/y.md", "y");
+        flaky.linkError = "ENOSYS";
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveNote("MCP/y.md", "Raw/y.md"), false);
+        } finally {
+            flaky.failUnlink = false;
+            flaky.linkError = null;
+        }
+        assert.equal(existsSync(join(root, "Raw/y.md")), false);
+        assert.equal(await flaky.readNote("MCP/y.md"), "y");
+    });
+
+    it("note: filesystems without hard links (ENOSYS) fall back to copy", async () => {
+        await flaky.writeNote("MCP/z.md", "z");
+        flaky.linkError = "ENOSYS";
+        try {
+            assert.equal(await flaky.moveNote("MCP/z.md", "Raw/z.md"), true);
+        } finally {
+            flaky.linkError = null;
+        }
+        assert.equal(await flaky.readNote("Raw/z.md"), "z");
+        assert.equal(await flaky.readNote("MCP/z.md"), null);
+    });
+
+    it("attachment: a failed source delete undoes the link instead of reporting a partial move", async () => {
+        await flaky.writeAttachment("MCP/a.png", new Uint8Array([1]));
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveAttachment("MCP/a.png", "Raw/a.png"), false);
+        } finally {
+            flaky.failUnlink = false;
+        }
+        assert.equal(existsSync(join(root, "Raw/a.png")), false);
+        assert.ok(existsSync(join(root, "MCP/a.png")));
+    });
+
+    it("attachment: a failed source delete after a copy is still reported as incomplete", async () => {
+        await flaky.writeAttachment("MCP/b.png", new Uint8Array([2]));
+        flaky.linkError = "EXDEV";
+        flaky.failUnlink = true;
+        try {
+            await assert.rejects(() => flaky.moveAttachment("MCP/b.png", "Raw/b.png"), AttachmentMoveIncompleteError);
+        } finally {
+            flaky.failUnlink = false;
+            flaky.linkError = null;
+        }
+    });
+});
+
+describe("refuseSymlinkWrites (set when WRITE_FOLDERS is)", () => {
+    let root: string;
+    before(async () => {
+        const { symlink } = await import("fs/promises");
+        root = await mkdtemp(join(tmpdir(), "vault-symlink-"));
+        await mkdir(join(root, "Raw"), { recursive: true });
+        await mkdir(join(root, "MCP"), { recursive: true });
+        await writeFile(join(root, "Raw/a.md"), "original");
+        await writeFile(join(root, "Raw/a.png"), "png");
+        await symlink("../Raw/a.md", join(root, "MCP/alias.md"));
+        await symlink("../Raw/a.png", join(root, "MCP/alias.png"));
+        await symlink("../Raw", join(root, "MCP/rawdir"));
+    });
+    after(async () => {
+        await rm(root, { recursive: true, force: true });
+    });
+
+    it("off by default: a symlinked note is written through, as before", async () => {
+        const plain = new LocalVault(root);
+        assert.equal(await plain.readNote("MCP/alias.md"), "original");
+        await plain.writeNote("MCP/alias.md", "original");
+        assert.equal(await readFile(join(root, "Raw/a.md"), "utf-8"), "original");
+    });
+
+    it("on: writes, edits, deletes and moves through a file or folder symlink are refused", async () => {
+        const strict = new LocalVault(root, { refuseSymlinkWrites: true });
+        const refused = /through a symlink while WRITE_FOLDERS is set/;
+        await assert.rejects(() => strict.writeNote("MCP/alias.md", "TAMPERED"), refused);
+        await assert.rejects(() => strict.writeNote("MCP/alias.md", "TAMPERED", { mode: "update" }), refused);
+        await assert.rejects(() => strict.writeNote("MCP/rawdir/a.md", "TAMPERED"), refused);
+        await assert.rejects(() => strict.writeNote("MCP/rawdir/new.md", "x", { mode: "create" }), refused, "a new file under a symlinked folder too");
+        await assert.rejects(() => strict.deleteNote("MCP/alias.md"), refused);
+        await assert.rejects(() => strict.moveNote("MCP/alias.md", "MCP/b.md"), refused);
+        await assert.rejects(() => strict.moveNote("MCP/rawdir/a.md", "MCP/b.md"), refused);
+        await assert.rejects(() => strict.writeAttachment("MCP/rawdir/b.png", new Uint8Array([1])), refused);
+        await assert.rejects(() => strict.deleteAttachment("MCP/rawdir/a.png"), refused);
+        await assert.rejects(() => strict.moveAttachment("MCP/rawdir/a.png", "MCP/b.png"), refused);
+        assert.equal(await readFile(join(root, "Raw/a.md"), "utf-8"), "original");
+        assert.ok(existsSync(join(root, "Raw/a.png")));
+        assert.equal(existsSync(join(root, "Raw/new.md")), false);
+    });
+
+    it("on: reads through symlinks still work, and ordinary writes are unaffected", async () => {
+        const strict = new LocalVault(root, { refuseSymlinkWrites: true });
+        assert.equal(await strict.readNote("MCP/alias.md"), "original");
+        assert.equal(await strict.writeNote("MCP/plain.md", "x", { mode: "create" }), true);
+        assert.equal(await strict.moveNote("MCP/plain.md", "MCP/deep/plain.md"), true);
+        assert.equal(await strict.deleteNote("MCP/deep/plain.md"), true);
     });
 });

@@ -4,7 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile, unlink } from "fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, unlink, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn, type ChildProcess } from "child_process";
@@ -531,6 +531,257 @@ describe("E2E: READ_ONLY mode", () => {
         const resp = await mcpCall("tools/call", { name: "write_note", arguments: { path: "blocked.md", content: "x" } });
         assert.ok(resp?.error, "write_note call should return an error");
         assert.ok(!existsSync(join(vaultDir, "blocked.md")), "no file should be created when write is blocked");
+    });
+});
+
+describe("E2E: WRITE_FOLDERS permissions", () => {
+    it("Raw:create allows new notes but refuses overwrite, edit, delete and move", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", WRITE_FOLDERS: "MCP,Raw:create" });
+        assert.ok(serverLogs.includes("WRITE_FOLDERS: writes restricted to MCP/, Raw/ (create only)."), serverLogs);
+
+        assert.match(await callTool("write_note", { path: "Raw/source.md", content: "original" }), /Note saved/);
+        assert.match(await callTool("write_note", { path: "Raw/source.md", content: "changed" }), /allows only create.*already exists/);
+        assert.match(await callTool("edit_note", { path: "Raw/source.md", content: "more" }), /can't be changed/);
+        assert.match(await callTool("delete_note", { path: "Raw/source.md" }), /can't be deleted or moved/);
+        assert.match(await callTool("move_note", { from: "Raw/source.md", to: "MCP/source.md" }), /can't be deleted or moved/);
+        assert.equal(await readFile(join(vaultDir, "Raw/source.md"), "utf-8"), "original");
+
+        assert.match(await callTool("write_note", { path: "MCP/draft.md", content: "draft" }), /Note saved/);
+        assert.match(await callTool("move_note", { from: "MCP/draft.md", to: "Raw/draft.md" }), /Moved/);
+        assert.match(await callTool("write_note", { path: "daily/x.md", content: "x" }), /outside the writable folders/);
+    });
+
+    it("refuses writes through a symlink while WRITE_FOLDERS is set", async () => {
+        const { symlink } = await import("fs/promises");
+        await mkdir(join(vaultDir, "Raw"), { recursive: true });
+        await mkdir(join(vaultDir, "MCP"), { recursive: true });
+        await writeFile(join(vaultDir, "Raw/linked.md"), "original");
+        await symlink("../Raw/linked.md", join(vaultDir, "MCP/linked-alias.md"));
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", WRITE_FOLDERS: "MCP,Raw:create" });
+        const resp = await mcpCall("tools/call", { name: "write_note", arguments: { path: "MCP/linked-alias.md", content: "TAMPERED" } });
+        const text = resp?.error?.message ?? resp?.result?.content?.[0]?.text ?? "";
+        assert.match(text, /through a symlink/, JSON.stringify(resp));
+        assert.equal(await readFile(join(vaultDir, "Raw/linked.md"), "utf-8"), "original");
+        assert.equal(await callTool("read_note", { path: "MCP/linked-alias.md" }).then((t) => t.includes("original")), true, "reads still follow it");
+    });
+
+    it("an unknown permission stops the server at startup", async () => {
+        await stopServer();
+        const child = spawn(NODE_BIN, ["dist/main.js"], {
+            env: { ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: AUTH, VAULT_PATH: vaultDir, WRITE_FOLDERS: "Raw:creat" },
+            stdio: "pipe",
+        });
+        let stderr = "";
+        child.stderr?.on("data", (d) => { stderr += d.toString(); });
+        const code = await new Promise((r) => child.on("exit", r));
+        assert.equal(code, 1);
+        assert.match(stderr, /unknown permission 'creat'/);
+    });
+
+    /** Start the server with an invalid WRITE_FOLDERS; resolves with its exit code and stderr. */
+    async function startupFailure(writeFolders: string): Promise<{ code: unknown; stderr: string }> {
+        const child = spawn(NODE_BIN, ["dist/main.js"], {
+            env: { ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: AUTH, VAULT_PATH: vaultDir, WRITE_FOLDERS: writeFolders },
+            stdio: "pipe",
+        });
+        let stderr = "";
+        child.stderr?.on("data", (d) => { stderr += d.toString(); });
+        const code = await new Promise((r) => child.on("exit", r));
+        return { code, stderr };
+    }
+
+    it("a folder listed twice, an entry without a folder, or an empty permission stops the server", async () => {
+        for (const [raw, message] of [
+            ["MCP,/MCP/:create", "WRITE_FOLDERS: 'MCP' is listed more than once."],
+            [":create", "WRITE_FOLDERS: ':create' has no folder. Use '/' for the vault root."],
+            ["Raw:", "WRITE_FOLDERS: unknown permission '' in 'Raw:'."],
+            ["Raw:create+read", "WRITE_FOLDERS: unknown permission 'read' in 'Raw:create+read'."],
+        ]) {
+            const { code, stderr } = await startupFailure(raw);
+            assert.equal(code, 1, raw);
+            assert.ok(stderr.includes(message), `${raw}: ${stderr}`);
+            assert.ok(!stderr.includes("    at "), `${raw}: no stack trace`);
+        }
+    });
+
+    describe("permission matrix (own vault)", () => {
+        let permVault: string;
+        before(async () => {
+            permVault = await mkdtemp(join(tmpdir(), "vault-e2e-perm-"));
+            for (const [p, c] of Object.entries({
+                "Raw/existing.md": "raw original",
+                "Notes/existing.md": "notes original",
+                "Live/existing.md": "live original",
+                "Trash/old.md": "old",
+                "Trash/older.md": "older",
+                "MCP/free.md": "free",
+                "root.md": "root original",
+            })) {
+                await mkdir(join(permVault, p, ".."), { recursive: true });
+                await writeFile(join(permVault, p), c);
+            }
+            await stopServer();
+            await startServer({
+                VAULT_PATH: permVault,
+                VAULT_NAME: "PermVault",
+                WRITE_FOLDERS: "/:create,MCP,Raw:create,Raw/scratch,Notes:create+update,Live:update,Trash:delete",
+                ATTACHMENTS_ENABLED: "true",
+                BASE_URL: `http://localhost:${PORT}`,
+            });
+        });
+        after(async () => {
+            await stopServer();
+            await rm(permVault, { recursive: true, force: true });
+        });
+        const read = (p: string) => readFile(join(permVault, p), "utf-8");
+
+        it("logs the scope and puts it in every write tool's description", async () => {
+            assert.ok(serverLogs.includes(
+                "WRITE_FOLDERS: writes restricted to / (create only), MCP/, Raw/ (create only), Raw/scratch/, Notes/ (create+update only), Live/ (update only), Trash/ (delete only).",
+            ), serverLogs);
+            const list = await mcpCall("tools/list", {});
+            const tools: any[] = list?.result?.tools ?? [];
+            for (const name of ["write_note", "edit_note", "delete_note", "move_note", "write_attachment", "create_attachment_upload", "delete_attachment", "move_attachment"]) {
+                const desc: string = tools.find((t) => t.name === name)?.description ?? "";
+                assert.match(desc, /Writes are only allowed inside: \/ \(create only\), MCP\/, Raw\/ \(create only\).*the most specific folder applies\./, name);
+            }
+            for (const name of ["read_note", "search_notes", "list_attachments"]) {
+                assert.doesNotMatch(tools.find((t) => t.name === name)?.description ?? "", /Writes are only allowed/, name);
+            }
+        });
+
+        it("root '/' rule: create-only at the root and in unlisted folders", async () => {
+            assert.match(await callTool("write_note", { path: "new-root.md", content: "n" }), /^Note saved/);
+            assert.match(await callTool("write_note", { path: "Unlisted/deep/n.md", content: "n" }), /^Note saved/);
+            assert.equal(
+                await callTool("write_note", { path: "root.md", content: "x" }),
+                "Write access denied: / allows only create, so 'root.md' can't be changed. The note already exists; choose a new path.",
+            );
+            assert.match(await callTool("edit_note", { path: "root.md", content: "x" }), /can't be changed/);
+            assert.match(await callTool("delete_note", { path: "root.md" }), /can't be deleted or moved/);
+            assert.equal(await read("root.md"), "root original");
+        });
+
+        it("create-only: refusals don't reveal whether a note exists", async () => {
+            for (const tool of ["edit_note", "delete_note"]) {
+                const a = await callTool(tool, { path: "Raw/existing.md", content: "x" });
+                const b = await callTool(tool, { path: "Raw/absent.md", content: "x" });
+                assert.equal(a.replace("existing", "X"), b.replace("absent", "X"), tool);
+            }
+            assert.equal(await read("Raw/existing.md"), "raw original");
+        });
+
+        it("nested: Raw/scratch is fully writable inside create-only Raw", async () => {
+            assert.match(await callTool("write_note", { path: "Raw/scratch/s.md", content: "1" }), /^Note saved/);
+            assert.match(await callTool("write_note", { path: "Raw/scratch/s.md", content: "2" }), /^Note saved/);
+            assert.match(await callTool("edit_note", { path: "Raw/scratch/s.md", content: "3" }), /^Note edited/);
+            assert.match(await callTool("move_note", { from: "Raw/scratch/s.md", to: "Raw/promoted.md" }), /^Moved/);
+            assert.match(await callTool("move_note", { from: "Raw/promoted.md", to: "Raw/scratch/back.md" }), /Raw\/ allows only create/);
+            assert.equal(await read("Raw/promoted.md"), "2\n3");
+        });
+
+        it("case variant of a create-only folder gets create only", async () => {
+            assert.match(await callTool("write_note", { path: "raw/lower.md", content: "l" }), /^Note saved/);
+            assert.match(await callTool("write_note", { path: "raw/lower.md", content: "x" }), /Raw\/ allows only create, so 'raw\/lower.md' can't be changed/);
+            assert.match(await callTool("delete_note", { path: "RAW/existing.md" }), /Raw\/ allows only create/);
+        });
+
+        it("create+update: no delete, no move out", async () => {
+            assert.match(await callTool("write_note", { path: "Notes/existing.md", content: "v2" }), /^Note saved/);
+            assert.match(await callTool("edit_note", { path: "Notes/existing.md", content: "v3" }), /^Note edited/);
+            assert.match(await callTool("delete_note", { path: "Notes/existing.md" }), /Notes\/ allows only create\+update, so 'Notes\/existing.md' can't be deleted or moved/);
+            assert.match(await callTool("move_note", { from: "Notes/existing.md", to: "MCP/n.md" }), /can't be deleted or moved/);
+            assert.equal(await read("Notes/existing.md"), "v2\nv3");
+        });
+
+        it("update-only: edits existing notes; no new ones", async () => {
+            assert.match(await callTool("edit_note", { path: "Live/existing.md", content: "edited" }), /^Note edited/);
+            assert.match(await callTool("write_note", { path: "Live/existing.md", content: "replaced" }), /^Note saved/);
+            assert.equal(await callTool("write_note", { path: "Live/new.md", content: "x" }), "Write access denied: Live/ allows only update, so 'Live/new.md' can't be created.");
+            assert.match(await callTool("move_note", { from: "MCP/free.md", to: "Live/free.md" }), /can't be created/);
+            assert.equal(await read("Live/existing.md"), "replaced");
+            assert.ok(!existsSync(join(permVault, "Live/new.md")));
+        });
+
+        it("delete-only: delete and move out; nothing written there", async () => {
+            assert.equal(await callTool("delete_note", { path: "Trash/old.md" }), "Deleted: Trash/old.md");
+            assert.match(await callTool("move_note", { from: "Trash/older.md", to: "MCP/older.md" }), /^Moved/);
+            assert.match(await callTool("write_note", { path: "Trash/x.md", content: "x" }), /Trash\/ allows only delete, so 'Trash\/x.md' can't be created/);
+            assert.equal(await read("MCP/older.md"), "older");
+            assert.ok(!existsSync(join(permVault, "Trash/older.md")));
+        });
+
+        it("move_note never replaces an existing note, even in a full-write folder", async () => {
+            await callTool("write_note", { path: "MCP/a.md", content: "a" });
+            await callTool("write_note", { path: "MCP/b.md", content: "b" });
+            assert.equal(await callTool("move_note", { from: "MCP/a.md", to: "MCP/b.md" }), "A note already exists at MCP/b.md. Choose another path.");
+            assert.equal(await callTool("move_note", { from: "MCP/a.md", to: "Raw/existing.md" }), "A note already exists at Raw/existing.md. Choose another path.");
+            assert.equal(await read("MCP/a.md"), "a");
+            assert.equal(await read("MCP/b.md"), "b");
+            assert.equal(await read("Raw/existing.md"), "raw original");
+        });
+
+        const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+        const urlOf = (out: string) => {
+            const url = out.match(/http:\/\/localhost:\d+\/attachments\/upload\/[A-Za-z0-9_-]+/)?.[0];
+            assert.ok(url, out);
+            return url;
+        };
+
+        it("upload URL into a create-only folder: first upload lands, a stale URL gets 409, overwrite is refused", async () => {
+            const first = urlOf(await callTool("create_attachment_upload", { path: "Raw/shot.png", size: png.byteLength }));
+            const stale = urlOf(await callTool("create_attachment_upload", { path: "Raw/shot.png" }));
+            const resp = await fetch(first, { method: "PUT", body: png });
+            assert.equal(resp.status, 201);
+            assert.deepEqual(await resp.json(), { path: "Raw/shot.png", size: png.byteLength, embed: "![[Raw/shot.png]]" });
+            const late = await fetch(stale, { method: "PUT", body: new Uint8Array([9, 9]) });
+            assert.equal(late.status, 409);
+            assert.deepEqual(new Uint8Array(readFileSync(join(permVault, "Raw/shot.png"))), png);
+
+            assert.equal(await callTool("create_attachment_upload", { path: "Raw/shot.png" }), "Attachment already exists: Raw/shot.png. Choose another path.");
+            assert.equal(await callTool("create_attachment_upload", { path: "Raw/shot.png", overwrite: true }), "Write access denied: Raw/ allows only create, so 'Raw/shot.png' can't be changed.");
+            assert.match(await callTool("write_attachment", { path: "Raw/shot.png", content_base64: Buffer.from([1]).toString("base64"), overwrite: true }), /can't be changed/);
+            assert.match(await callTool("delete_attachment", { path: "Raw/shot.png" }), /can't be deleted or moved/);
+            assert.match(await callTool("move_attachment", { from: "Raw/shot.png", to: "MCP/shot.png" }), /can't be deleted or moved/);
+            assert.deepEqual(new Uint8Array(readFileSync(join(permVault, "Raw/shot.png"))), png);
+        });
+
+        it("upload URL with overwrite in a create+update folder replaces the file", async () => {
+            const url1 = urlOf(await callTool("create_attachment_upload", { path: "Notes/pic.png" }));
+            assert.equal((await fetch(url1, { method: "PUT", body: png })).status, 201);
+            const url2 = urlOf(await callTool("create_attachment_upload", { path: "Notes/pic.png", overwrite: true }));
+            assert.equal((await fetch(url2, { method: "PUT", body: new Uint8Array([7, 7, 7]) })).status, 201);
+            assert.deepEqual(new Uint8Array(readFileSync(join(permVault, "Notes/pic.png"))), new Uint8Array([7, 7, 7]));
+            assert.match(await callTool("delete_attachment", { path: "Notes/pic.png" }), /allows only create\+update/);
+        });
+
+        it("move_attachment into, out of and within restricted folders", async () => {
+            const b64 = Buffer.from(png).toString("base64");
+            assert.match(await callTool("write_attachment", { path: "MCP/m.png", content_base64: b64 }), /^Attachment saved/);
+            assert.match(await callTool("move_attachment", { from: "MCP/m.png", to: "Raw/shot.png" }), /already exists: Raw\/shot.png\. Choose another path/);
+            assert.match(await callTool("move_attachment", { from: "MCP/m.png", to: "Raw/m.png" }), /^Moved/);
+            assert.match(await callTool("move_attachment", { from: "Raw/m.png", to: "Raw/m2.png" }), /can't be deleted or moved/);
+            assert.match(await callTool("move_attachment", { from: "Raw/scratch/none.png", to: "Live/x.png" }), /Live\/ allows only update, so 'Live\/x.png' can't be created/);
+            assert.ok(existsSync(join(permVault, "Raw/m.png")) && !existsSync(join(permVault, "MCP/m.png")));
+        });
+    });
+
+    it("unset WRITE_FOLDERS: writes anywhere, but move_note still won't replace a note", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault" });
+        assert.ok(!serverLogs.includes("WRITE_FOLDERS"), serverLogs);
+        const list = await mcpCall("tools/list", {});
+        for (const t of list?.result?.tools ?? []) assert.doesNotMatch(t.description ?? "", /Writes are only allowed/, t.name);
+        assert.match(await callTool("write_note", { path: "anywhere/u1.md", content: "1" }), /^Note saved/);
+        assert.match(await callTool("write_note", { path: "anywhere/u1.md", content: "1b" }), /^Note saved/);
+        assert.match(await callTool("write_note", { path: "anywhere/u2.md", content: "2" }), /^Note saved/);
+        assert.equal(await callTool("move_note", { from: "anywhere/u1.md", to: "anywhere/u2.md" }), "A note already exists at anywhere/u2.md. Choose another path.");
+        assert.equal(await readFile(join(vaultDir, "anywhere/u2.md"), "utf-8"), "2");
+        assert.match(await callTool("move_note", { from: "anywhere/u1.md", to: "elsewhere/u1.md" }), /^Moved/);
+        assert.match(await callTool("delete_note", { path: "elsewhere/u1.md" }), /^Deleted/);
+        assert.match(await callTool("delete_note", { path: "anywhere/u2.md" }), /^Deleted/);
     });
 });
 

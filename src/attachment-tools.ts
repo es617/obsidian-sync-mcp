@@ -12,7 +12,7 @@ import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
 import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
-import { isPathWritable } from "./write-scope.js";
+import { allowedActions, checkWrite, describeWriteScope, type WriteAction, type WriteScope } from "./write-scope.js";
 import { validateAttachmentPath, attachmentExtension } from "./attachment-path.js";
 import { UPLOAD_ROUTE_PREFIX, type UploadRegistry } from "./uploads.js";
 
@@ -25,7 +25,7 @@ export interface AttachmentToolOptions {
     searchIndex: SearchIndex;
     vaultName: string;
     readOnly: boolean;
-    writeFolders: string[] | null;
+    writeFolders: WriteScope;
     allowedExtensions: ReadonlySet<string>;
     /** Largest file accepted by the upload URL. */
     maxBytes: number;
@@ -70,9 +70,7 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
     const { vault, searchIndex, vaultName, readOnly, writeFolders, allowedExtensions, maxBytes, base64MaxBytes, registry } = opts;
     const baseUrl = opts.baseUrl.replace(/\/+$/, "");
     const extList = [...allowedExtensions].sort().join(", ");
-    const writeScopeNote = writeFolders
-        ? ` Writes are only allowed inside: ${writeFolders.map((f) => f + "/").join(", ")}.`
-        : "";
+    const writeScopeNote = describeWriteScope(writeFolders);
     const embedNote = " Add it to a note with an embed such as ![[path]] (edit_note).";
 
     /** Validate against the configured allowlist; returns an error message or null. */
@@ -84,11 +82,17 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             return (err as Error).message;
         }
     };
-    const checkWritable = (path: string): string | null =>
-        checkPath(path) ??
-        (isPathWritable(path, writeFolders)
-            ? null
-            : `Write access denied: '${path}' is outside the writable folders (${writeFolders!.map((f) => f + "/").join(", ")}).`);
+    /** Path validation, then each write action needed at `path`. */
+    const checkWritable = (path: string, ...actions: WriteAction[]): string | null =>
+        checkPath(path) ?? actions.map((a) => checkWrite(path, a, writeFolders)).find((m) => m !== null) ?? null;
+    /**
+     * Writing to a path that may not exist creates it; overwrite=true may also
+     * replace a file there, so it needs update too.
+     */
+    const writeActions = (overwrite: boolean | undefined): WriteAction[] => (overwrite ? ["create", "update"] : ["create"]);
+    const exists = (path: string) =>
+        `Attachment already exists: ${path}. ` +
+        (allowedActions(path, writeFolders).has("update") ? "Pass overwrite=true to replace it, or choose another path." : "Choose another path.");
 
     server.addTool({
         name: "get_attachment_metadata",
@@ -194,14 +198,12 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             overwrite: z.boolean().optional().describe("Replace an existing file at path. Default false."),
         }),
         execute: async ({ path, size, overwrite }) => {
-            const denied = checkWritable(path);
+            const denied = checkWritable(path, ...writeActions(overwrite));
             if (denied) return denied;
             if (size !== undefined && size > maxBytes) {
                 return `File is ${formatBytes(size)}, over the upload limit of ${formatBytes(maxBytes)}.`;
             }
-            if (!overwrite && (await vault.getAttachmentInfo(path))) {
-                return `Attachment already exists: ${path}. Pass overwrite=true to replace it, or choose another path.`;
-            }
+            if (!overwrite && (await vault.getAttachmentInfo(path))) return exists(path);
             let handle;
             try {
                 handle = registry.create({ path, overwrite: !!overwrite, expectedSize: size, maxBytes });
@@ -236,7 +238,7 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             overwrite: z.boolean().optional().describe("Replace an existing file at path. Default false."),
         }),
         execute: async ({ path, content_base64, overwrite }) => {
-            const denied = checkWritable(path);
+            const denied = checkWritable(path, ...writeActions(overwrite));
             if (denied) return denied;
             let data: Uint8Array;
             try {
@@ -252,9 +254,7 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             try {
                 ok = await vault.writeAttachment(path, data, { overwrite: !!overwrite });
             } catch (err) {
-                if (err instanceof AttachmentExistsError) {
-                    return `Attachment already exists: ${path}. Pass overwrite=true to replace it, or choose another path.`;
-                }
+                if (err instanceof AttachmentExistsError) return exists(path);
                 throw err;
             }
             if (!ok) return `Failed to write attachment: ${path}`;
@@ -270,7 +270,7 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             path: z.string().describe("Vault-relative attachment path to delete"),
         }),
         execute: async ({ path }) => {
-            const denied = checkWritable(path);
+            const denied = checkWritable(path, "delete");
             if (denied) return denied;
             if (!(await vault.getAttachmentInfo(path))) return `Attachment not found: ${path}`;
             const ok = await vault.deleteAttachment(path);
@@ -293,7 +293,8 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             overwrite: z.boolean().optional().describe("Replace an existing file at the destination. Default false."),
         }),
         execute: async ({ from, to, overwrite }) => {
-            const denied = checkWritable(from) ?? checkWritable(to);
+            // A move deletes at the source and creates (or, with overwrite, replaces) at the destination.
+            const denied = checkWritable(from, "delete") ?? checkWritable(to, ...writeActions(overwrite));
             if (denied) return denied;
             const source = await vault.getAttachmentInfo(from);
             if (!source) return `Attachment not found: ${from}`;
@@ -301,9 +302,7 @@ export function registerAttachmentTools(server: FastMCP, opts: AttachmentToolOpt
             try {
                 ok = await vault.moveAttachment(from, to, { overwrite: !!overwrite, maxBytes });
             } catch (err) {
-                if (err instanceof AttachmentExistsError) {
-                    return `Attachment already exists: ${to}. Pass overwrite=true to replace it.`;
-                }
+                if (err instanceof AttachmentExistsError) return exists(to);
                 if (err instanceof AttachmentTooLargeError) {
                     const size = Number.isFinite(err.size) ? `${formatBytes(err.size)}, over` : "of unknown size, so it may be over";
                     return `Attachment is ${size} the ${formatBytes(maxBytes)} limit for moving it here. Move it in Obsidian instead.`;

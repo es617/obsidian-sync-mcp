@@ -10,7 +10,7 @@ import { applyIndexChange, pruneGhosts } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { readOnlyVault } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
-import { parseWriteFolders } from "./write-scope.js";
+import { parseWriteFolders, writeScopeWarnings, type WriteScope } from "./write-scope.js";
 import { parseAttachmentExtensions, isValidAttachmentPath } from "./attachment-path.js";
 import { registerAttachmentTools, ATTACHMENT_WRITE_TOOLS, formatBytes } from "./attachment-tools.js";
 import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
@@ -46,7 +46,14 @@ const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const READ_ONLY = process.env.READ_ONLY === "true";
-const WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
+let WRITE_FOLDERS: WriteScope;
+try {
+    WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
+} catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+}
+for (const warning of writeScopeWarnings(WRITE_FOLDERS)) console.warn(warning);
 
 // Attachments (images, PDFs, audio, video) are opt-in.
 const ATTACHMENTS_ENABLED = process.env.ATTACHMENTS_ENABLED === "true";
@@ -103,7 +110,8 @@ let vault: VaultBackend;
 
 if (VAULT_PATH) {
     const { LocalVault } = await import("./vault-local.js");
-    vault = new LocalVault(VAULT_PATH);
+    // The WRITE_FOLDERS check sees requested paths, so writes must not follow symlinks elsewhere.
+    vault = new LocalVault(VAULT_PATH, { refuseSymlinkWrites: WRITE_FOLDERS !== null });
     console.log(`Local mode: ${VAULT_PATH}`);
 } else if (COUCHDB_URL) {
     if (!COUCHDB_PASSWORD) {
