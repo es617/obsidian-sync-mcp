@@ -5,7 +5,7 @@ import { glob } from "fs/promises";
 import { parseFrontmatterAndLinks } from "./parse.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
-import { AttachmentExistsError, AttachmentMoveIncompleteError, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, NoteExistsError, NoteNotFoundError, type NoteWriteOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type WriteOptions, type MoveOptions } from "./vault-backend.js";
 
 // Not defined on Windows, which has no symlinks a non-admin can create anyway.
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -141,13 +141,21 @@ export class LocalVault implements VaultBackend {
         }
     }
 
-    async writeNote(path: string, content: string): Promise<boolean> {
+    async writeNote(path: string, content: string, { mode = "upsert" }: NoteWriteOptions = {}): Promise<boolean> {
         const fullPath = await this.safePath(path, "note");
+        // O_EXCL refuses an existing file and a missing O_CREAT refuses a
+        // missing one, each in the same step as the write.
+        const flag =
+            mode === "create" ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
+            : mode === "update" ? constants.O_WRONLY | constants.O_TRUNC
+            : "w";
         try {
-            await mkdir(dirname(fullPath), { recursive: true });
-            await writeFile(fullPath, content, "utf-8");
+            if (mode !== "update") await mkdir(dirname(fullPath), { recursive: true });
+            await writeFile(fullPath, content, { encoding: "utf-8", flag });
             return true;
-        } catch {
+        } catch (e: any) {
+            if (mode === "create" && e.code === "EEXIST") throw new NoteExistsError(path);
+            if (mode === "update" && e.code === "ENOENT") throw new NoteNotFoundError(path);
             return false;
         }
     }
@@ -177,17 +185,24 @@ export class LocalVault implements VaultBackend {
         }
         try {
             await mkdir(dirname(toPath), { recursive: true });
-            await rename(fromPath, toPath);
-            return true;
+            // rename would replace an existing destination; link fails with
+            // EEXIST instead.
+            await link(fromPath, toPath);
         } catch (e: any) {
-            if (e.code === "EXDEV") {
-                // Cross-device: fall back to copy-delete
-                const content = await this.readNote(from);
-                if (content === null) return false;
-                const wrote = await this.writeNote(to, content);
-                if (!wrote) return false;
-                return await this.deleteNote(from);
+            if (e.code === "EEXIST") throw new NoteExistsError(to);
+            // Cross-device, or a filesystem without hard links: copy, then delete.
+            if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(e.code)) return false;
+            try {
+                await copyFile(fromPath, toPath, constants.COPYFILE_EXCL);
+            } catch (copyErr: any) {
+                if (copyErr.code === "EEXIST") throw new NoteExistsError(to);
+                return false;
             }
+        }
+        try {
+            await unlink(fromPath);
+            return true;
+        } catch {
             return false;
         }
     }

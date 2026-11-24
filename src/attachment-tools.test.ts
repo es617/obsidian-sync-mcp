@@ -6,6 +6,7 @@ import { memoryAttachments } from "./attachment-test-fixtures.js";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS } from "./attachment-path.js";
 import { SearchIndex } from "./search.js";
 import { AttachmentTooLargeError, AttachmentMoveIncompleteError } from "./vault-backend.js";
+import { parseWriteFolders } from "./write-scope.js";
 
 type Tool = { name: string; description: string; parameters: any; execute: (args: any) => Promise<string> };
 
@@ -69,7 +70,7 @@ describe("create_attachment_upload", () => {
     });
 
     it("validates path, extension allowlist, write scope, size and existing files", async () => {
-        const { call, files } = setup({ writeFolders: ["MCP"], allowedExtensions: new Set(["png"]) });
+        const { call, files } = setup({ writeFolders: parseWriteFolders("MCP"), allowedExtensions: new Set(["png"]) });
         assert.match(await call("create_attachment_upload", { path: "MCP/a.md" }), /Invalid attachment path/);
         assert.match(await call("create_attachment_upload", { path: "MCP/a.pdf" }), /extension must be one of png/);
         assert.match(await call("create_attachment_upload", { path: "Other/a.png" }), /Write access denied/);
@@ -176,10 +177,42 @@ describe("delete_attachment / move_attachment / get_attachment_metadata", () => 
     });
 
     it("delete honours WRITE_FOLDERS", async () => {
-        const { call, files } = setup({ writeFolders: ["MCP"] });
+        const { call, files } = setup({ writeFolders: parseWriteFolders("MCP") });
         files.set("x.png", { data: new Uint8Array(1), ctime: 1, mtime: 1 });
         assert.match(await call("delete_attachment", { path: "x.png" }), /Write access denied/);
         assert.equal(files.size, 1);
+    });
+});
+
+describe("WRITE_FOLDERS permissions", () => {
+    const createOnly = () => setup({ writeFolders: parseWriteFolders("MCP,Raw:create") });
+
+    it("create-only: new files are allowed, replacing one is not", async () => {
+        const { call, files } = createOnly();
+        assert.match(await call("write_attachment", { path: "Raw/a.png", content_base64: b64([1]) }), /Attachment saved/);
+        const again = await call("write_attachment", { path: "Raw/a.png", content_base64: b64([2]) });
+        assert.match(again, /already exists: Raw\/a.png\. Choose another path\./, "no overwrite=true hint where update isn't allowed");
+        assert.match(await call("write_attachment", { path: "Raw/a.png", content_base64: b64([2]), overwrite: true }), /Raw\/ allows only create, so 'Raw\/a.png' can't be changed/);
+        assert.deepEqual(files.get("Raw/a.png")?.data, new Uint8Array([1]));
+        assert.match(await call("create_attachment_upload", { path: "Raw/b.png" }), /Upload URL/);
+        assert.match(await call("create_attachment_upload", { path: "Raw/a.png", overwrite: true }), /can't be changed/, "refused when the URL is created");
+    });
+
+    it("create-only: delete and move out are refused, move in is allowed", async () => {
+        const { call, files, put } = createOnly();
+        put("Raw/a.png", 1);
+        put("MCP/b.png", 1);
+        assert.match(await call("delete_attachment", { path: "Raw/a.png" }), /can't be deleted or moved/);
+        assert.match(await call("move_attachment", { from: "Raw/a.png", to: "MCP/a.png" }), /can't be deleted or moved/);
+        assert.match(await call("move_attachment", { from: "MCP/b.png", to: "Raw/a.png" }), /already exists: Raw\/a.png\. Choose another path/);
+        assert.match(await call("move_attachment", { from: "MCP/b.png", to: "Raw/a.png", overwrite: true }), /can't be changed/);
+        assert.match(await call("move_attachment", { from: "MCP/b.png", to: "Raw/b.png" }), /Moved: MCP\/b.png → Raw\/b.png/);
+        assert.deepEqual([...files.keys()].sort(), ["Raw/a.png", "Raw/b.png"]);
+    });
+
+    it("tool descriptions list the permissions", () => {
+        const tool = createOnly().tools.find((t) => t.name === "write_attachment")!;
+        assert.match(tool.description, /Writes are only allowed inside: MCP\/, Raw\/ \(create only\)\./);
     });
 });
 

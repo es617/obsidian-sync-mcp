@@ -4,7 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile, unlink } from "fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, unlink, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn, type ChildProcess } from "child_process";
@@ -531,6 +531,38 @@ describe("E2E: READ_ONLY mode", () => {
         const resp = await mcpCall("tools/call", { name: "write_note", arguments: { path: "blocked.md", content: "x" } });
         assert.ok(resp?.error, "write_note call should return an error");
         assert.ok(!existsSync(join(vaultDir, "blocked.md")), "no file should be created when write is blocked");
+    });
+});
+
+describe("E2E: WRITE_FOLDERS permissions", () => {
+    it("Raw:create allows new notes but refuses overwrite, edit, delete and move", async () => {
+        await stopServer();
+        await startServer({ VAULT_PATH: vaultDir, VAULT_NAME: "TestVault", WRITE_FOLDERS: "MCP,Raw:create" });
+        assert.ok(serverLogs.includes("WRITE_FOLDERS: writes restricted to MCP/, Raw/ (create only)."), serverLogs);
+
+        assert.match(await callTool("write_note", { path: "Raw/source.md", content: "original" }), /Note saved/);
+        assert.match(await callTool("write_note", { path: "Raw/source.md", content: "changed" }), /allows only create.*already exists/);
+        assert.match(await callTool("edit_note", { path: "Raw/source.md", content: "more" }), /can't be changed/);
+        assert.match(await callTool("delete_note", { path: "Raw/source.md" }), /can't be deleted or moved/);
+        assert.match(await callTool("move_note", { from: "Raw/source.md", to: "MCP/source.md" }), /can't be deleted or moved/);
+        assert.equal(await readFile(join(vaultDir, "Raw/source.md"), "utf-8"), "original");
+
+        assert.match(await callTool("write_note", { path: "MCP/draft.md", content: "draft" }), /Note saved/);
+        assert.match(await callTool("move_note", { from: "MCP/draft.md", to: "Raw/draft.md" }), /Moved/);
+        assert.match(await callTool("write_note", { path: "daily/x.md", content: "x" }), /outside the writable folders/);
+    });
+
+    it("an unknown permission stops the server at startup", async () => {
+        await stopServer();
+        const child = spawn(NODE_BIN, ["dist/main.js"], {
+            env: { ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: AUTH, VAULT_PATH: vaultDir, WRITE_FOLDERS: "Raw:creat" },
+            stdio: "pipe",
+        });
+        let stderr = "";
+        child.stderr?.on("data", (d) => { stderr += d.toString(); });
+        const code = await new Promise((r) => child.on("exit", r));
+        assert.equal(code, 1);
+        assert.match(stderr, /unknown permission 'creat'/);
     });
 });
 

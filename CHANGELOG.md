@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Per-folder write permissions in `WRITE_FOLDERS` (#65).** A folder can now be limited to some of three permissions: `create` (add new files), `update` (change existing files) and `delete` (delete or move away), e.g. `WRITE_FOLDERS=MCP,Raw:create,Notes:create+update`. `Raw:create` makes a write-once inbox: agents can add notes and attachments but can't overwrite, edit, move or delete existing ones. A folder listed without permissions keeps full write access, so existing configs behave as before. The most specific folder applies, and `/` stands for the vault root. A case variant of a folder (`raw/` for `Raw`) gets only what both spellings allow, so a rule can't be sidestepped on a case-insensitive vault or file system. The create/update distinction is checked in the same step as the write (`O_EXCL` in local mode, a per-document lock in CouchDB mode), so two concurrent writes can't both pass it. An unknown permission or a folder listed twice stops the server at startup. Requested by @travislrogers.
+
+### Fixes
+- `move_note` silently replaced an existing note at the destination, in both local and CouchDB mode. It now refuses and asks for another path, like `move_attachment` without `overwrite=true`.
+- `edit_note` could recreate a note deleted between its read and its write. The write now requires the note to still exist.
+
 ## 0.12.1
 
 ### Fixes

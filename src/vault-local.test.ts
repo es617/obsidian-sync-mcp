@@ -5,7 +5,7 @@ import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { LocalVault } from "./vault-local.js";
-import { AttachmentExistsError, AttachmentMoveIncompleteError } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, NoteExistsError, NoteNotFoundError } from "./vault-backend.js";
 import { SearchIndex } from "./search.js";
 
 let tmpDir: string;
@@ -121,6 +121,38 @@ describe("moveNote", () => {
 
     it("returns false if source doesn't exist", async () => {
         assert.equal(await vault.moveNote("nope.md", "dest.md"), false);
+    });
+
+    it("never replaces an existing note at the destination", async () => {
+        await vault.writeNote("noreplace/src.md", "src");
+        await vault.writeNote("noreplace/dest.md", "dest");
+        await assert.rejects(() => vault.moveNote("noreplace/src.md", "noreplace/dest.md"), NoteExistsError);
+        assert.equal(await vault.readNote("noreplace/src.md"), "src");
+        assert.equal(await vault.readNote("noreplace/dest.md"), "dest");
+    });
+});
+
+describe("writeNote modes", () => {
+    it("create: writes a new note, refuses an existing one", async () => {
+        assert.equal(await vault.writeNote("modes/new/a.md", "v1", { mode: "create" }), true);
+        await assert.rejects(() => vault.writeNote("modes/new/a.md", "v2", { mode: "create" }), NoteExistsError);
+        assert.equal(await vault.readNote("modes/new/a.md"), "v1");
+    });
+
+    it("create: of two concurrent creates only one succeeds", async () => {
+        const results = await Promise.allSettled([
+            vault.writeNote("modes/race.md", "one", { mode: "create" }),
+            vault.writeNote("modes/race.md", "two", { mode: "create" }),
+        ]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+    });
+
+    it("update: replaces an existing note, refuses a missing one without creating it", async () => {
+        await vault.writeNote("modes/u.md", "long original content");
+        assert.equal(await vault.writeNote("modes/u.md", "short", { mode: "update" }), true);
+        assert.equal(await vault.readNote("modes/u.md"), "short", "truncated, not overlaid");
+        await assert.rejects(() => vault.writeNote("modes/missing/u.md", "x", { mode: "update" }), NoteNotFoundError);
+        assert.equal(existsSync(join(tmpDir, "modes/missing")), false, "no folder created either");
     });
 });
 

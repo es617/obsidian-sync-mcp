@@ -27,6 +27,31 @@ export interface WriteOptions {
     overwrite?: boolean;
 }
 
+export interface NoteWriteOptions {
+    /**
+     * "upsert" (default) creates or replaces. "create" refuses an existing note
+     * (NoteExistsError) and "update" refuses a missing one (NoteNotFoundError),
+     * each checked in the same step as the write.
+     */
+    mode?: "upsert" | "create" | "update";
+}
+
+/** A create-only write or a move found a note already at the path. */
+export class NoteExistsError extends Error {
+    constructor(readonly path: string) {
+        super(`Note already exists: ${path}`);
+        this.name = "NoteExistsError";
+    }
+}
+
+/** An update-only write found no note at the path. */
+export class NoteNotFoundError extends Error {
+    constructor(readonly path: string) {
+        super(`Note not found: ${path}`);
+        this.name = "NoteNotFoundError";
+    }
+}
+
 export interface MoveOptions extends WriteOptions {
     /**
      * Largest file a backend may load into memory to move it. CouchDB mode
@@ -63,8 +88,9 @@ export interface VaultBackend {
     init(): Promise<void>;
     close(): Promise<void>;
     readNote(path: string): Promise<string | null>;
-    writeNote(path: string, content: string): Promise<boolean>;
+    writeNote(path: string, content: string, options?: NoteWriteOptions): Promise<boolean>;
     deleteNote(path: string): Promise<boolean>;
+    /** Never replaces a note at `to`: throws NoteExistsError instead, checked in the same step as the move. */
     moveNote(from: string, to: string): Promise<boolean>;
     getMetadata(path: string): Promise<NoteInfo | null>;
     listNotes(folder?: string): Promise<string[]>;
