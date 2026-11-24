@@ -197,7 +197,7 @@ export class SearchIndex {
         if (unchanged) return;
 
         this.clearBacklinks(path);
-        this.hashes.set(path, hash);
+        this.hashes.delete(path);
         const parsed = parseFrontmatterAndLinks(content);
         const title = parsed.frontmatter["title"];
         if (typeof title === "string" && title.trim().length > 0) {
@@ -220,6 +220,8 @@ export class SearchIndex {
         } else {
             this.links.delete(path);
         }
+        // Last, so the hash only ever vouches for metadata that was stored.
+        this.hashes.set(path, hash);
     }
 
     /** Remove a note from the index. */

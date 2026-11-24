@@ -78,13 +78,21 @@ Text`;
         assert.equal(fm.list, "a, b");
     });
 
-    it("ignores frontmatter with YAML aliases, quickly", () => {
-        const yaml = "---\na: &x [" + "*x,".repeat(50) + "]\n" + "k: v\n".repeat(20000) + "---\nBody [[L]]";
+    it("reads YAML aliases, quickly", () => {
+        const result = parseFrontmatterAndLinks("---\ncommon: &t [work, review]\ntags: *t\nsame: *t\n---\nBody");
+        assert.deepEqual(result.tags, ["work", "review"]);
+        assert.equal(result.frontmatter.same, "work, review");
+
+        const hostile = "---\na: &x [" + "*x,".repeat(50) + "]\n" + "k: v\n".repeat(20000) + "---\nBody [[L]]";
         const start = performance.now();
-        const result = parseFrontmatterAndLinks(yaml);
+        assert.deepEqual(parseFrontmatterAndLinks(hostile).links, ["L"]);
         assert.ok(performance.now() - start < 2000);
-        assert.deepEqual(result.frontmatter, {});
-        assert.deepEqual(result.links, ["L"]);
+    });
+
+    it("keeps nested frontmatter values as written", () => {
+        const fm = parseFrontmatterAndLinks("---\nlist:\n  - [a, b]\n  - {k: v}\nmap:\n  k: v\n---\n").frontmatter;
+        assert.equal(fm.list, "- [a, b]\n  - {k: v}");
+        assert.equal(fm.map, "k: v");
     });
 
     it("ignores frontmatter that isn't valid YAML, as Obsidian does", () => {
@@ -312,6 +320,39 @@ Also #shared inline`;
         const result = parseFrontmatterAndLinks("\\#escaped &#35;entity #tag \\[\\[escaped]] [[a\\|alias]] [[link]]");
         assert.deepEqual(result.tags, ["tag"]);
         assert.deepEqual(result.links.sort(), ["a", "link"]);
+    });
+
+    it("stays fast with many code spans, also in identical blocks", () => {
+        for (const content of ["`a` ".repeat(100000), "| `a` |\n|---|\n" + "| `a` |\n".repeat(50000)]) {
+            const start = performance.now();
+            parseFrontmatterAndLinks(content);
+            assert.ok(performance.now() - start < 3000, `${content.slice(0, 20)}… took too long`);
+        }
+    });
+
+    it("reads wikilinks in reference and footnote definitions", () => {
+        const content = "x[^a] and [see][src]\n\n[^a]: ![[diagram.png]]\n[src]: [[Other]]\n> [^q]: [[Quoted]]";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["Other", "Quoted", "diagram.png"]);
+    });
+
+    it("does not let a reference definition hide a wikilink", () => {
+        const content = "See [[Project]] and ![[logo.png]].\n\n[project]: https://x\n[logo.png]: https://y";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["Project", "logo.png"]);
+    });
+
+    it("keeps emphasis characters in wikilink targets", () => {
+        const content = "![[_assets/img_.png]] [[__init__]] [[_a]] and [[b_]] [[a ~~b~~ c]] [[x]](y.md)";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["__init__", "_a", "_assets/img_.png", "a ~~b~~ c", "b_", "x", "y.md"]);
+    });
+
+    it("reads links inside HTML blocks and an unclosed comment", () => {
+        const content = '<p align="center">![](logo.png)</p>\n\n<details><summary>s</summary>\n[[det]]\n</details>\n\n<!-- todo\n\n[[later]]';
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["det", "later", "logo.png"]);
+    });
+
+    it("reads no tags or links out of image alt text after the image", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("![](a.png)#t [[![x](i.png)]]").tags, []);
+        assert.deepEqual(parseFrontmatterAndLinks("[[a\\#b]]").links, ["a"]);
     });
 
     it("treats a backslash-escaped backtick as literal", () => {

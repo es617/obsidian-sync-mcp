@@ -237,7 +237,7 @@ describe("SearchIndex persistence", () => {
     describe("reusing saved metadata", () => {
         const text = "---\ntags: [real]\n---\nBody";
         const hash = createHash("sha1").update(text).digest("base64");
-        const saved = (parser: number) => JSON.stringify({
+        const saved = (parser: string) => JSON.stringify({
             mtimes: { "n.md": 1 }, tags: { "n.md": ["saved"] }, links: {},
             parser, hashes: { "n.md": hash }, titles: {},
         });
@@ -255,7 +255,7 @@ describe("SearchIndex persistence", () => {
 
         it("parses again when the metadata was saved by another parser version", async () => {
             const path = join(tmpDir, "reparse.json");
-            await writeFile(path, saved(PARSER_VERSION - 1));
+            await writeFile(path, saved("an older parser"));
             const idx = new SearchIndex(path);
             await idx.loadFromDisk();
             idx.update("n.md", text, 2);

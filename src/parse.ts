@@ -3,14 +3,17 @@
  */
 
 import MarkdownIt, { type Token } from "markdown-it";
-import { parse as parseYaml } from "yaml";
-import { isValidAttachmentPath } from "./attachment-path.js";
+import { isAlias, isMap, isScalar, isSeq, parseDocument, type Document } from "yaml";
+import { SUPPORTED_ATTACHMENT_EXTENSIONS, isValidAttachmentPath } from "./attachment-path.js";
 
 /**
- * Bump whenever parseFrontmatterAndLinks returns something different for the
- * same note, so metadata saved by an older parser is re-parsed, not reused.
+ * Changes whenever parseFrontmatterAndLinks may return something different for
+ * the same note, so metadata the search index saved from an older parser is
+ * parsed again, not reused. Bump the number when changing the parser; the
+ * attachment extensions are part of it because they decide which link targets
+ * count.
  */
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = `3:${SUPPORTED_ATTACHMENT_EXTENSIONS.join(",")}`;
 
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
@@ -18,11 +21,10 @@ export interface NoteMetadata {
     links: string[];
 }
 
-// [[wikilinks]] and ![[embeds]], which markdown doesn't know, so they are
-// matched in the text markdown-it leaves outside code. A #heading, #^block or
-// #page=2 suffix points into the target, so [[Note#Heading]] links Note;
-// [[#Heading]] (same note) is not a link. Each part stops at a bracket or
-// newline, so a failed match only scans up to the next one.
+// [[wikilinks]] and ![[embeds]], which markdown doesn't know. A #heading,
+// #^block or #page=2 suffix points into the target, so [[Note#Heading]] links
+// Note; [[#Heading]] (same note) is not a link. Each part stops at a bracket
+// or newline, so a failed match only scans up to the next one.
 const WIKILINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
 // Inline #tags. A tag must contain at least one non-numerical character
@@ -30,10 +32,25 @@ const WIKILINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 const TAG = /(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu;
 
 // CommonMark plus GFM tables. Raw HTML is recognised, so a backtick inside a
-// tag's attribute can't open a code span; text between tags is still read.
-// text_join is off so escapes and entities stay separate tokens (see readBody).
+// tag's attribute can't open a code span.
 const markdown = new MarkdownIt({ html: true, linkify: false });
-markdown.core.ruler.disable("text_join");
+
+// markdown-it doesn't say where a code span sits in its block's text, so the
+// backticks rule is wrapped to record it: env.codeSpans maps a block's inline
+// source to its code spans, start offset to end. Blocks with the same text
+// have the same spans, so they share an entry.
+type Env = { codeSpans: Map<string, Map<number, number>> };
+const backticks = markdown.inline.ruler.__rules__[markdown.inline.ruler.__find__("backticks")].fn;
+markdown.inline.ruler.at("backticks", (state, silent) => {
+    const start = state.pos;
+    if (!backticks(state, silent)) return false;
+    if (!silent) {
+        const spans = (state.env as Env).codeSpans;
+        if (!spans.has(state.src)) spans.set(state.src, new Map());
+        spans.get(state.src)!.set(start, state.pos);
+    }
+    return true;
+});
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     content = content.replace(/\r\n/g, "\n");
@@ -42,13 +59,15 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     const yaml = end === -1 ? "" : content.slice(4, end);
     const body = end === -1 ? content : content.slice(end + 4);
 
-    const { frontmatter, tags } = readFrontmatter(yaml);
+    const { frontmatter, tags: yamlTags } = readFrontmatter(yaml);
+    const tags = new Set(yamlTags);
     const links: string[] = [];
-    // Links in properties (related: "[[Note]]") count.
-    for (const match of yaml.matchAll(WIKILINK)) links.push(match[1]);
-
-    const text = readBody(markdown.parse(body, {}), links);
-    for (const match of text.matchAll(WIKILINK)) links.push(match[1]);
+    const text = readBody(body, links);
+    // Wikilinks in properties (related: "[[Note]]") count too.
+    for (const match of (yaml + "\n" + text).matchAll(WIKILINK)) {
+        // [[note\|alias]] outside a table: the backslash escapes the pipe.
+        links.push(match[1].replace(/\\$/, ""));
+    }
     for (const match of text.matchAll(TAG)) {
         if (!/^\p{Nd}+$/u.test(match[2])) tags.add(match[2]);
     }
@@ -56,65 +75,112 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
 }
 
 /**
- * Frontmatter as YAML, every value kept as a string ("failsafe": 1.10 stays
- * 1.10, dates aren't converted); a list is joined with ", ". Tags come from
- * `tags`, as a list or a comma-separated string. Frontmatter that isn't valid
- * YAML, or uses aliases, is ignored, as Obsidian does for invalid YAML.
+ * Frontmatter as YAML ("failsafe": every value is a string as written, so 1.10
+ * stays 1.10 and dates aren't converted). A list of plain values is joined
+ * with ", ", anything else is kept as written. Tags come from `tags`, a list
+ * or a comma-separated string. Frontmatter that isn't valid YAML is ignored,
+ * as Obsidian does. Nodes are read directly rather than through toJS(), which
+ * rescans the document for every alias.
  */
-function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: Set<string> } {
+function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: string[] } {
     const frontmatter: Record<string, string> = {};
-    const tags = new Set<string>();
-    let data: unknown;
-    try {
-        // maxAliasCount 0 rejects YAML aliases (*x): resolving them rescans the
-        // document, which hostile frontmatter can make take minutes.
-        data = parseYaml(yaml, { schema: "failsafe", uniqueKeys: false, maxAliasCount: 0 });
-    } catch {
-        return { frontmatter, tags };
-    }
-    if (!data || typeof data !== "object" || Array.isArray(data)) return { frontmatter, tags };
+    const tags: string[] = [];
+    const doc = parseDocument(yaml, { schema: "failsafe", uniqueKeys: false });
+    if (doc.errors.length > 0 || !isMap(doc.contents)) return { frontmatter, tags };
 
-    for (const [key, value] of Object.entries(data)) {
-        if (value === "" || value === null) continue;
-        frontmatter[key] = typeof value === "string" ? value : Array.isArray(value) ? value.join(", ") : JSON.stringify(value);
-    }
-    const raw: unknown = (data as Record<string, unknown>).tags;
-    for (const tag of Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : []) {
-        if (typeof tag === "string" && tag.trim()) tags.add(tag.trim());
+    for (const pair of doc.contents.items) {
+        const key = resolve(doc, pair.key);
+        if (!isScalar(key)) continue;
+        const value = resolve(doc, pair.value);
+        const list = plainValues(doc, value);
+        const text = list ? list.join(", ") : isMap(value) || isSeq(value) ? yaml.slice(value.range![0], value.range![1]).trim() : "";
+        if (text) frontmatter[String(key.value)] = text;
+        if (key.value === "tags" && list) {
+            for (const tag of isScalar(value) ? list[0].split(",") : list) if (tag.trim()) tags.push(tag.trim());
+        }
     }
     return { frontmatter, tags };
 }
 
+/** A node, or the node an alias (*name) points to. */
+function resolve(doc: Document, node: unknown): unknown {
+    return isAlias(node) ? node.resolve(doc) : node;
+}
+
+/** A plain value as [value], a list of plain values as its values, else null. */
+function plainValues(doc: Document, node: unknown): string[] | null {
+    if (isScalar(node)) return [String(node.value ?? "")];
+    if (!isSeq(node)) return null;
+    const values: string[] = [];
+    for (const item of node.items) {
+        const value = resolve(doc, item);
+        if (!isScalar(value)) return null;
+        values.push(String(value.value ?? ""));
+    }
+    return values;
+}
+
+// Blocks that only hold other blocks; their lines are claimed by what's inside.
+const CONTAINERS = new Set(["blockquote_open", "bullet_list_open", "ordered_list_open", "list_item_open"]);
+
 /**
- * Walk markdown-it's tokens: add markdown link and image targets to `links`,
- * and return the note's text outside code, one block per line, for the
- * wikilink and tag patterns. Code spans, fenced and indented code are left
- * out, since Obsidian doesn't link or tag inside them.
+ * Add the markdown link and image targets to `links`, and return the note's
+ * source text with code left out, for the wikilink and tag patterns: each
+ * block's raw text with its code spans blanked out, raw HTML blocks (whose
+ * markdown links count too), and the lines no block claims (reference and
+ * footnote definitions). Fenced and
+ * indented code is left out, as Obsidian doesn't link or tag inside code.
  */
-function readBody(tokens: Token[], links: string[]): string {
-    let text = "";
-    const visit = (tokens: Token[]) => {
-        for (const token of tokens) {
-            switch (token.type) {
-                case "inline": visit(token.children ?? []); break;
-                case "text": text += token.content; break;
-                // An escape or entity is kept as written, so \#x isn't a tag
-                // and \[\[x]] isn't a link, as in Obsidian. An escaped pipe is
-                // a pipe: [[note\|alias]] links note.
-                case "text_special": text += token.content === "|" ? "|" : token.markup; break;
-                // A code span leaves a "|", which can't start a tag or a
-                // wikilink target, so its neighbours don't join up:
-                // `x`#tag isn't a tag, [[note|`alias`]] still links note.
-                case "code_inline": text += "|"; break;
-                case "softbreak": case "hardbreak": text += "\n"; break;
-                case "link_open": addTarget(token.attrGet("href"), links); break;
-                case "image": addTarget(token.attrGet("src"), links); visit(token.children ?? []); break;
-                default: if (token.block && token.nesting === -1) text += "\n";
-            }
+function readBody(body: string, links: string[]): string {
+    const env: Env = { codeSpans: new Map() };
+    const tokens = markdown.parse(body, env);
+    const parts: string[] = [];
+    const claimed = new Set<number>();
+    for (const token of tokens) {
+        if (token.map && !CONTAINERS.has(token.type)) {
+            for (let line = token.map[0]; line < token.map[1]; line++) claimed.add(line);
         }
-    };
-    visit(tokens);
-    return text;
+        if (token.type === "inline") {
+            parts.push(blankOut(token.content, env.codeSpans.get(token.content)));
+            addTargets(token.children ?? [], links);
+        } else if (token.type === "html_block") {
+            // Markdown inside HTML isn't rendered, but a ![](img.png) there
+            // still marks the file as used, so its links are read too.
+            parts.push(token.content);
+            addTargets(markdown.parseInline(token.content, env)[0].children ?? [], links);
+        }
+    }
+    body.split("\n").forEach((line, i) => {
+        if (!claimed.has(i)) parts.push(line);
+    });
+    return parts.join("\n");
+}
+
+/**
+ * Replace the code spans in `text` with "|", which can't start a tag or a
+ * wikilink target, so `x`#tag isn't a tag and [[`Note`]] isn't a link while
+ * [[note|`alias`]] still links note. Newlines are kept.
+ */
+function blankOut(text: string, spans: Map<number, number> = new Map()): string {
+    let out = "";
+    let from = 0;
+    for (const [start, end] of [...spans].sort((a, b) => a[0] - b[0])) {
+        if (start < from) continue;
+        out += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, "|");
+        from = end;
+    }
+    return out + text.slice(from);
+}
+
+/** Add the targets of the markdown links and images among `tokens` to `links`. */
+function addTargets(tokens: Token[], links: string[]): void {
+    for (const token of tokens) {
+        if (token.type === "link_open") addTarget(token.attrGet("href"), links);
+        if (token.type === "image") {
+            addTarget(token.attrGet("src"), links);
+            addTargets(token.children ?? [], links);
+        }
+    }
 }
 
 /**
