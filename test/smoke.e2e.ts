@@ -492,6 +492,158 @@ console.log("\n=== Server modes (on E2EE+obfuscated+ID key / NFC) ===");
     });
 }
 
+// --- WRITE_FOLDERS permissions (#65) ---------------------------------------
+// The create/update/delete split, the move-destination refusal and the
+// per-document lock, against real CouchDB across vault configurations.
+async function tryCall(c: Client, name: string, args: Record<string, unknown>): Promise<string> {
+    return await call(c, name, args).catch((e) => (e as Error).message);
+}
+const SAVED = /^Note saved:/;
+const DENIED = /Write access denied/;
+const UPLOAD_URL = /https?:\/\/\S+\/attachments\/upload\/[^\s'"]+/;
+
+async function writePermissionChecks(label: string, db: string, d: Device) {
+    const s = await startServer(serverEnv({ ...d, db }, { WRITE_FOLDERS: "MCP,Raw:create", ATTACHMENTS_ENABLED: "true" }));
+    const dev = await openDevice(db, d);
+    const c = await connect(s);
+    const c2 = await connect(s);
+    try {
+        await check(`${label}: Raw:create — create works, overwrite/edit/delete/move-out refused`, async () => {
+            assert.match(await call(c, "write_note", { path: "Raw/a.md", content: "original" }), SAVED);
+            assert.equal(await deviceRead(dev, "Raw/a.md"), "original");
+            assert.match(await tryCall(c, "write_note", { path: "Raw/a.md", content: "clobber" }), /allows only create.*already exists/s);
+            assert.match(await tryCall(c, "edit_note", { path: "Raw/a.md", content: "more" }), DENIED);
+            assert.match(await tryCall(c, "delete_note", { path: "Raw/a.md" }), DENIED);
+            assert.match(await tryCall(c, "move_note", { from: "Raw/a.md", to: "MCP/a.md" }), DENIED);
+            assert.match(await tryCall(c, "move_note", { from: "Raw/a.md", to: "Raw/b.md" }), DENIED);
+            assert.equal(await deviceRead(dev, "Raw/a.md"), "original");
+            assert.equal(await deviceRead(dev, "MCP/a.md"), null);
+            assert.equal(await deviceRead(dev, "Raw/b.md"), null);
+        });
+        await check(`${label}: Raw:create — a note deleted on a device can be created again`, async () => {
+            await devicePut(dev, "Raw/gone.md", "device note");
+            clearHandlers();
+            await dev.delete("Raw/gone.md");
+            assert.match(await call(c, "write_note", { path: "Raw/gone.md", content: "recreated" }), SAVED);
+            assert.equal(await deviceRead(dev, "Raw/gone.md"), "recreated");
+        });
+        await check(`${label}: move into Raw works, but not onto an existing note`, async () => {
+            await call(c, "write_note", { path: "MCP/in.md", content: "moving in" });
+            assert.match(await call(c, "move_note", { from: "MCP/in.md", to: "Raw/in.md" }), /^Moved:/);
+            assert.equal(await deviceRead(dev, "Raw/in.md"), "moving in");
+            assert.equal(await deviceRead(dev, "MCP/in.md"), null);
+            await call(c, "write_note", { path: "MCP/onto.md", content: "would clobber" });
+            assert.match(await tryCall(c, "move_note", { from: "MCP/onto.md", to: "Raw/a.md" }), /already exists/);
+            if (!d.caseSensitive) assert.match(await tryCall(c, "move_note", { from: "MCP/onto.md", to: "Raw/A.md" }), /already exists/);
+            assert.equal(await deviceRead(dev, "Raw/a.md"), "original");
+            assert.equal(await deviceRead(dev, "MCP/onto.md"), "would clobber");
+        });
+        await check(`${label}: case-variant paths can't overwrite a Raw note`, async () => {
+            // `raw/` is not listed, so it is outside the writable folders.
+            assert.match(await tryCall(c, "write_note", { path: "raw/a.md", content: "x" }), DENIED);
+            if (d.caseSensitive) {
+                // Distinct documents on a case-sensitive vault: a new note, not an overwrite.
+                assert.match(await call(c, "write_note", { path: "Raw/A.md", content: "distinct" }), SAVED);
+                assert.equal(await deviceRead(dev, "Raw/A.md"), "distinct");
+            } else {
+                assert.match(await tryCall(c, "write_note", { path: "Raw/A.md", content: "x" }), /already exists/);
+            }
+            assert.equal(await deviceRead(dev, "Raw/a.md"), "original");
+        });
+        await check(`${label}: two concurrent creates of one new Raw path → exactly one succeeds`, async () => {
+            for (let round = 0; round < 3; round++) {
+                const p = `Raw/race-${round}.md`;
+                const r = await Promise.all([
+                    tryCall(c, "write_note", { path: p, content: "first" }),
+                    tryCall(c2, "write_note", { path: p, content: "second" }),
+                ]);
+                assert.equal(r.filter((t) => SAVED.test(t)).length, 1, `round ${round}: ${JSON.stringify(r)}`);
+                assert.match(r.find((t) => !SAVED.test(t))!, /already exists/);
+                assert.equal(await deviceRead(dev, p), SAVED.test(r[0]) ? "first" : "second");
+            }
+            if (!d.caseSensitive) {
+                const r = await Promise.all([
+                    tryCall(c, "write_note", { path: "Raw/Race-case.md", content: "upper" }),
+                    tryCall(c2, "write_note", { path: "Raw/race-case.md", content: "lower" }),
+                ]);
+                assert.equal(r.filter((t) => SAVED.test(t)).length, 1, JSON.stringify(r));
+            }
+        });
+        await check(`${label}: move_note onto an existing note in a fully writable folder is refused`, async () => {
+            await call(c, "write_note", { path: "MCP/x.md", content: "x body" });
+            await call(c, "write_note", { path: "MCP/y.md", content: "y body" });
+            assert.match(await tryCall(c, "move_note", { from: "MCP/x.md", to: "MCP/y.md" }), /already exists/);
+            assert.equal(await deviceRead(dev, "MCP/x.md"), "x body");
+            assert.equal(await deviceRead(dev, "MCP/y.md"), "y body");
+        });
+        await check(`${label}: case-only rename in a fully writable folder still works`, async () => {
+            await call(c, "write_note", { path: "MCP/case.md", content: "case body" });
+            assert.match(await call(c, "move_note", { from: "MCP/case.md", to: "MCP/Case.md" }), /^Moved:/);
+            assert.match(await call(c, "read_note", { path: "MCP/Case.md" }), /case body/);
+            const list = await call(c, "list_notes", { folder: "MCP", limit: 100 });
+            assert.match(list, /MCP\/Case\.md/);
+            assert.doesNotMatch(list, /MCP\/case\.md/);
+            assert.equal(await deviceRead(dev, "MCP/Case.md"), "case body");
+        });
+        await check(`${label}: attachments in Raw — upload URL creates, overwrite/delete/move-out refused`, async () => {
+            const bytes = new Uint8Array(randomBytes(5000));
+            const up = await call(c, "create_attachment_upload", { path: "Raw/scan.pdf", size: bytes.byteLength });
+            const url = up.match(UPLOAD_URL)?.[0];
+            assert.ok(url, up);
+            assert.equal((await fetch(url, { method: "PUT", body: bytes })).status, 201);
+            clearHandlers();
+            const got: any = await dev.get("Raw/scan.pdf" as any);
+            assert.ok(Buffer.from(readContent(got) as ArrayBuffer).equals(Buffer.from(bytes)), "uploaded bytes differ on device");
+            assert.match(await tryCall(c, "create_attachment_upload", { path: "Raw/scan.pdf", size: 10 }), /^Attachment already exists: Raw\/scan\.pdf\. Choose another path\.$/);
+            assert.match(await tryCall(c, "create_attachment_upload", { path: "Raw/scan.pdf", size: 10, overwrite: true }), DENIED);
+            assert.match(await tryCall(c, "write_attachment", { path: "Raw/scan.pdf", content_base64: "AAAA" }), /already exists/);
+            assert.match(await tryCall(c, "write_attachment", { path: "Raw/scan.pdf", content_base64: "AAAA", overwrite: true }), DENIED);
+            assert.match(await tryCall(c, "delete_attachment", { path: "Raw/scan.pdf" }), DENIED);
+            assert.match(await tryCall(c, "move_attachment", { from: "Raw/scan.pdf", to: "MCP/scan.pdf" }), DENIED);
+            // Two upload URLs for one new path: the second PUT loses with 409.
+            const u1 = (await call(c, "create_attachment_upload", { path: "Raw/twice.png", size: 4 })).match(UPLOAD_URL)![0];
+            const u2 = (await call(c, "create_attachment_upload", { path: "Raw/twice.png", size: 4 })).match(UPLOAD_URL)![0];
+            assert.equal((await fetch(u1, { method: "PUT", body: new Uint8Array([1, 2, 3, 4]) })).status, 201);
+            assert.equal((await fetch(u2, { method: "PUT", body: new Uint8Array([5, 6, 7, 8]) })).status, 409);
+            clearHandlers();
+            const twice: any = await dev.get("Raw/twice.png" as any);
+            assert.deepEqual([...new Uint8Array(readContent(twice) as ArrayBuffer)], [1, 2, 3, 4]);
+            // Moving an attachment into Raw works, but not onto an existing one.
+            await call(c, "write_attachment", { path: "MCP/in.png", content_base64: "AQID" });
+            assert.match(await tryCall(c, "move_attachment", { from: "MCP/in.png", to: "Raw/scan.pdf" }), /already exists/);
+            assert.match(await call(c, "move_attachment", { from: "MCP/in.png", to: "Raw/in.png" }), /^Moved:/);
+        });
+    } finally {
+        await c.close().catch(() => {});
+        await c2.close().catch(() => {});
+        await stopServer(s);
+        await closeDevice(dev);
+    }
+    // `/,Raw:create`: a case variant of Raw (`raw/`) gets only what both spellings allow.
+    await check(`${label}: WRITE_FOLDERS=/,Raw:create — raw/a.md can't overwrite Raw/a.md`, async () => {
+        const s2 = await startServer(serverEnv({ ...d, db }, { WRITE_FOLDERS: "/,Raw:create" }));
+        const dev2 = await openDevice(db, d);
+        try {
+            const cc = await connect(s2);
+            const r = await tryCall(cc, "write_note", { path: "raw/a.md", content: "sneaky" });
+            if (d.caseSensitive) assert.match(r, SAVED); // a separate document there
+            else assert.match(r, /allows only create.*already exists/s);
+            assert.match(await tryCall(cc, "edit_note", { path: "raw/a.md", content: "more" }), DENIED);
+            assert.match(await tryCall(cc, "delete_note", { path: "raw/a.md" }), DENIED);
+            assert.equal(await deviceRead(dev2, "Raw/a.md"), "original");
+            assert.match(await call(cc, "write_note", { path: "Elsewhere/free.md", content: "1" }), SAVED);
+            assert.match(await call(cc, "write_note", { path: "Elsewhere/free.md", content: "2" }), SAVED);
+            await cc.close();
+        } finally { await stopServer(s2); await closeDevice(dev2); }
+    });
+}
+
+console.log("\n=== WRITE_FOLDERS permissions (MCP,Raw:create) ===");
+for (const idx of [1, 7, 8]) {
+    const { label, d } = MATRIX[idx];
+    await writePermissionChecks(label, `smoke_m${idx}`, d);
+}
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {
     for (const f of failures) console.log(` - ${f.split("\n")[0]}`);
