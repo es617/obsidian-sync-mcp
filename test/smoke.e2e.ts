@@ -528,10 +528,11 @@ async function writePermissionChecks(label: string, db: string, d: Device) {
             assert.equal(await deviceRead(dev, "Raw/gone.md"), "recreated");
         });
         await check(`${label}: move into Raw works, but not onto an existing note`, async () => {
-            await call(c, "write_note", { path: "MCP/in.md", content: "moving in" });
-            assert.match(await call(c, "move_note", { from: "MCP/in.md", to: "Raw/in.md" }), /^Moved:/);
-            assert.equal(await deviceRead(dev, "Raw/in.md"), "moving in");
-            assert.equal(await deviceRead(dev, "MCP/in.md"), null);
+            // Paths unique to these checks: other checks share some of these databases.
+            await call(c, "write_note", { path: "MCP/perm-in.md", content: "moving in" });
+            assert.match(await call(c, "move_note", { from: "MCP/perm-in.md", to: "Raw/perm-in.md" }), /^Moved:/);
+            assert.equal(await deviceRead(dev, "Raw/perm-in.md"), "moving in");
+            assert.equal(await deviceRead(dev, "MCP/perm-in.md"), null);
             await call(c, "write_note", { path: "MCP/onto.md", content: "would clobber" });
             assert.match(await tryCall(c, "move_note", { from: "MCP/onto.md", to: "Raw/a.md" }), /already exists/);
             if (!d.caseSensitive) assert.match(await tryCall(c, "move_note", { from: "MCP/onto.md", to: "Raw/A.md" }), /already exists/);
