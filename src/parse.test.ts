@@ -59,6 +59,25 @@ Content`;
         assert.equal(result.frontmatter.note, `it's "fine"`);
     });
 
+    it("reads YAML quoting rules in frontmatter values", () => {
+        const yaml = String.raw`---
+single: 'it''s'
+double: "say \"hi\"\tthen"
+padded: "  kept  "
+unknown: "C:\Users"
+two: "a" and "b"
+lone: 'open
+---
+Text`;
+        const fm = parseFrontmatterAndLinks(yaml).frontmatter;
+        assert.equal(fm.single, "it's");
+        assert.equal(fm.double, 'say "hi"\tthen');
+        assert.equal(fm.padded, "  kept  ");
+        assert.equal(fm.unknown, String.raw`C:\Users`);
+        assert.equal(fm.two, `"a" and "b"`);
+        assert.equal(fm.lone, "'open");
+    });
+
     it("keeps a lone or mismatched quote in a tag", () => {
         const result = parseFrontmatterAndLinks(`---\ntags: ["alpha', it's]\n---\nText`);
         assert.ok(result.tags.includes(`"alpha'`));
@@ -228,6 +247,39 @@ Also #shared inline`;
         const content = "[`run`](scripts/run.md) [[note|`alias`]] ![`shot`](img/shot.png)";
         const result = parseFrontmatterAndLinks(content);
         assert.deepEqual(result.links.sort(), ["img/shot.png", "note", "scripts/run.md"]);
+    });
+
+    it("keeps the target of a wikilink written with code as is", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("[[`Note`]]").links, ["`Note`"]);
+    });
+
+    it("does not let a stray backtick hide links in the next block", () => {
+        const cases: [string, string[]][] = [
+            ["- run `foo\n- see [[List]] and `bar`", ["List"]],
+            ["# Use ` here\n[[Heading]] then `code`", ["Heading"]],
+            ["| `x | [[Row]] |\n| ![](pic.png) | y` |", ["Row", "pic.png"]],
+            ["Text `x\n> [[Quote]] `y`", ["Quote"]],
+            ["---\ncmd: `ls\n---\nSee [[Body]] and ![](img.png) then `x`", ["Body", "img.png"]],
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), links.sort(), content);
+        }
+    });
+
+    it("still masks a code span that wraps within a paragraph or quote", () => {
+        const content = "See `[[a]]\ncontinued` and\n> quoted `[[b]]\n> still` [[c]]\n- item `[[d]]\n  wrapped` [[e]]";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["c", "e"]);
+    });
+
+    it("treats a backslash-escaped backtick as literal", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("\\`[[a]]\\` [[b]]").links.sort(), ["a", "b"]);
+        // The rest of an escaped run still opens a span: \``x` is a literal ` and then code `x`.
+        assert.deepEqual(parseFrontmatterAndLinks("\\``[[a]]` [[b]]").links, ["b"]);
+        // An even number of backslashes escapes nothing.
+        assert.deepEqual(parseFrontmatterAndLinks("\\\\`[[a]]` [[b]]").links, ["b"]);
+        // Inside a span a backslash is literal, so `C:\` closes.
+        assert.deepEqual(parseFrontmatterAndLinks("`C:\\` [[b]] `[[c]]`").links, ["b"]);
+        assert.deepEqual(parseFrontmatterAndLinks("\\` #tag \\`").tags, ["tag"]);
     });
 
     it("drops #heading, #^block and #page anchors from wikilink targets", () => {
