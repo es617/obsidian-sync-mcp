@@ -89,6 +89,22 @@ Text`;
         assert.ok(performance.now() - start < 2000);
     });
 
+    it("resolves many alias references in linear time", () => {
+        const time = (n: number) => {
+            const yaml = "---\nbase: &a [x, y]\n" + Array.from({ length: n }, (_, i) => `k${i}: *a`).join("\n") + "\n---\n";
+            const start = performance.now();
+            assert.equal(parseFrontmatterAndLinks(yaml).frontmatter[`k${n - 1}`], "x, y");
+            return performance.now() - start;
+        };
+        time(500);
+        assert.ok(time(8000) < 2000, "8000 alias references took over 2 s");
+    });
+
+    it("reads the plain tags of a list that also holds other values", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntags: [a, [x, y], b]\n---\n").tags, ["a", "b"]);
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntags: |\n  a\n  b\n---\n").tags, ["a", "b"]);
+    });
+
     it("keeps nested frontmatter values as written", () => {
         const fm = parseFrontmatterAndLinks("---\nlist:\n  - [a, b]\n  - {k: v}\nmap:\n  k: v\n---\n").frontmatter;
         assert.equal(fm.list, "- [a, b]\n  - {k: v}");
@@ -328,6 +344,28 @@ Also #shared inline`;
             parseFrontmatterAndLinks(content);
             assert.ok(performance.now() - start < 3000, `${content.slice(0, 20)}… took too long`);
         }
+    });
+
+    it("reads links in table cells beyond the header's", () => {
+        const cases: [string, string[]][] = [
+            ["| h |\n|---|\n| a | [[Extra]] |", ["Extra"]],
+            ["| h | i |\n|---|---|\n| a | b | ![](extra.png) |", ["extra.png"]],
+            ["h | i\n--|--\na | b | [[NoPipes]]", ["NoPipes"]],
+            ["| h | i |\n|---|---|\n| [[a\\|alias]] | b |", ["a"]],
+        ];
+        for (const [content, links] of cases) assert.deepEqual(parseFrontmatterAndLinks(content).links, links, content);
+    });
+
+    it("reads indented lines, which continue footnotes in Obsidian", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("[^1]: Source\n    more [[Cont]] #fn").links, ["Cont"]);
+        assert.deepEqual(parseFrontmatterAndLinks("[^1]: Source\n    more [[Cont]] #fn").tags, ["fn"]);
+        assert.deepEqual(parseFrontmatterAndLinks("# Heading\n\t[[A]]").links, ["A"]);
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntitle: x\n---\n\t[[AfterFM]]").links, ["AfterFM"]);
+    });
+
+    it("does not treat an unmatched backtick as code", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("![[embed `x.png]]").links, ["embed `x.png"]);
+        assert.deepEqual(parseFrontmatterAndLinks("[[My `note]] and #tag").links, ["My `note"]);
     });
 
     it("reads wikilinks in reference and footnote definitions", () => {

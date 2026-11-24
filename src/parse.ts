@@ -3,7 +3,7 @@
  */
 
 import MarkdownIt, { type Token } from "markdown-it";
-import { isAlias, isMap, isScalar, isSeq, parseDocument, type Document } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parseDocument, visit, type Document, type YAMLSeq } from "yaml";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS, isValidAttachmentPath } from "./attachment-path.js";
 
 /**
@@ -35,16 +35,20 @@ const TAG = /(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu;
 // tag's attribute can't open a code span.
 const markdown = new MarkdownIt({ html: true, linkify: false });
 
-// markdown-it doesn't say where a code span sits in its block's text, so the
-// backticks rule is wrapped to record it: env.codeSpans maps a block's inline
-// source to its code spans, start offset to end. Blocks with the same text
-// have the same spans, so they share an entry.
+// markdown-it doesn't say where a code span sits in its block's text, so its
+// backticks rule is wrapped to record that: env.codeSpans maps a block's
+// inline source to its code spans, start offset to end. Blocks with the same
+// text have the same spans and share an entry. __rules__ and __find__ are
+// internal, which is why markdown-it is pinned to an exact version.
 type Env = { codeSpans: Map<string, Map<number, number>> };
 const backticks = markdown.inline.ruler.__rules__[markdown.inline.ruler.__find__("backticks")].fn;
 markdown.inline.ruler.at("backticks", (state, silent) => {
     const start = state.pos;
+    const tokens = state.tokens.length;
     if (!backticks(state, silent)) return false;
-    if (!silent) {
+    // A run with no closing run is literal text (no token is pushed), and the
+    // rule also runs silently while markdown-it scans ahead; neither is a span.
+    if (!silent && state.tokens.length > tokens && state.tokens.at(-1)?.type === "code_inline") {
         const spans = (state.env as Env).codeSpans;
         if (!spans.has(state.src)) spans.set(state.src, new Map());
         spans.get(state.src)!.set(start, state.pos);
@@ -60,9 +64,8 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     const body = end === -1 ? content : content.slice(end + 4);
 
     const { frontmatter, tags: yamlTags } = readFrontmatter(yaml);
+    const { text, links } = readBody(body);
     const tags = new Set(yamlTags);
-    const links: string[] = [];
-    const text = readBody(body, links);
     // Wikilinks in properties (related: "[[Note]]") count too.
     for (const match of (yaml + "\n" + text).matchAll(WIKILINK)) {
         // [[note\|alias]] outside a table: the backslash escapes the pipe.
@@ -77,10 +80,9 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
 /**
  * Frontmatter as YAML ("failsafe": every value is a string as written, so 1.10
  * stays 1.10 and dates aren't converted). A list of plain values is joined
- * with ", ", anything else is kept as written. Tags come from `tags`, a list
- * or a comma-separated string. Frontmatter that isn't valid YAML is ignored,
- * as Obsidian does. Nodes are read directly rather than through toJS(), which
- * rescans the document for every alias.
+ * with ", ", anything else is kept as written. Tags come from `tags`: a list,
+ * or a string of comma- or line-separated tags. Frontmatter that isn't valid
+ * YAML is ignored, as Obsidian does.
  */
 function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: string[] } {
     const frontmatter: Record<string, string> = {};
@@ -88,72 +90,115 @@ function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; t
     const doc = parseDocument(yaml, { schema: "failsafe", uniqueKeys: false });
     if (doc.errors.length > 0 || !isMap(doc.contents)) return { frontmatter, tags };
 
+    const resolve = aliasResolver(doc);
     for (const pair of doc.contents.items) {
-        const key = resolve(doc, pair.key);
+        const key = resolve(pair.key);
         if (!isScalar(key)) continue;
-        const value = resolve(doc, pair.value);
-        const list = plainValues(doc, value);
-        const text = list ? list.join(", ") : isMap(value) || isSeq(value) ? yaml.slice(value.range![0], value.range![1]).trim() : "";
-        if (text) frontmatter[String(key.value)] = text;
-        if (key.value === "tags" && list) {
-            for (const tag of isScalar(value) ? list[0].split(",") : list) if (tag.trim()) tags.push(tag.trim());
-        }
+        const value = resolve(pair.value);
+        const shown = showValue(value, resolve, yaml);
+        if (shown) frontmatter[String(key.value)] = shown;
+        if (key.value !== "tags") continue;
+        const raw = isScalar(value) ? String(value.value).split(/[,\n]/) : isSeq(value) ? scalars(value, resolve) : [];
+        for (const tag of raw) if (tag.trim()) tags.push(tag.trim());
     }
     return { frontmatter, tags };
 }
 
-/** A node, or the node an alias (*name) points to. */
-function resolve(doc: Document, node: unknown): unknown {
-    return isAlias(node) ? node.resolve(doc) : node;
+type Resolve = (node: unknown) => unknown;
+
+/**
+ * Resolve aliases (*name) to the node they point to: the last node before
+ * them with that anchor. Worked out in one pass, since yaml's Alias.resolve
+ * rescans the whole document on every call.
+ */
+function aliasResolver(doc: Document): Resolve {
+    const anchors = new Map<string, unknown>();
+    const targets = new Map<unknown, unknown>();
+    visit(doc, {
+        Node(_, node) {
+            if (isAlias(node)) targets.set(node, anchors.get(node.source));
+            else if (node.anchor) anchors.set(node.anchor, node);
+        },
+    });
+    return (node) => (isAlias(node) ? targets.get(node) : node);
 }
 
-/** A plain value as [value], a list of plain values as its values, else null. */
-function plainValues(doc: Document, node: unknown): string[] | null {
-    if (isScalar(node)) return [String(node.value ?? "")];
-    if (!isSeq(node)) return null;
-    const values: string[] = [];
-    for (const item of node.items) {
-        const value = resolve(doc, item);
-        if (!isScalar(value)) return null;
-        values.push(String(value.value ?? ""));
-    }
-    return values;
+/** The plain values in a list, skipping nested lists and maps. */
+function scalars(seq: YAMLSeq, resolve: Resolve): string[] {
+    return seq.items.map(resolve).filter(isScalar).map((item) => String(item.value ?? ""));
+}
+
+/** A value as get_note_info shows it: as is, a plain list joined, else as written. */
+function showValue(value: unknown, resolve: Resolve, yaml: string): string {
+    if (isScalar(value)) return String(value.value ?? "");
+    if (isSeq(value) && value.items.every((item) => isScalar(resolve(item)))) return scalars(value, resolve).join(", ");
+    if ((isMap(value) || isSeq(value)) && value.range) return yaml.slice(value.range[0], value.range[1]).trim();
+    return "";
 }
 
 // Blocks that only hold other blocks; their lines are claimed by what's inside.
 const CONTAINERS = new Set(["blockquote_open", "bullet_list_open", "ordered_list_open", "list_item_open"]);
 
 /**
- * Add the markdown link and image targets to `links`, and return the note's
- * source text with code left out, for the wikilink and tag patterns: each
- * block's raw text with its code spans blanked out, raw HTML blocks (whose
- * markdown links count too), and the lines no block claims (reference and
- * footnote definitions). Fenced and
- * indented code is left out, as Obsidian doesn't link or tag inside code.
+ * The note's markdown link and image targets, and its source text with code
+ * left out, for the wikilink and tag patterns: each block's raw text with its
+ * code spans blanked out, and as written, raw HTML blocks (whose markdown
+ * links count too), indented code, table rows with more cells than the header
+ * (markdown-it drops the extra ones) and the lines no block claims (reference
+ * and footnote definitions). Indented code is read because markdown-it
+ * doesn't know footnotes, whose continuation lines are indented. Fenced code
+ * is left out, as Obsidian doesn't link or tag inside code.
  */
-function readBody(body: string, links: string[]): string {
+function readBody(body: string): { text: string; links: string[] } {
     const env: Env = { codeSpans: new Map() };
     const tokens = markdown.parse(body, env);
+    const lines = body.split("\n");
     const parts: string[] = [];
+    const links: string[] = [];
     const claimed = new Set<number>();
+    let row = { line: 0, cells: 0 };
     for (const token of tokens) {
         if (token.map && !CONTAINERS.has(token.type)) {
             for (let line = token.map[0]; line < token.map[1]; line++) claimed.add(line);
         }
-        if (token.type === "inline") {
-            parts.push(blankOut(token.content, env.codeSpans.get(token.content)));
-            addTargets(token.children ?? [], links);
-        } else if (token.type === "html_block") {
-            // Markdown inside HTML isn't rendered, but a ![](img.png) there
-            // still marks the file as used, so its links are read too.
-            parts.push(token.content);
-            addTargets(markdown.parseInline(token.content, env)[0].children ?? [], links);
+        switch (token.type) {
+            case "inline":
+                parts.push(blankOut(token.content, env.codeSpans.get(token.content)));
+                addTargets(token.children ?? [], links);
+                break;
+            case "html_block":
+                // Markdown inside HTML isn't rendered, but a ![](img.png)
+                // there still marks the file as used.
+                parts.push(token.content);
+                addTargets(markdown.parseInline(token.content, env)[0].children ?? [], links);
+                break;
+            case "code_block":
+                parts.push(token.content);
+                break;
+            case "tr_open":
+                row = { line: token.map![0], cells: 0 };
+                break;
+            case "th_open":
+            case "td_open":
+                row.cells++;
+                break;
+            case "tr_close":
+                if (countCells(lines[row.line]) > row.cells) {
+                    parts.push(lines[row.line]);
+                    addTargets(markdown.parseInline(lines[row.line], env)[0].children ?? [], links);
+                }
+                break;
         }
     }
-    body.split("\n").forEach((line, i) => {
+    lines.forEach((line, i) => {
         if (!claimed.has(i)) parts.push(line);
     });
-    return parts.join("\n");
+    return { text: parts.join("\n"), links };
+}
+
+/** The cells in a table row as written: split at unescaped pipes, outer pipes optional. */
+function countCells(line: string): number {
+    return line.trim().replace(/^\||(?<!\\)\|$/g, "").split(/(?<!\\)\|/).length;
 }
 
 /**
@@ -165,14 +210,17 @@ function blankOut(text: string, spans: Map<number, number> = new Map()): string 
     let out = "";
     let from = 0;
     for (const [start, end] of [...spans].sort((a, b) => a[0] - b[0])) {
-        if (start < from) continue;
         out += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, "|");
         from = end;
     }
     return out + text.slice(from);
 }
 
-/** Add the targets of the markdown links and images among `tokens` to `links`. */
+/**
+ * Add the targets of the markdown links and images among `tokens` to `links`.
+ * A link's text is among its siblings, but an image's alt text is in its
+ * children, where another image can be.
+ */
 function addTargets(tokens: Token[], links: string[]): void {
     for (const token of tokens) {
         if (token.type === "link_open") addTarget(token.attrGet("href"), links);
