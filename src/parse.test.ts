@@ -64,26 +64,33 @@ Content`;
 single: 'it''s'
 double: "say \"hi\"\tthen"
 padded: "  kept  "
-unknown: "C:\Users"
 commented: "My Note" # draft
-two: "a" and "b"
-lone: 'open
+version: 1.10
+list: [a, "b"]
 ---
 Text`;
         const fm = parseFrontmatterAndLinks(yaml).frontmatter;
         assert.equal(fm.single, "it's");
         assert.equal(fm.double, 'say "hi"\tthen');
         assert.equal(fm.padded, "  kept  ");
-        assert.equal(fm.unknown, String.raw`"C:\Users"`, "an escape not decoded here keeps the value as written");
         assert.equal(fm.commented, "My Note");
-        assert.equal(fm.two, `"a" and "b"`);
-        assert.equal(fm.lone, "'open");
+        assert.equal(fm.version, "1.10", "values stay strings as written");
+        assert.equal(fm.list, "a, b");
     });
 
-    it("keeps a lone or mismatched quote in a tag", () => {
-        const result = parseFrontmatterAndLinks(`---\ntags: ["alpha', it's]\n---\nText`);
-        assert.ok(result.tags.includes(`"alpha'`));
-        assert.ok(result.tags.includes("it's"));
+    it("ignores frontmatter with YAML aliases, quickly", () => {
+        const yaml = "---\na: &x [" + "*x,".repeat(50) + "]\n" + "k: v\n".repeat(20000) + "---\nBody [[L]]";
+        const start = performance.now();
+        const result = parseFrontmatterAndLinks(yaml);
+        assert.ok(performance.now() - start < 2000);
+        assert.deepEqual(result.frontmatter, {});
+        assert.deepEqual(result.links, ["L"]);
+    });
+
+    it("ignores frontmatter that isn't valid YAML, as Obsidian does", () => {
+        const result = parseFrontmatterAndLinks(`---\ntitle: "a" and "b"\ntags: ["alpha', it's]\n---\nBody #real`);
+        assert.deepEqual(result.frontmatter, {});
+        assert.deepEqual(result.tags, ["real"]);
     });
 
     it("parses inline #tags", () => {
@@ -146,13 +153,11 @@ Text #${nfdTag} here`;
         assert.deepEqual(result.tags, ["before", "after"]);
     });
 
-    it("leaves a fence with no closer as text", () => {
-        // CommonMark runs it to the end, but then one stray ``` hides every
-        // later tag and link, and a missed link is worse than an extra one.
-        const content = "#kept\n```\n#also-kept [[Link]]";
+    it("treats an unclosed fence as running to the end", () => {
+        const content = "#kept\n```\n#lost [[Lost]]";
         const result = parseFrontmatterAndLinks(content);
-        assert.deepEqual(result.tags, ["kept", "also-kept"]);
-        assert.deepEqual(result.links, ["Link"]);
+        assert.deepEqual(result.tags, ["kept"]);
+        assert.deepEqual(result.links, []);
     });
 
     it("masks fences in list items and callouts", () => {
@@ -259,15 +264,15 @@ Also #shared inline`;
         assert.deepEqual(result.links.sort(), ["img/shot.png", "note", "scripts/run.md"]);
     });
 
-    it("keeps the target of a wikilink written with code as is", () => {
-        assert.deepEqual(parseFrontmatterAndLinks("[[`Note`]]").links, ["`Note`"]);
+    it("does not link a wikilink whose target is code", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("[[`Note`]]").links, []);
     });
 
     it("does not let a stray backtick hide links in the next block", () => {
         const cases: [string, string[]][] = [
             ["- run `foo\n- see [[List]] and `bar`", ["List"]],
             ["# Use ` here\n[[Heading]] then `code`", ["Heading"]],
-            ["| `x | [[Row]] |\n| ![](pic.png) | y` |", ["Row", "pic.png"]],
+            ["| `x | [[Row]] |\n|---|---|\n| ![](pic.png) | y` |", ["Row", "pic.png"]],
             ["Text `x\n> [[Quote]] `y`", ["Quote"]],
             ["---\ncmd: `ls\n---\nSee [[Body]] and ![](img.png) then `x`", ["Body", "img.png"]],
         ];
@@ -276,7 +281,7 @@ Also #shared inline`;
         }
     });
 
-    it("keeps code spans to one line, and to one cell in a table row", () => {
+    it("masks code spans across lines and per table cell", () => {
         const cases: [string, string[]][] = [
             ["Title `x\n===\n[[Setext]] `y`", ["Setext"]],
             ["a `x\n***\n[[Break]] `y`", ["Break"]],
@@ -284,9 +289,7 @@ Also #shared inline`;
             ["[^1]: `x\n[^2]: [[Footnote]] `y`", ["Footnote"]],
             ["| a | b |\n|---|---|\n| `x | [[Cell]] | y` |", ["Cell"]],
             ["| `[[a\\|b]]` | `[[c]]` |", []],
-            // The cost: a span that wraps is missed, and its closing backtick
-            // then pairs with the next one, so a link in code is indexed.
-            ["See `[[wrapped\nspan]]` and `[[in-code]]`", ["in-code"]],
+            ["See `[[wrapped\nspan]]` and `[[in-code]]`", []],
         ];
         for (const [content, links] of cases) {
             assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), links.sort(), content);
@@ -294,7 +297,7 @@ Also #shared inline`;
     });
 
     it("reads CRLF notes like LF ones", () => {
-        const result = parseFrontmatterAndLinks("---\r\ntitle: \"T\"\r\ncmd: `ls\r\ntags: [a]\r\n---\r\n[[Body]] `x`\r\n");
+        const result = parseFrontmatterAndLinks("---\r\ntitle: \"T\"\r\ncmd: \"a ` b\"\r\ntags: [a]\r\n---\r\n[[Body]] `x`\r\n");
         assert.equal(result.frontmatter.title, "T");
         assert.deepEqual(result.tags, ["a"]);
         assert.deepEqual(result.links, ["Body"]);
@@ -421,8 +424,9 @@ Also #shared inline`;
     });
 
     it("does not let a link span lines", () => {
+        // A markdown link's text may wrap (CommonMark), a wikilink may not.
         const result = parseFrontmatterAndLinks("[[broken\nlink]] [label\n](x.png)");
-        assert.deepEqual(result.links, []);
+        assert.deepEqual(result.links, ["x.png"]);
     });
 
     it("deduplicates links", () => {
