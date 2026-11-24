@@ -69,7 +69,6 @@ export class Vault implements VaultBackend {
     // (`nfc-path-identity-v1`, the default for databases created by LiveSync
     // 1.0.49+). Detected in init(); the library rejects a mismatch.
     private pathNormalizationVersion: 0 | 1 = 0;
-    // Serializes attachment writes per document id (see writeAttachmentUnlocked).
     /** Per-document lock: makes an existence check and the write after it one step (see writeNoteUnlocked). */
     private docLock = new KeyedLock();
 
@@ -448,7 +447,7 @@ export class Vault implements VaultBackend {
             if (from === to) return true;
             // A case-only rename on a case-insensitive vault (LiveSync's default)
             // is one document: rewrite it under the new path and delete nothing.
-            if (fromId === toId) return await this.writeNoteUnlocked(to, content, {});
+            if (fromId === toId) return await this.writeNoteUnlocked(to, content, { mode: "upsert" });
             const wrote = await this.writeNoteUnlocked(to, content, { mode: "create" });
             if (!wrote) return false;
             clearHandlers();

@@ -12,6 +12,9 @@ const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export class LocalVault implements VaultBackend {
     private root: string;
+    /** fs calls used by moveNoReplace, replaceable in tests to simulate failures. */
+    protected linkFile = link;
+    protected unlinkSource = unlink;
 
     constructor(vaultPath: string) {
         this.root = realpathSync(resolve(vaultPath));
@@ -170,6 +173,70 @@ export class LocalVault implements VaultBackend {
         }
     }
 
+    /** True when both paths name the same file (same device and inode). */
+    private async sameFile(a: string, b: string): Promise<boolean> {
+        try {
+            const [sa, sb] = await Promise.all([stat(a), stat(b)]);
+            return sa.dev === sb.dev && sa.ino === sb.ino;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Move `fromPath` to `toPath` without replacing anything there: hard-link,
+     * or copy where links aren't supported, then remove the source. rename()
+     * can't be used because it replaces an existing destination.
+     *
+     * - "moved": done.
+     * - "exists": something else is already at the destination.
+     * - "failed": nothing changed. If removing the source failed after the link,
+     *   the link is undone: two names for one file would let a write to the
+     *   source change the destination.
+     * - "copy-left": the copy exists but the source couldn't be removed; the two
+     *   are independent files.
+     *
+     * `requested` is the destination as the caller spelled it (absolute).
+     */
+    private async moveNoReplace(fromPath: string, toPath: string, requested: string): Promise<"moved" | "exists" | "failed" | "copy-left"> {
+        let linked = true;
+        try {
+            await this.linkFile(fromPath, toPath);
+        } catch (e: any) {
+            if (e.code === "EEXIST") {
+                // A case-insensitive mount whose realpath keeps the requested case
+                // (WSL /mnt/c, Docker Desktop bind mounts) makes a case-only rename
+                // look like a move onto an existing file: it's the source itself.
+                if (fromPath.toLowerCase() === toPath.toLowerCase() && (await this.sameFile(fromPath, toPath))) {
+                    try {
+                        await rename(fromPath, requested);
+                        return "moved";
+                    } catch {
+                        return "failed";
+                    }
+                }
+                return "exists";
+            }
+            if (e.code === "ENOENT") return "failed";
+            // Cross-device, or a filesystem without hard links (codes vary: EXDEV,
+            // EPERM, ENOTSUP, ENOSYS on some FUSE mounts...): copy, then delete.
+            linked = false;
+            try {
+                await copyFile(fromPath, toPath, constants.COPYFILE_EXCL);
+            } catch (copyErr: any) {
+                return copyErr.code === "EEXIST" ? "exists" : "failed";
+            }
+        }
+        try {
+            await this.unlinkSource(fromPath);
+            return "moved";
+        } catch {
+            if (!linked) return "copy-left";
+            if (await this.sameFile(fromPath, toPath)) await unlink(toPath).catch(() => {});
+            return "failed";
+        }
+    }
+
     async moveNote(from: string, to: string): Promise<boolean> {
         const fromPath = await this.safePath(from, "note");
         const toPath = await this.safePath(to, "note");
@@ -185,26 +252,17 @@ export class LocalVault implements VaultBackend {
         }
         try {
             await mkdir(dirname(toPath), { recursive: true });
-            // rename would replace an existing destination; link fails with
-            // EEXIST instead.
-            await link(fromPath, toPath);
-        } catch (e: any) {
-            if (e.code === "EEXIST") throw new NoteExistsError(to);
-            // Cross-device, or a filesystem without hard links: copy, then delete.
-            if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(e.code)) return false;
-            try {
-                await copyFile(fromPath, toPath, constants.COPYFILE_EXCL);
-            } catch (copyErr: any) {
-                if (copyErr.code === "EEXIST") throw new NoteExistsError(to);
-                return false;
-            }
-        }
-        try {
-            await unlink(fromPath);
-            return true;
         } catch {
             return false;
         }
+        const result = await this.moveNoReplace(fromPath, toPath, resolve(this.root, to));
+        if (result === "exists") throw new NoteExistsError(to);
+        if (result === "copy-left") {
+            // Report a failed move with nothing changed, rather than two copies.
+            await unlink(toPath).catch(() => {});
+            return false;
+        }
+        return result === "moved";
     }
 
     async getMetadata(path: string): Promise<NoteInfo | null> {
@@ -298,32 +356,30 @@ export class LocalVault implements VaultBackend {
             }
         }
         if (!(await this.mkdirChecked(to, toPath))) return false;
-        try {
-            if (overwrite) {
+        if (overwrite) {
+            try {
                 await rename(fromPath, toPath);
                 return true;
+            } catch (e: any) {
+                if (e.code !== "EXDEV") return false;
             }
-            // rename would replace an existing destination; link fails with
-            // EEXIST instead.
-            await link(fromPath, toPath);
-        } catch (e: any) {
-            if (e.code === "EEXIST") throw new AttachmentExistsError(to);
-            // Cross-device, or a filesystem without hard links: copy, then delete.
-            if (!["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP"].includes(e.code)) return false;
+            // Cross-device: copy over the destination, then delete the source.
             try {
-                await copyFile(fromPath, toPath, overwrite ? 0 : constants.COPYFILE_EXCL);
-            } catch (copyErr: any) {
-                if (copyErr.code === "EEXIST") throw new AttachmentExistsError(to);
+                await copyFile(fromPath, toPath);
+            } catch {
                 return false;
             }
+            try {
+                await unlink(fromPath);
+                return true;
+            } catch {
+                throw new AttachmentMoveIncompleteError(from, to);
+            }
         }
-        // The destination now exists, by link or copy; only the source is left.
-        try {
-            await unlink(fromPath);
-            return true;
-        } catch {
-            throw new AttachmentMoveIncompleteError(from, to);
-        }
+        const result = await this.moveNoReplace(fromPath, toPath, resolve(this.root, to));
+        if (result === "exists") throw new AttachmentExistsError(to);
+        if (result === "copy-left") throw new AttachmentMoveIncompleteError(from, to);
+        return result === "moved";
     }
 
     async getAttachmentInfo(path: string): Promise<AttachmentInfo | null> {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseWriteFolders, allowedActions, checkWrite, describeWriteScope, type WriteScope } from "./write-scope.js";
+import { parseWriteFolders, allowedActions, checkWrite, describeWriteScope, writeScopeWarnings, type WriteScope } from "./write-scope.js";
 
 /** Allowed actions as a sorted array, for readable assertions. */
 const allowed = (path: string, scope: WriteScope) => [...allowedActions(path, scope)].sort();
@@ -232,4 +232,57 @@ test("describeWriteScope: permissions in a fixed order, the root as '/'", () => 
         " create = add new files, update = change existing files, delete = delete or move files away; the most specific folder applies.",
     );
     assert.equal(describeWriteScope(parseWriteFolders("/")), " Writes are only allowed inside: /.");
+});
+
+// --- Review fixes: paths spelled the way the backends resolve them ---
+
+test("backslashes, repeated slashes and './' are matched as the backends resolve them", () => {
+    // LiveSync maps '\' to '/' and collapses slashes before deriving a document id,
+    // so these all name Raw/a.md and must get Raw's permissions, not the root rule's.
+    const scope = parseWriteFolders("/,Raw:create");
+    for (const p of ["Raw\\a.md", "Raw//a.md", "./Raw/a.md", "Raw/./a.md", "\\Raw\\a.md", "Projects/../Raw/a.md"]) {
+        assert.ok(!allowedActions(p, scope).has("update"), `${p} must not be updatable`);
+        assert.ok(!allowedActions(p, scope).has("delete"), `${p} must not be deletable`);
+    }
+    assert.deepEqual(allowed("Raw\\a.md", scope), ["create"]);
+    assert.deepEqual(allowed("Raw\\..\\x.md", scope), [], "backslash traversal");
+    const nested = parseWriteFolders("Projects,Projects/Raw:create");
+    assert.deepEqual(allowed("Projects/Raw\\a.md", nested), ["create"]);
+});
+
+test("case folding: Unicode case pairs and Windows trailing dots/spaces can't escape a rule", () => {
+    const scope = parseWriteFolders("/,Sources:create");
+    assert.deepEqual(allowed("ſources/a.md", scope), ["create"], "long s folds with s");
+    assert.deepEqual(allowed("Sources./a.md", scope), ["create"], "Windows strips trailing dots");
+    assert.deepEqual(allowed("Sources /a.md", scope), ["create"], "and trailing spaces");
+});
+
+test("parseWriteFolders: case variants count as duplicates", () => {
+    assert.throws(() => parseWriteFolders("/,raw,Raw:create"), {
+        message: "WRITE_FOLDERS: 'Raw' is listed more than once (also as 'raw'; folder names are compared ignoring case).",
+    });
+});
+
+test("parseWriteFolders: folders that could never match are rejected", () => {
+    assert.throws(() => parseWriteFolders("Raw\\Sub:create"), /uses a backslash/);
+    assert.throws(() => parseWriteFolders("./Raw:create"), /'\.' or '\.\.' folder segment/);
+    assert.throws(() => parseWriteFolders("Raw/../x"), /'\.' or '\.\.' folder segment/);
+    assert.throws(() => parseWriteFolders("Raw//Sub"), /empty/);
+});
+
+test("checkWrite names the folder that withholds the action", () => {
+    assert.equal(
+        checkWrite("Raw/sub/a.md", "update", parseWriteFolders("Raw:create,raw/sub")),
+        "Write access denied: Raw/ allows only create, so 'Raw/sub/a.md' can't be changed.",
+    );
+    assert.equal(
+        checkWrite("Raw/a.md", "update", parseWriteFolders("/:delete,raw:create")),
+        "Write access denied: raw/ allows only create, so 'Raw/a.md' can't be changed.",
+    );
+});
+
+test("writeScopeWarnings flags a comma where '+' was meant", () => {
+    assert.deepEqual(writeScopeWarnings(parseWriteFolders("MCP,Raw:create")), []);
+    const [w] = writeScopeWarnings(parseWriteFolders("Raw:create,update"));
+    assert.match(w, /'update' is read as a fully writable folder named 'update\/'.*'Raw:create\+update'/);
 });

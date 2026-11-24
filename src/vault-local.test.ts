@@ -729,3 +729,95 @@ describe("attachments", () => {
         }
     });
 });
+
+describe("moves never leave two names for one file", () => {
+    /** A LocalVault whose link/unlink can be made to fail, as on Windows with the file open or on FUSE mounts. */
+    class FlakyVault extends LocalVault {
+        failUnlink = false;
+        linkError: string | null = null;
+        constructor(root: string) {
+            super(root);
+            const realUnlink = this.unlinkSource;
+            const realLink = this.linkFile;
+            this.unlinkSource = (async (p: any) => {
+                if (this.failUnlink) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+                return realUnlink(p);
+            }) as any;
+            this.linkFile = (async (a: any, b: any) => {
+                if (this.linkError) throw Object.assign(new Error("no links"), { code: this.linkError });
+                return realLink(a, b);
+            }) as any;
+        }
+    }
+    let root: string;
+    let flaky: FlakyVault;
+    before(async () => {
+        root = await mkdtemp(join(tmpdir(), "vault-flaky-"));
+        flaky = new FlakyVault(root);
+    });
+    after(async () => {
+        await rm(root, { recursive: true, force: true });
+    });
+
+    it("note: a failed source delete undoes the link", async () => {
+        await flaky.writeNote("MCP/x.md", "x");
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveNote("MCP/x.md", "Raw/new.md"), false);
+        } finally {
+            flaky.failUnlink = false;
+        }
+        assert.equal(existsSync(join(root, "Raw/new.md")), false, "destination link removed");
+        assert.equal(await flaky.readNote("MCP/x.md"), "x");
+    });
+
+    it("note: a failed source delete after a copy removes the copy", async () => {
+        await flaky.writeNote("MCP/y.md", "y");
+        flaky.linkError = "ENOSYS";
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveNote("MCP/y.md", "Raw/y.md"), false);
+        } finally {
+            flaky.failUnlink = false;
+            flaky.linkError = null;
+        }
+        assert.equal(existsSync(join(root, "Raw/y.md")), false);
+        assert.equal(await flaky.readNote("MCP/y.md"), "y");
+    });
+
+    it("note: filesystems without hard links (ENOSYS) fall back to copy", async () => {
+        await flaky.writeNote("MCP/z.md", "z");
+        flaky.linkError = "ENOSYS";
+        try {
+            assert.equal(await flaky.moveNote("MCP/z.md", "Raw/z.md"), true);
+        } finally {
+            flaky.linkError = null;
+        }
+        assert.equal(await flaky.readNote("Raw/z.md"), "z");
+        assert.equal(await flaky.readNote("MCP/z.md"), null);
+    });
+
+    it("attachment: a failed source delete undoes the link instead of reporting a partial move", async () => {
+        await flaky.writeAttachment("MCP/a.png", new Uint8Array([1]));
+        flaky.failUnlink = true;
+        try {
+            assert.equal(await flaky.moveAttachment("MCP/a.png", "Raw/a.png"), false);
+        } finally {
+            flaky.failUnlink = false;
+        }
+        assert.equal(existsSync(join(root, "Raw/a.png")), false);
+        assert.ok(existsSync(join(root, "MCP/a.png")));
+    });
+
+    it("attachment: a failed source delete after a copy is still reported as incomplete", async () => {
+        await flaky.writeAttachment("MCP/b.png", new Uint8Array([2]));
+        flaky.linkError = "EXDEV";
+        flaky.failUnlink = true;
+        try {
+            await assert.rejects(() => flaky.moveAttachment("MCP/b.png", "Raw/b.png"), AttachmentMoveIncompleteError);
+        } finally {
+            flaky.failUnlink = false;
+            flaky.linkError = null;
+        }
+    });
+});

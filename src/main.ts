@@ -10,7 +10,7 @@ import { applyIndexChange, pruneGhosts } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { readOnlyVault } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
-import { parseWriteFolders, type WriteScope } from "./write-scope.js";
+import { parseWriteFolders, writeScopeWarnings, type WriteScope } from "./write-scope.js";
 import { parseAttachmentExtensions, isValidAttachmentPath } from "./attachment-path.js";
 import { registerAttachmentTools, ATTACHMENT_WRITE_TOOLS, formatBytes } from "./attachment-tools.js";
 import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
@@ -53,6 +53,7 @@ try {
     console.error((err as Error).message);
     process.exit(1);
 }
+for (const warning of writeScopeWarnings(WRITE_FOLDERS)) console.warn(warning);
 
 // Attachments (images, PDFs, audio, video) are opt-in.
 const ATTACHMENTS_ENABLED = process.env.ATTACHMENTS_ENABLED === "true";

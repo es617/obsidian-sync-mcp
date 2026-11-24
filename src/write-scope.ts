@@ -35,7 +35,7 @@ const NONE: ReadonlySet<WriteAction> = new Set();
 export function parseWriteFolders(raw: string | undefined): WriteScope {
     if (raw === undefined) return null;
     const rules: WriteRule[] = [];
-    const seen = new Set<string>();
+    const seen = new Map<string, string>();
     for (const entry of raw.split(",").map((e) => e.trim()).filter(Boolean)) {
         // Obsidian forbids ':' in file and folder names, so it can't be part of a folder.
         const colon = entry.lastIndexOf(":");
@@ -44,6 +44,8 @@ export function parseWriteFolders(raw: string | undefined): WriteScope {
         if (folder === "" && rawFolder.trim() === "") {
             throw new Error(`WRITE_FOLDERS: '${entry}' has no folder. Use '/' for the vault root.`);
         }
+        const shape = folderShapeProblem(folder);
+        if (shape) throw new Error(`WRITE_FOLDERS: '${entry}' ${shape}.`);
         let allow = ALL;
         if (colon !== -1) {
             const perms = entry.slice(colon + 1).split("+").map((p) => p.trim());
@@ -57,20 +59,41 @@ export function parseWriteFolders(raw: string | undefined): WriteScope {
             }
             allow = new Set(perms as WriteAction[]);
         }
-        if (seen.has(folder)) throw new Error(`WRITE_FOLDERS: '${folder || "/"}' is listed more than once.`);
-        seen.add(folder);
+        // Case variants name one folder on LiveSync, macOS and Windows, so they count as duplicates.
+        const key = fold(folder);
+        const earlier = seen.get(key);
+        if (earlier !== undefined) {
+            const why = earlier === folder ? "" : ` (also as '${earlier}'; folder names are compared ignoring case)`;
+            throw new Error(`WRITE_FOLDERS: '${folder || "/"}' is listed more than once${why}.`);
+        }
+        seen.set(key, folder);
         rules.push({ folder, allow });
     }
     return rules.length > 0 ? rules : null;
 }
 
-/** Strip leading slashes; null when the path contains a traversal segment. */
+/** Why a configured folder can never match a path, or null when it's fine. */
+function folderShapeProblem(folder: string): string | null {
+    if (folder.includes("\\")) return "uses a backslash; separate folders with '/'";
+    const segments = folder === "" ? [] : folder.split("/");
+    if (segments.some((s) => s === "" || s === "." || s === "..")) return "has an empty, '.' or '..' folder segment";
+    return null;
+}
+
+/**
+ * Spell a path the way the backends resolve it, or null for traversal.
+ *
+ * LiveSync turns '\' into '/' and collapses repeated slashes before it derives
+ * a document id, and Windows treats '\' as a separator. The matcher must see the
+ * same folders, or "Raw\a.md" would be judged by the root rule while naming the
+ * existing Raw/a.md.
+ */
 function normalizePath(path: string): string | null {
-    const normalized = path.replace(/^\/+/, "");
+    const normalized = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\//, "");
     // Backends reject traversal too; deny here so the scope check can't be reasoned around.
-    // Split on backslash as well: on Windows "MCP/..\x" resolves as traversal.
-    if (normalized.split(/[/\\]/).includes("..")) return null;
-    return normalized;
+    const segments = normalized.split("/");
+    if (segments.includes("..")) return null;
+    return segments.filter((s) => s !== ".").join("/");
 }
 
 function contains(folder: string, path: string): boolean {
@@ -86,7 +109,20 @@ function mostSpecific(rules: readonly WriteRule[], path: string, key: (s: string
     return best;
 }
 
-const fold = (s: string) => s.normalize("NFC").toLowerCase();
+/**
+ * Fold a path the way case-insensitive targets compare it: NFC, then case
+ * (upper-then-lower, so pairs like 'ſ'/'s' meet), and without the trailing dots
+ * and spaces Windows strips from each name.
+ */
+function fold(s: string): string {
+    return s
+        .normalize("NFC")
+        .toUpperCase()
+        .toLowerCase()
+        .split("/")
+        .map((seg) => seg.replace(/[. ]+$/, ""))
+        .join("/");
+}
 
 /**
  * The rule that governs `path` and what it allows there.
@@ -96,21 +132,36 @@ const fold = (s: string) => s.normalize("NFC").toLowerCase();
  * looked up both exactly and case-folded, and only the actions both allow are
  * granted. Otherwise `/,Raw:create` would let "raw/a.md" overwrite Raw/a.md.
  */
-function resolve(path: string, scope: WriteScope): { allow: ReadonlySet<WriteAction>; rule: WriteRule | null } {
-    if (scope === null) return { allow: ALL, rule: null };
+function resolve(path: string, scope: WriteScope): { allow: ReadonlySet<WriteAction>; rules: WriteRule[] } {
+    if (scope === null) return { allow: ALL, rules: [] };
     const normalized = normalizePath(path);
-    if (normalized === null) return { allow: NONE, rule: null };
+    if (normalized === null) return { allow: NONE, rules: [] };
     const exact = mostSpecific(scope, normalized, (s) => s);
     const folded = mostSpecific(scope, normalized, fold);
-    if (!exact || !folded) return { allow: NONE, rule: null };
-    if (exact === folded) return { allow: exact.allow, rule: exact };
+    // Folded matching is looser, so it finds a rule whenever exact matching does.
+    if (!folded) return { allow: NONE, rules: [] };
+    if (!exact) return { allow: NONE, rules: [folded] };
+    if (exact === folded) return { allow: exact.allow, rules: [exact] };
     const allow = new Set([...exact.allow].filter((a) => folded.allow.has(a)));
-    return { allow, rule: folded.folder.length >= exact.folder.length ? folded : exact };
+    // Most specific first, so a refusal names the narrower folder when both withhold an action.
+    return { allow, rules: folded.folder.length > exact.folder.length ? [folded, exact] : [exact, folded] };
 }
 
 /** The write actions allowed on `path`. */
 export function allowedActions(path: string, scope: WriteScope): ReadonlySet<WriteAction> {
     return resolve(path, scope).allow;
+}
+
+/**
+ * Startup warnings for configs that parse but are probably not what was meant,
+ * e.g. "Raw:create,update" (a comma where '+' was intended) grants full access
+ * to a folder named "update".
+ */
+export function writeScopeWarnings(scope: WriteScope): string[] {
+    if (scope === null) return [];
+    return scope
+        .filter((r) => r.allow.size === ALL.size && (WRITE_ACTIONS as readonly string[]).includes(r.folder))
+        .map((r) => `WRITE_FOLDERS: '${r.folder}' is read as a fully writable folder named '${r.folder}/'. To combine permissions, join them with '+' (e.g. 'Raw:create+${r.folder}').`);
 }
 
 const folderLabel = (folder: string) => (folder === "" ? "/" : folder + "/");
@@ -144,11 +195,13 @@ const VERB: Record<WriteAction, string> = { create: "created", update: "changed"
  * same either way.
  */
 export function checkWrite(path: string, action: WriteAction, scope: WriteScope): string | null {
-    const { allow, rule } = resolve(path, scope);
+    const { allow, rules } = resolve(path, scope);
     if (allow.has(action)) return null;
-    if (!rule || allow.size === 0) {
+    // Name the rule that withholds the action (with case variants, possibly the folded one).
+    const rule = rules.find((r) => !r.allow.has(action));
+    if (!rule) {
         return `Write access denied: '${path}' is outside the writable folders (${describeFolders(scope ?? [])}).`;
     }
-    const allowed = WRITE_ACTIONS.filter((a) => allow.has(a)).join("+");
+    const allowed = WRITE_ACTIONS.filter((a) => rule.allow.has(a)).join("+");
     return `Write access denied: ${folderLabel(rule.folder)} allows only ${allowed}, so '${path}' can't be ${VERB[action]}.`;
 }
