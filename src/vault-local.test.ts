@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod } from "fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, unlink, readFile, readdir, chmod, stat } from "fs/promises";
 import { watch, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -153,6 +153,95 @@ describe("writeNote modes", () => {
         assert.equal(await vault.readNote("modes/u.md"), "short", "truncated, not overlaid");
         await assert.rejects(() => vault.writeNote("modes/missing/u.md", "x", { mode: "update" }), NoteNotFoundError);
         assert.equal(existsSync(join(tmpDir, "modes/missing")), false, "no folder created either");
+    });
+
+    it("upsert (explicit or default) creates folders and replaces", async () => {
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v1", { mode: "upsert" }), true);
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v2", { mode: "upsert" }), true);
+        assert.equal(await vault.writeNote("modes/up/deep/a.md", "v3", {}), true);
+        assert.equal(await vault.readNote("modes/up/deep/a.md"), "v3");
+    });
+
+    it("errors carry the vault-relative path", async () => {
+        await vault.writeNote("modes/err.md", "x");
+        await assert.rejects(() => vault.writeNote("modes/err.md", "y", { mode: "create" }), (e: any) => e instanceof NoteExistsError && e.path === "modes/err.md" && e.message === "Note already exists: modes/err.md");
+        await assert.rejects(() => vault.writeNote("modes/nope.md", "y", { mode: "update" }), (e: any) => e instanceof NoteNotFoundError && e.path === "modes/nope.md" && e.message === "Note not found: modes/nope.md");
+    });
+
+    it("create: many concurrent creates, exactly one winner whose content is stored", async () => {
+        const contents = Array.from({ length: 8 }, (_, i) => `writer ${i}`);
+        const results = await Promise.allSettled(contents.map((c) => vault.writeNote("modes/many.md", c, { mode: "create" })));
+        const winners = results.flatMap((r, i) => (r.status === "fulfilled" ? [i] : []));
+        assert.equal(winners.length, 1);
+        for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof NoteExistsError);
+        assert.equal(await vault.readNote("modes/many.md"), contents[winners[0]]);
+    });
+
+    it("update: a note deleted first is not recreated by a racing update", async () => {
+        await vault.writeNote("modes/del.md", "x");
+        await vault.deleteNote("modes/del.md");
+        await assert.rejects(() => vault.writeNote("modes/del.md", "y", { mode: "update" }), NoteNotFoundError);
+        assert.equal(await vault.readNote("modes/del.md"), null);
+    });
+});
+
+describe("moveNote without replacing", () => {
+    it("moves into a new folder and leaves a single link to the file", async () => {
+        await vault.writeNote("nr/a.md", "content");
+        assert.equal(await vault.moveNote("nr/a.md", "nr2/sub/a.md"), true);
+        assert.equal(existsSync(join(tmpDir, "nr/a.md")), false);
+        assert.equal((await stat(join(tmpDir, "nr2/sub/a.md"))).nlink, 1, "the source link was removed");
+        assert.equal(await vault.readNote("nr2/sub/a.md"), "content");
+    });
+
+    it("refuses an existing destination in another folder, carrying the destination path", async () => {
+        await vault.writeNote("nr/x.md", "x");
+        await vault.writeNote("nr-other/x.md", "other");
+        await assert.rejects(() => vault.moveNote("nr/x.md", "nr-other/x.md"), (e: any) => e instanceof NoteExistsError && e.path === "nr-other/x.md");
+        assert.equal(await vault.readNote("nr/x.md"), "x");
+        assert.equal(await vault.readNote("nr-other/x.md"), "other");
+        assert.equal((await stat(join(tmpDir, "nr/x.md"))).nlink, 1, "no stray link left behind");
+    });
+
+    it("of two concurrent moves onto one new path, one wins and the other source stays", async () => {
+        await vault.writeNote("nr/race1.md", "one");
+        await vault.writeNote("nr/race2.md", "two");
+        const results = await Promise.allSettled([vault.moveNote("nr/race1.md", "nr/won.md"), vault.moveNote("nr/race2.md", "nr/won.md")]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+        const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        assert.ok(lost.reason instanceof NoteExistsError);
+        const winner = results[0].status === "fulfilled" ? "one" : "two";
+        const loserPath = winner === "one" ? "nr/race2.md" : "nr/race1.md";
+        assert.equal(await vault.readNote("nr/won.md"), winner);
+        assert.equal(await vault.readNote(loserPath), winner === "one" ? "two" : "one");
+    });
+
+    it("a move racing a create of the destination never overwrites it", async () => {
+        await vault.writeNote("nr/mover.md", "mover");
+        const results = await Promise.allSettled([
+            vault.moveNote("nr/mover.md", "nr/target.md"),
+            vault.writeNote("nr/target.md", "creator", { mode: "create" }),
+        ]);
+        assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+        const target = await vault.readNote("nr/target.md");
+        if (results[0].status === "fulfilled") assert.equal(target, "mover");
+        else {
+            assert.equal(target, "creator");
+            assert.equal(await vault.readNote("nr/mover.md"), "mover");
+        }
+    });
+
+    it("onto itself is a no-op that keeps the note", async () => {
+        await vault.writeNote("nr/self.md", "self");
+        assert.equal(await vault.moveNote("nr/self.md", "nr/self.md"), true);
+        assert.equal(await vault.readNote("nr/self.md"), "self");
+    });
+
+    it("a case-only rename works and leaves one file under the new name", async () => {
+        await vault.writeNote("nr-case/note.md", "case");
+        assert.equal(await vault.moveNote("nr-case/note.md", "nr-case/Note.md"), true);
+        assert.deepEqual(await readdir(join(tmpDir, "nr-case")), ["Note.md"]);
+        assert.equal(await vault.readNote("nr-case/Note.md"), "case");
     });
 });
 

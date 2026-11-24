@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { registerAttachmentTools, decodeBase64Strict, formatBytes, estimateBase64Tokens, type AttachmentToolOptions } from "./attachment-tools.js";
-import { UploadRegistry, UPLOAD_ROUTE_PREFIX } from "./uploads.js";
+import { UploadRegistry, UPLOAD_ROUTE_PREFIX, mountAttachmentUpload } from "./uploads.js";
+import { Hono } from "hono";
 import { memoryAttachments } from "./attachment-test-fixtures.js";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS } from "./attachment-path.js";
 import { SearchIndex } from "./search.js";
@@ -309,5 +310,174 @@ describe("steering towards the upload URL", () => {
     it("estimateBase64Tokens", () => {
         assert.equal(estimateBase64Tokens(3), 2);
         assert.ok(Math.abs(estimateBase64Tokens(262_144) - 106_000) < 1000, "256 KB is ~106k tokens");
+    });
+});
+
+describe("WRITE_FOLDERS: every attachment tool under every permission set", () => {
+    const scoped = (raw: string | null) => setup({ writeFolders: raw === null ? null : parseWriteFolders(raw) });
+    const one = b64([1]);
+    const two = b64([2]);
+
+    it("unset: write, overwrite, move onto an existing file with overwrite, delete", async () => {
+        const { call, files, tools } = scoped(null);
+        assert.match(await call("write_attachment", { path: "x/a.png", content_base64: one }), /^Attachment saved/);
+        assert.equal(await call("write_attachment", { path: "x/a.png", content_base64: two }), "Attachment already exists: x/a.png. Pass overwrite=true to replace it, or choose another path.");
+        assert.match(await call("write_attachment", { path: "x/a.png", content_base64: two, overwrite: true }), /^Attachment saved/);
+        assert.match(await call("write_attachment", { path: "y/b.png", content_base64: one }), /^Attachment saved/);
+        assert.match(await call("move_attachment", { from: "y/b.png", to: "x/a.png", overwrite: true }), /^Moved/);
+        assert.match(await call("delete_attachment", { path: "x/a.png" }), /^Deleted/);
+        assert.equal(files.size, 0);
+        for (const t of tools) assert.doesNotMatch(t.description, /Writes are only allowed/, t.name);
+    });
+
+    it("create-only: exact messages, and the same refusal whether or not the file exists", async () => {
+        const { call, put } = scoped("MCP,Raw:create");
+        put("Raw/a.png", 1);
+        assert.equal(await call("create_attachment_upload", { path: "Raw/a.png" }), "Attachment already exists: Raw/a.png. Choose another path.");
+        assert.equal(await call("write_attachment", { path: "Raw/a.png", content_base64: one }), "Attachment already exists: Raw/a.png. Choose another path.");
+        for (const p of ["Raw/a.png", "Raw/missing.png"]) {
+            assert.equal(await call("delete_attachment", { path: p }), `Write access denied: Raw/ allows only create, so '${p}' can't be deleted or moved.`);
+            assert.equal(await call("move_attachment", { from: p, to: "MCP/x.png" }), `Write access denied: Raw/ allows only create, so '${p}' can't be deleted or moved.`);
+            assert.equal(await call("write_attachment", { path: p, content_base64: one, overwrite: true }), `Write access denied: Raw/ allows only create, so '${p}' can't be changed.`);
+            assert.equal(await call("create_attachment_upload", { path: p, overwrite: true }), `Write access denied: Raw/ allows only create, so '${p}' can't be changed.`);
+        }
+    });
+
+    it("create-only: a rename within the folder is refused", async () => {
+        const { call, put, files } = scoped("Raw:create");
+        put("Raw/a.png", 1);
+        assert.match(await call("move_attachment", { from: "Raw/a.png", to: "Raw/b.png" }), /'Raw\/a.png' can't be deleted or moved/);
+        assert.deepEqual([...files.keys()], ["Raw/a.png"]);
+    });
+
+    it("create+update: overwrite=true works and the hint offers it; delete and move out are refused", async () => {
+        const { call, put, files } = scoped("MCP,Notes:create+update");
+        put("Notes/a.png", 1);
+        put("MCP/m.png", 3);
+        assert.equal(await call("write_attachment", { path: "Notes/a.png", content_base64: two }), "Attachment already exists: Notes/a.png. Pass overwrite=true to replace it, or choose another path.");
+        assert.match(await call("write_attachment", { path: "Notes/a.png", content_base64: two, overwrite: true }), /^Attachment saved/);
+        assert.deepEqual(files.get("Notes/a.png")?.data, new Uint8Array([2]));
+        assert.match(await call("create_attachment_upload", { path: "Notes/a.png", overwrite: true }), /^Upload URL/);
+        assert.match(await call("move_attachment", { from: "MCP/m.png", to: "Notes/a.png" }), /already exists: Notes\/a.png\. Pass overwrite=true/);
+        assert.match(await call("move_attachment", { from: "MCP/m.png", to: "Notes/a.png", overwrite: true }), /^Moved/);
+        assert.match(await call("delete_attachment", { path: "Notes/a.png" }), /Notes\/ allows only create\+update, so 'Notes\/a.png' can't be deleted or moved/);
+        assert.match(await call("move_attachment", { from: "Notes/a.png", to: "MCP/a.png" }), /can't be deleted or moved/);
+        assert.equal(files.get("Notes/a.png")?.data.byteLength, 3);
+    });
+
+    it("delete-only: delete and move out work; nothing can be written there", async () => {
+        const { call, put, files } = scoped("MCP,Trash:delete");
+        put("Trash/a.png", 1);
+        put("Trash/b.png", 1);
+        put("MCP/m.png", 1);
+        assert.equal(await call("write_attachment", { path: "Trash/c.png", content_base64: one }), "Write access denied: Trash/ allows only delete, so 'Trash/c.png' can't be created.");
+        assert.match(await call("create_attachment_upload", { path: "Trash/c.png" }), /can't be created/);
+        assert.match(await call("move_attachment", { from: "MCP/m.png", to: "Trash/m.png" }), /'Trash\/m.png' can't be created/);
+        assert.match(await call("move_attachment", { from: "Trash/a.png", to: "MCP/a.png" }), /^Moved/);
+        assert.match(await call("delete_attachment", { path: "Trash/b.png" }), /^Deleted: Trash\/b.png/);
+        assert.deepEqual([...files.keys()].sort(), ["MCP/a.png", "MCP/m.png"]);
+    });
+
+    it("update-only: no new files", async () => {
+        const { call } = scoped("Live:update");
+        assert.equal(await call("write_attachment", { path: "Live/a.png", content_base64: one }), "Write access denied: Live/ allows only update, so 'Live/a.png' can't be created.");
+        assert.match(await call("create_attachment_upload", { path: "Live/a.png" }), /can't be created/);
+    });
+
+    it("root rule '/' and the most specific folder", async () => {
+        const { call, put } = scoped("/:create,Raw/scratch");
+        put("a.png", 1);
+        assert.match(await call("write_attachment", { path: "b.png", content_base64: one }), /^Attachment saved/);
+        assert.match(await call("write_attachment", { path: "a.png", content_base64: one, overwrite: true }), /^Write access denied: \/ allows only create, so 'a.png' can't be changed/);
+        assert.match(await call("delete_attachment", { path: "a.png" }), /can't be deleted or moved/);
+        put("Raw/scratch/s.png", 1);
+        assert.match(await call("write_attachment", { path: "Raw/scratch/s.png", content_base64: two, overwrite: true }), /^Attachment saved/);
+        assert.match(await call("move_attachment", { from: "Raw/scratch/s.png", to: "Raw/s.png" }), /^Moved/);
+        assert.match(await call("delete_attachment", { path: "Raw/s.png" }), /\/ allows only create/);
+    });
+
+    it("case variants of a create-only folder get create only", async () => {
+        const { call, put } = scoped("/,Raw:create");
+        put("raw/a.png", 1);
+        assert.match(await call("write_attachment", { path: "raw/new.png", content_base64: one }), /^Attachment saved/);
+        assert.match(await call("write_attachment", { path: "raw/a.png", content_base64: one, overwrite: true }), /Raw\/ allows only create, so 'raw\/a.png' can't be changed/);
+        assert.match(await call("delete_attachment", { path: "RAW/a.png" }), /can't be deleted or moved/);
+        assert.match(await call("create_attachment_upload", { path: "rAw/x.png", overwrite: true }), /can't be changed/);
+    });
+
+    it("move_attachment: source refusal before destination, each named", async () => {
+        const { call } = scoped("MCP");
+        assert.match(await call("move_attachment", { from: "Other/a.png", to: "Else/a.png" }), /^Write access denied: 'Other\/a.png' is outside/);
+        assert.match(await call("move_attachment", { from: "MCP/a.png", to: "Else/a.png" }), /^Write access denied: 'Else\/a.png' is outside/);
+    });
+
+    it("path validation is reported before the permission check", async () => {
+        const { call } = scoped("Raw:create");
+        assert.match(await call("write_attachment", { path: "Raw/a.md", content_base64: one, overwrite: true }), /Invalid attachment path/);
+        assert.match(await call("delete_attachment", { path: "Raw/a.md" }), /Invalid attachment path/);
+    });
+
+    it("descriptions on every write tool carry the scope and legend", () => {
+        const { tools } = scoped("/,Raw:create");
+        for (const name of ["create_attachment_upload", "write_attachment", "delete_attachment", "move_attachment"]) {
+            const t = tools.find((x) => x.name === name)!;
+            assert.ok(t.description.endsWith(" Writes are only allowed inside: /, Raw/ (create only). create = add new files, update = change existing files, delete = delete or move files away; the most specific folder applies."), name);
+        }
+    });
+});
+
+describe("upload URL flow under WRITE_FOLDERS (tool + PUT route)", () => {
+    function flow(raw: string) {
+        const ctx = setup({ writeFolders: parseWriteFolders(raw) });
+        const app = new Hono();
+        mountAttachmentUpload(app, { registry: ctx.registry, vault: ctx.vault });
+        const urlOf = (out: string) => {
+            const m = out.match(/https:\/\/mcp\.example\.com(\/attachments\/upload\/[A-Za-z0-9_-]+)/);
+            assert.ok(m, out);
+            return m[1];
+        };
+        const putTo = (route: string, body: Uint8Array) => app.request(route, { method: "PUT", body: body as BodyInit });
+        return { ...ctx, urlOf, putTo };
+    }
+
+    it("create-only: a new file uploads; a second URL for it is refused once it exists", async () => {
+        const { call, files, urlOf, putTo } = flow("MCP,Raw:create");
+        const first = urlOf(await call("create_attachment_upload", { path: "Raw/a.png" }));
+        const second = urlOf(await call("create_attachment_upload", { path: "Raw/a.png" }));
+        assert.equal((await putTo(first, new Uint8Array([1]))).status, 201);
+        assert.equal(await call("create_attachment_upload", { path: "Raw/a.png" }), "Attachment already exists: Raw/a.png. Choose another path.");
+        // A URL minted before the file existed can't replace it: overwrite is rechecked at write time.
+        const late = await putTo(second, new Uint8Array([2]));
+        assert.equal(late.status, 409);
+        assert.deepEqual(await late.json(), { error: "Attachment already exists: Raw/a.png" });
+        assert.deepEqual(files.get("Raw/a.png")?.data, new Uint8Array([1]));
+    });
+
+    it("create-only: concurrent uploads to one new path — one 201, one 409", async () => {
+        const { call, files, urlOf, putTo } = flow("Raw:create");
+        const urls = [urlOf(await call("create_attachment_upload", { path: "Raw/r.png" })), urlOf(await call("create_attachment_upload", { path: "Raw/r.png" }))];
+        const statuses = (await Promise.all(urls.map((u, i) => putTo(u, new Uint8Array([i + 1]))))).map((r) => r.status).sort();
+        assert.deepEqual(statuses, [201, 409]);
+        assert.equal(files.get("Raw/r.png")?.data.byteLength, 1);
+    });
+
+    it("create-only: overwrite is refused when the URL is created, so nothing is minted", async () => {
+        const { call, registry } = flow("Raw:create");
+        assert.match(await call("create_attachment_upload", { path: "Raw/a.png", overwrite: true }), /can't be changed/);
+        assert.equal(registry.pending, 0);
+    });
+
+    it("create+update: an overwrite URL replaces the file", async () => {
+        const { call, files, put, urlOf, putTo } = flow("Notes:create+update");
+        put("Notes/a.png", 1);
+        const url = urlOf(await call("create_attachment_upload", { path: "Notes/a.png", overwrite: true }));
+        assert.equal((await putTo(url, new Uint8Array([7, 7]))).status, 201);
+        assert.deepEqual(files.get("Notes/a.png")?.data, new Uint8Array([7, 7]));
+    });
+
+    it("outside the folders: refused, nothing minted", async () => {
+        const { call, registry } = flow("Raw:create");
+        assert.equal(await call("create_attachment_upload", { path: "Other/a.png" }), "Write access denied: 'Other/a.png' is outside the writable folders (Raw/ (create only)).");
+        assert.equal(registry.pending, 0);
     });
 });

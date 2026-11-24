@@ -147,3 +147,89 @@ test("describeWriteScope: empty when unrestricted; legend only with limited fold
     assert.match(limited, /inside: \/, Raw\/ \(create only\), Notes\/ \(create\+update only\)\./);
     assert.match(limited, /create = add new files, update = change existing files, delete = delete or move files away/);
 });
+
+test("parseWriteFolders: root spellings, spaces around ':' and repeated permissions", () => {
+    assert.deepEqual(parseWriteFolders("//")!.map((r) => r.folder), [""]);
+    assert.deepEqual(parseWriteFolders(" / : create ")!, [{ folder: "", allow: new Set(["create"]) }]);
+    assert.deepEqual(parseWriteFolders("Raw:create+create")!, [{ folder: "Raw", allow: new Set(["create"]) }]);
+    assert.deepEqual(parseWriteFolders("Raw:delete+create")![0].allow, new Set(["create", "delete"]));
+    assert.deepEqual(parseWriteFolders("MCP//")!.map((r) => r.folder), ["MCP"]);
+});
+
+test("parseWriteFolders: error messages name the entry and suggest a fix", () => {
+    assert.throws(
+        () => parseWriteFolders("MCP, Raw:creat"),
+        { message: "WRITE_FOLDERS: unknown permission 'creat' in 'Raw:creat'. Use create, update, delete, joined with '+' (e.g. 'Raw:create+update')." },
+    );
+    assert.throws(() => parseWriteFolders(" :create"), { message: "WRITE_FOLDERS: ':create' has no folder. Use '/' for the vault root." });
+    assert.throws(() => parseWriteFolders("/MCP,MCP/"), { message: "WRITE_FOLDERS: 'MCP' is listed more than once." });
+    assert.throws(() => parseWriteFolders("/:create,//"), { message: "WRITE_FOLDERS: '/' is listed more than once." });
+});
+
+test("delete-only and update-only folders", () => {
+    const scope = parseWriteFolders("Trash:delete,Live:update");
+    assert.deepEqual(allowed("Trash/a.md", scope), ["delete"]);
+    assert.deepEqual(allowed("Live/a.md", scope), ["update"]);
+    assert.equal(checkWrite("Trash/a.md", "delete", scope), null);
+    assert.equal(checkWrite("Trash/a.md", "create", scope), "Write access denied: Trash/ allows only delete, so 'Trash/a.md' can't be created.");
+    assert.equal(checkWrite("Live/a.md", "delete", scope), "Write access denied: Live/ allows only update, so 'Live/a.md' can't be deleted or moved.");
+});
+
+test("a root-only scope covers every path, at every depth", () => {
+    const scope = parseWriteFolders("/:create+update");
+    assert.deepEqual(allowed("root.md", scope), ["create", "update"]);
+    assert.deepEqual(allowed("a/b/c/d.md", scope), ["create", "update"]);
+    assert.equal(checkWrite("a/b.md", "delete", scope), "Write access denied: / allows only create+update, so 'a/b.md' can't be deleted or moved.");
+    assert.deepEqual(allowed("/abs.md", parseWriteFolders("/")), ALL);
+});
+
+test("three levels of nesting: the deepest matching folder applies", () => {
+    const scope = parseWriteFolders("A:delete,A/B:create,A/B/C,/:update");
+    assert.deepEqual(allowed("A/x.md", scope), ["delete"]);
+    assert.deepEqual(allowed("A/B/x.md", scope), ["create"]);
+    assert.deepEqual(allowed("A/B/C/x.md", scope), ALL);
+    assert.deepEqual(allowed("A/B/C/D/x.md", scope), ALL);
+    assert.deepEqual(allowed("A/BC/x.md", scope), ["delete"], "boundary-aware at depth");
+    assert.deepEqual(allowed("Z/x.md", scope), ["update"]);
+    // Order in the list doesn't matter.
+    const reversed = parseWriteFolders("/:update,A/B/C,A/B:create,A:delete");
+    for (const p of ["A/x.md", "A/B/x.md", "A/B/C/x.md", "Z/x.md"]) assert.deepEqual(allowed(p, reversed), allowed(p, scope), p);
+});
+
+test("case variants: a folder listed in lower case doesn't grant its other spellings more", () => {
+    // An exact match is needed for any access; the case-folded match can only narrow it.
+    const lowerOnly = parseWriteFolders("raw:create");
+    assert.deepEqual(allowed("raw/a.md", lowerOnly), ["create"]);
+    assert.deepEqual(allowed("Raw/a.md", lowerOnly), [], "no exact match: read-only");
+    const withRoot = parseWriteFolders("/,raw:create");
+    assert.deepEqual(allowed("Raw/a.md", withRoot), ["create"]);
+    assert.deepEqual(allowed("RAW/x/y.md", withRoot), ["create"]);
+    assert.deepEqual(allowed("Rawx/a.md", withRoot), ALL, "folding keeps folder boundaries");
+    assert.deepEqual(allowed("Other/a.md", withRoot), ALL, "an unrelated folder is not narrowed");
+});
+
+test("case variants: checkWrite names the folder and the actions both spellings allow", () => {
+    const scope = parseWriteFolders("/,Raw:create+delete");
+    assert.equal(checkWrite("raw/a.md", "create", scope), null);
+    assert.equal(checkWrite("raw/a.md", "delete", scope), null);
+    assert.equal(
+        checkWrite("raw/a.md", "update", scope),
+        "Write access denied: Raw/ allows only create+delete, so 'raw/a.md' can't be changed.",
+    );
+});
+
+test("checkWrite: null scope allows every action; traversal is denied whatever the scope", () => {
+    for (const action of ["create", "update", "delete"] as const) {
+        assert.equal(checkWrite("any/where.md", action, null), null);
+        assert.equal(checkWrite("MCP/../x.md", action, parseWriteFolders("/")), "Write access denied: 'MCP/../x.md' is outside the writable folders (/).");
+    }
+});
+
+test("describeWriteScope: permissions in a fixed order, the root as '/'", () => {
+    assert.equal(
+        describeWriteScope(parseWriteFolders("/:delete+create,Raw:update")),
+        " Writes are only allowed inside: / (create+delete only), Raw/ (update only)." +
+        " create = add new files, update = change existing files, delete = delete or move files away; the most specific folder applies.",
+    );
+    assert.equal(describeWriteScope(parseWriteFolders("/")), " Writes are only allowed inside: /.");
+});

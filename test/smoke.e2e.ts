@@ -395,6 +395,55 @@ console.log("\n=== Server modes (on E2EE+obfuscated+ID key / NFC) ===");
             await c.close();
         } finally { await stopServer(s); await closeDevice(dev); }
     });
+    await check("WRITE_FOLDERS=/,Raw:create,Notes:create+update: per-folder permissions, case variants, uploads", async () => {
+        const s = await startServer(serverEnv(d, { COUCHDB_DATABASE: db, WRITE_FOLDERS: "/,Raw:create,Notes:create+update", ATTACHMENTS_ENABLED: "true" }));
+        const dev = await openDevice(db, d);
+        try {
+            assert.match(s.log(), /WRITE_FOLDERS: writes restricted to \/, Raw\/ \(create only\), Notes\/ \(create\+update only\)\./);
+            const c = await connect(s);
+            // Raw: create only. New notes land; nothing existing can change.
+            assert.match(await call(c, "write_note", { path: "Raw/once.md", content: "original" }), /Note saved/);
+            assert.match(await call(c, "write_note", { path: "Raw/once.md", content: "changed" }), /allows only create.*already exists/);
+            // A case variant is the same document on this (case-insensitive) vault, and gets create only.
+            assert.match(await call(c, "write_note", { path: "raw/ONCE.md", content: "changed" }), /allows only create.*already exists/);
+            assert.match(await call(c, "edit_note", { path: "Raw/once.md", content: "more" }), /can't be changed/);
+            assert.match(await call(c, "delete_note", { path: "Raw/once.md" }), /can't be deleted or moved/);
+            assert.match(await call(c, "move_note", { from: "Raw/once.md", to: "Agent/once.md" }), /can't be deleted or moved/);
+            assert.equal(await deviceRead(dev, "Raw/once.md"), "original");
+            // Moving in is a create; onto an existing note is refused.
+            await call(c, "write_note", { path: "Agent/in.md", content: "incoming" });
+            await call(c, "write_note", { path: "Agent/clash.md", content: "clash" });
+            assert.match(await call(c, "move_note", { from: "Agent/clash.md", to: "Raw/once.md" }), /A note already exists at Raw\/once\.md/);
+            assert.match(await call(c, "move_note", { from: "Agent/in.md", to: "Raw/in.md" }), /Moved/);
+            assert.equal(await deviceRead(dev, "Raw/in.md"), "incoming");
+            assert.equal(await deviceRead(dev, "Agent/in.md"), null);
+            assert.equal(await deviceRead(dev, "Raw/once.md"), "original");
+            // Notes: create+update, no delete.
+            await call(c, "write_note", { path: "Notes/n.md", content: "v1" });
+            await call(c, "write_note", { path: "Notes/n.md", content: "v2" });
+            await call(c, "edit_note", { path: "Notes/n.md", content: "v3" });
+            assert.match(await call(c, "delete_note", { path: "Notes/n.md" }), /allows only create\+update/);
+            assert.equal(await deviceRead(dev, "Notes/n.md"), "v2\nv3");
+            // Upload URL into Raw: a new file works, a second URL for the same path gets 409, overwrite is refused up front.
+            const urlOf = (out: string) => out.match(/https?:\/\/\S+\/attachments\/upload\/[^\s'"]+/)![0];
+            const first = urlOf(await call(c, "create_attachment_upload", { path: "Raw/up.png" }));
+            const second = urlOf(await call(c, "create_attachment_upload", { path: "Raw/up.png" }));
+            assert.equal((await fetch(first, { method: "PUT", body: new Uint8Array([1, 2, 3]) })).status, 201);
+            assert.equal((await fetch(second, { method: "PUT", body: new Uint8Array([9]) })).status, 409);
+            assert.match(await call(c, "create_attachment_upload", { path: "Raw/up.png" }), /already exists: Raw\/up\.png\. Choose another path\./);
+            assert.match(await call(c, "create_attachment_upload", { path: "Raw/up.png", overwrite: true }), /can't be changed/);
+            assert.match(await call(c, "delete_attachment", { path: "Raw/up.png" }), /can't be deleted or moved/);
+            clearHandlers();
+            const got: any = await dev.get("Raw/up.png" as any);
+            assert.ok(Buffer.from(readContent(got) as ArrayBuffer).equals(Buffer.from([1, 2, 3])), "the first upload's bytes are kept");
+            await call(c, "delete_note", { path: "Agent/clash.md" });
+            await c.close();
+        } finally { await stopServer(s); await closeDevice(dev); }
+    });
+    await check("WRITE_FOLDERS with an unknown permission → refuses to start", async () => {
+        const r = await startExpectingFailure(serverEnv(d, { COUCHDB_DATABASE: db, WRITE_FOLDERS: "Raw:creat" }));
+        assert.equal(r.code, 1, r.output); assert.match(r.output, /unknown permission 'creat'/);
+    });
     await check("ATTACHMENTS_ENABLED: base64 write, upload URL PUT, list, move, delete; bytes intact on device", async () => {
         const s = await startServer(serverEnv(d, { COUCHDB_DATABASE: db, ATTACHMENTS_ENABLED: "true" }));
         const dev = await openDevice(db, d);
