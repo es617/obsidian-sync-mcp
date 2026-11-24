@@ -173,7 +173,7 @@ export function maskCode(content: string): string {
     const fences = lines.map((line) => {
         const m = line.match(FENCE);
         if (!m) return null;
-        const char = m[1][0];
+        const char = m[1][0] as "`" | "~";
         return { char, len: m[1].length, opens: char === "~" || !m[2].includes("`"), closes: m[2].trim() === "" };
     });
     const closes = (i: number, char: string, len: number) => {
@@ -187,13 +187,13 @@ export function maskCode(content: string): string {
         longest["`"][i] = longest["`"][i + 1];
         longest["~"][i] = longest["~"][i + 1];
         const f = fences[i];
-        if (f?.closes) longest[f.char as "`" | "~"][i] = Math.max(longest[f.char as "`" | "~"][i], f.len);
+        if (f?.closes) longest[f.char][i] = Math.max(longest[f.char][i], f.len);
     }
 
     const out: string[] = [];
     for (let i = 0; i < lines.length; i++) {
         const f = fences[i];
-        if (f?.opens && longest[f.char as "`" | "~"][i + 1] >= f.len) {
+        if (f?.opens && longest[f.char][i + 1] >= f.len) {
             let j = i + 1;
             while (!closes(j, f.char, f.len)) j++;
             for (; i <= j; i++) out.push(".".repeat(lines[i].length));
