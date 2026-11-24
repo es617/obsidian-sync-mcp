@@ -587,13 +587,17 @@ describe("attachments", () => {
         }
     });
 
-    it("reports a move whose source could not be deleted, with both files kept", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+    it("undoes a move whose source could not be deleted, so no second name is left", { skip: process.getuid?.() === 0 && "root ignores permissions" }, async () => {
+        // The destination is a hard link to the source; keeping both names would
+        // let a write to one change the other (e.g. a create-only folder's file).
+        // A copy that can't delete its source still reports AttachmentMoveIncompleteError
+        // (see "moves never leave two names for one file").
         await vault.writeAttachment("locked/src.png", bytes);
         await chmod(join(tmpDir, "locked"), 0o555);
         try {
-            await assert.rejects(() => vault.moveAttachment("locked/src.png", "free/dest.png"), AttachmentMoveIncompleteError);
+            assert.equal(await vault.moveAttachment("locked/src.png", "free/dest.png"), false);
             assert.ok(existsSync(join(tmpDir, "locked/src.png")));
-            assert.deepEqual(new Uint8Array(await readFile(join(tmpDir, "free/dest.png"))), bytes);
+            assert.equal(existsSync(join(tmpDir, "free/dest.png")), false);
         } finally {
             await chmod(join(tmpDir, "locked"), 0o755);
             await rm(join(tmpDir, "locked"), { recursive: true, force: true });
