@@ -44,6 +44,20 @@ Content`;
         assert.ok(result.tags.includes("important"));
     });
 
+    it("strips YAML quotes from frontmatter tags", () => {
+        const inline = parseFrontmatterAndLinks(`---\ntags: ["alpha", 'beta/gamma', delta]\n---\nText`);
+        assert.deepEqual(inline.tags.sort(), ["alpha", "beta/gamma", "delta"]);
+
+        const list = parseFrontmatterAndLinks(`---\ntags:\n  - "alpha"\n  - 'beta/gamma'\n  - delta\n---\nText`);
+        assert.deepEqual(list.tags.sort(), ["alpha", "beta/gamma", "delta"]);
+    });
+
+    it("keeps a lone or mismatched quote in a tag", () => {
+        const result = parseFrontmatterAndLinks(`---\ntags: ["alpha', it's]\n---\nText`);
+        assert.ok(result.tags.includes(`"alpha'`));
+        assert.ok(result.tags.includes("it's"));
+    });
+
     it("parses inline #tags", () => {
         const content = "Some text #idea and #project/sub-tag here";
         const result = parseFrontmatterAndLinks(content);
@@ -189,6 +203,12 @@ Also #shared inline`;
         const result = parseFrontmatterAndLinks(content);
         assert.ok(result.links.includes("Other Note"));
         assert.ok(result.links.includes("folder/Linked Note"));
+    });
+
+    it("drops the escape backslash of a table wikilink alias", () => {
+        const content = "| Note | Where |\n| --- | --- |\n| [[folder/note\\|label]] | [[other\\|x]] |";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["folder/note", "other"]);
     });
 
     it("drops #heading, #^block and #page anchors from wikilink targets", () => {
