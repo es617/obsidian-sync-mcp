@@ -1,26 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 ### Features
-- **Per-folder write permissions in `WRITE_FOLDERS` (#65).** A folder can now be limited to some of three permissions: `create` (add new files), `update` (change existing files) and `delete` (delete or move away), e.g. `WRITE_FOLDERS=MCP,Raw:create,Notes:create+update`. `Raw:create` makes a write-once inbox: agents can add notes and attachments but can't overwrite, edit, move or delete existing ones. A folder listed without permissions keeps full write access. The most specific folder applies, and `/` stands for the vault root. Paths are matched the way the vault resolves them: `\` counts as a separator and a case variant of a folder (`raw/` for `Raw`) gets only what both spellings allow, so a rule can't be sidestepped on a case-insensitive vault or file system. Whether a write creates or updates is checked in the same step as the write (`O_EXCL` in local mode, a per-document lock in CouchDB mode), so two concurrent writes through this server can't both create the same note. The CouchDB lock is per process: with several server replicas on one database, or a device writing at the same moment, a collision falls back to LiveSync's conflict handling. A config that parses but looks mistyped (`Raw:create,update`, where `+` was meant) logs a warning. Requested by @travislrogers.
+- **Per-folder write permissions in `WRITE_FOLDERS` (#65).** Limit a folder to `create`, `update` and/or `delete`, e.g. `WRITE_FOLDERS=MCP,Raw:create,Notes:create+update`. `Raw:create` makes a write-once inbox: agents can add notes and attachments but not change, move or delete them. A folder without permissions keeps full access, the most specific folder wins, and `/` is the vault root. Case variants (`raw/` vs `Raw/`) can't be used to get around a rule. Requested by @travislrogers.
 
 ### Breaking changes
-- `WRITE_FOLDERS` configs that used to start can now stop the server with an error: an unknown permission after `:`, a folder listed twice (including case variants such as `Raw,raw`), or a folder that can never match a path (a backslash, or an empty, `.` or `..` segment).
-- `/` in `WRITE_FOLDERS` used to be ignored. It now means the vault root, so `WRITE_FOLDERS=MCP,/` makes the whole vault writable instead of only `MCP`. Remove `/` to keep the old behaviour.
-- `move_note` no longer replaces an existing note at the destination (see Fixes).
-- Local mode with `WRITE_FOLDERS` set: notes and attachments reached through a symlink (to a file or a folder) can still be read, but writing, deleting or moving them is refused. The permission check sees the requested path, so a symlink `MCP/alias.md` -> `Raw/a.md` would otherwise let a write in `MCP/` change a create-only note. Without `WRITE_FOLDERS`, symlinks behave as before.
-- Local mode: moves of notes and attachments now hard-link the file to the destination and then remove the source, instead of `rename()`, because `rename()` replaces an existing destination. Filesystems without hard links fall back to copy-then-delete. If the source can't be removed, the move is undone and reported as failed.
+- `WRITE_FOLDERS` now refuses to start on an unknown permission, a duplicate folder (including case variants) or a folder that can never match.
+- `/` in `WRITE_FOLDERS` used to be ignored and now means the vault root, so `MCP,/` makes the whole vault writable.
+- `move_note` no longer replaces an existing note at the destination.
+- Local mode with `WRITE_FOLDERS` set: notes reached through a symlink can be read but not written, deleted or moved.
+- Local mode: moves no longer use `rename()`. If the source can't be removed, the move is undone.
 
 ### Fixes
-- `move_note` silently replaced an existing note at the destination, in both local and CouchDB mode. It now refuses and asks for another path, like `move_attachment` without `overwrite=true`.
-- `edit_note` could recreate a note deleted between its read and its write. The write now requires the note to still exist.
-- MCP responses declare `charset=utf-8` again, so clients that default to Latin-1 (such as Python's `urllib`) no longer show Cyrillic or CJK note text as mojibake (#16). The server adds the charset itself, keeping mcp-proxy 6.4: the mcp-proxy releases that add it crash with current Claude clients (6.7, #18) or slow every connect by about a second (6.10).
-- Frontmatter is now read with a YAML parser, so quoted values (`title: "My Note"`), escapes, comments and every list form of `tags` are read the way Obsidian reads them. Frontmatter that isn't valid YAML is ignored, as in Obsidian; the server logs why, and `get_note_info` shows it. One case that used to work: a backslash in double quotes is a YAML escape, so `path: "C:\Users\me"` is invalid (write it in single quotes). Frontmatter now ends only at a line that is just `---`. Follow-up to #66, with suggestions from @Nerodacles.
-- Note bodies are parsed as CommonMark with GFM tables (markdown-it), so `[[links]]` and `#tags` inside code spans and code blocks are no longer indexed, and table links like `[[note\|label]]`, escaped `\#tags` and callouts are read as in Obsidian.
+- MCP responses declare `charset=utf-8` again, so clients like Python's `urllib` show Cyrillic and CJK text correctly (#16).
+- Frontmatter is parsed as YAML, like Obsidian: quoted values, comments and all `tags` list forms work. Invalid YAML is ignored and the reason shows in `get_note_metadata`. A backslash inside double quotes is now an escape, so write Windows paths in single quotes. Thanks @Nerodacles.
+- Note bodies are parsed as Markdown: links and tags inside code are no longer indexed, and table links (`[[note\|label]]`), escaped `\#tags` and callouts read as in Obsidian.
+- `edit_note` could recreate a note that was deleted between its read and its write.
 
 ### Performance
-- The search index saves a hash of each note's text with its metadata, so a restart only parses new and changed notes (10,000 unchanged notes: about 40 ms instead of several seconds). The first start after upgrading parses every note once.
+- Restarts only re-parse new and changed notes (10,000 unchanged notes: ~40 ms instead of several seconds). The first start after upgrading parses everything once.
 
 ### Dependencies
 - Add `yaml` and `markdown-it`.
