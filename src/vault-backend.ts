@@ -20,6 +20,12 @@ export interface UpdateOptions {
     expectedRevision?: string;
     /** Re-reads allowed when another writer changes the note between the read and the write. */
     maxAttempts?: number;
+    /**
+     * Keep retrying past maxAttempts until this long has passed since the first
+     * read (up to 5 x maxAttempts rounds), so a writer outpaced by a burst on
+     * another instance waits the burst out instead of giving up.
+     */
+    minRetryMs?: number;
 }
 
 export interface UpdateResult extends RevisedNote {

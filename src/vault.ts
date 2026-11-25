@@ -404,16 +404,19 @@ export class Vault implements VaultBackend {
         return { content: entry.data.join(""), revision: entry._rev };
     }
 
-    async updateNote(path: string, apply: (content: string) => string, { expectedRevision, maxAttempts = 1 }: UpdateOptions = {}): Promise<UpdateResult> {
+    async updateNote(path: string, apply: (content: string) => string, { expectedRevision, maxAttempts = 1, minRetryMs = 0 }: UpdateOptions = {}): Promise<UpdateResult> {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
         // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
         const allowed = expectedRevision ? 1 : Math.max(1, maxAttempts);
-        let refusedBase: string | undefined;
-        for (let attempt = 1; ; attempt++) {
-            // The lock only orders this server's own writers, so they don't spend
-            // attempts on each other; CouchDB's revision check orders everyone else.
-            const result = await this.docLock.run([id], async (): Promise<UpdateResult | { stale: string }> => {
+        // The lock orders this server's own writers, so they never spend attempts
+        // on each other, and is held across retries so a writer that lost to
+        // another instance keeps its turn here. CouchDB's revision check orders
+        // everyone else.
+        return await this.docLock.run([id], async () => {
+            const started = performance.now();
+            let refusedBase: string | undefined;
+            for (let attempt = 1; ; attempt++) {
                 clearHandlers();
                 const entry = await this.manipulator.get(path as FilePathWithPrefix);
                 if (!entry || !("data" in entry) || !Array.isArray(entry.data) || !entry._rev) throw new NoteNotFoundError(path);
@@ -424,19 +427,18 @@ export class Vault implements VaultBackend {
                 if (expectedRevision && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
                 const content = apply(entry.data.join(""));
                 const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
-                return revision ? { content, revision, attempts: attempt } : { stale: entry._rev };
-            });
-            if ("revision" in result) return result;
-            refusedBase = result.stale;
-            if (expectedRevision) {
-                const now = await this.manipulator.get(path as FilePathWithPrefix, true);
-                if (now && now._rev === expectedRevision) throw new Error(`CouchDB did not store the write to ${path}`);
-                throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");
+                if (revision) return { content, revision, attempts: attempt };
+                refusedBase = entry._rev;
+                if (expectedRevision) {
+                    const now = await this.manipulator.get(path as FilePathWithPrefix, true);
+                    if (now && now._rev === expectedRevision) throw new Error(`CouchDB did not store the write to ${path}`);
+                    throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");
+                }
+                if (attempt >= allowed && (attempt >= allowed * 5 || performance.now() - started >= minRetryMs)) throw new UpdateRetriesExhaustedError(path, attempt);
+                if (debugLog) console.log(`[vault] revision conflict on attempt ${attempt}, retrying`);
+                if (RETRY_JITTER_MS > 0) await new Promise((r) => setTimeout(r, Math.random() * RETRY_JITTER_MS));
             }
-            if (attempt >= allowed) throw new UpdateRetriesExhaustedError(path, attempt);
-            if (debugLog) console.log(`[vault] revision conflict on attempt ${attempt}, retrying`);
-            if (RETRY_JITTER_MS > 0) await new Promise((r) => setTimeout(r, Math.random() * RETRY_JITTER_MS));
-        }
+        });
     }
 
     /**

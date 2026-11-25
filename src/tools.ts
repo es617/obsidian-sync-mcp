@@ -30,13 +30,16 @@ const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as c
 
 /**
  * edit_note rounds when another writer changes the note between its read and
- * its write (CouchDB mode). With the concurrency harness, 20 simultaneous
- * edits over two instances all land, and 4 writers pausing up to 200 ms
- * between edits lose none. Writers looping flat out on one note across
- * instances can starve one of them: it is then refused with a message, never
- * silently dropped.
+ * its write (CouchDB mode): at least this many, and more until
+ * EDIT_MIN_RETRY_MS has passed (at most 5 x this many). Measured with the
+ * concurrency harness on two instances: a burst of 20 simultaneous edits all
+ * land; writers looping flat out on one note, or 20 writers with up to 200 ms
+ * between edits, saw about 1 refusal in 200. A refused edit answers "Failed
+ * to edit note" and writes nothing; it is never silently dropped.
  */
 export const EDIT_MAX_ATTEMPTS = 10;
+/** edit_note keeps retrying past EDIT_MAX_ATTEMPTS until this much time has passed (at most 5 x the attempts). */
+export const EDIT_MIN_RETRY_MS = 3000;
 
 export const NO_REVISIONS_MESSAGE =
     "expected_revision needs CouchDB mode: this vault has no revisions. Nothing was written.";
@@ -421,7 +424,7 @@ export function registerTools(
                     const { content: updated, revision, attempts } = await vault.updateNote(
                         path,
                         (existing) => applyEdit(existing, op, newContent, old_text),
-                        { expectedRevision: expected_revision, maxAttempts: EDIT_MAX_ATTEMPTS },
+                        { expectedRevision: expected_revision, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS },
                     );
                     if (debugLogging && attempts > 1) console.log(`[tool] edit_note applied after ${attempts} attempts`);
                     searchIndex.update(path, updated, Date.now());

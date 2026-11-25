@@ -203,7 +203,10 @@ async function disjoint(clients: Client[]): Promise<void> {
     const path = "Boards/sprint.md";
     const n = 20;
     await seed(clients[0], path, board(Array.from({ length: n }, (_, i) => `- [ ] ${task(i)}`)));
-    const workers = await Promise.all(Array.from({ length: n }, (_, i) => new Client(clients[i % clients.length].port).connect()));
+    // CONCURRENCY_LONE=1: one worker on the first instance, the rest on the others,
+    // the uneven split where a lone writer competes with a busy instance's queue.
+    const instanceOf = (i: number) => process.env.CONCURRENCY_LONE && clients.length > 1 ? (i === 0 ? 0 : 1 + (i % (clients.length - 1))) : i % clients.length;
+    const workers = await Promise.all(Array.from({ length: n }, (_, i) => new Client(clients[instanceOf(i)].port).connect()));
     const answers = await Promise.all(workers.map((w, i) =>
         w.tool("edit_note", { path, operation: "replace", old_text: `- [ ] ${task(i)}`, content: `- [x] ${task(i)}` })));
     const reportedOk = answers.filter((a) => a.startsWith("Note edited")).length;

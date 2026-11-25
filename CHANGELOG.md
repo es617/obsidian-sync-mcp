@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Features
-- **Concurrent edits no longer lose changes (CouchDB mode, #2).** `edit_note` writes only if the note is still at the revision it read, and otherwise re-reads and re-applies the edit (up to 10 times), so agents editing the same note at once, through one instance or several on the same database, all keep their changes. Before, every call answered "Note edited" while most of the edits were silently overwritten or left as hidden conflict revisions. `read_note` and `get_note_metadata` now show the note's revision, and `write_note` and `edit_note` take an optional `expected_revision` that refuses the write when the note has changed since. Local mode is unchanged and refuses `expected_revision`.
+- **Concurrent edits no longer lose changes (CouchDB mode, #2).** `edit_note` writes only if the note is still at the revision it read, and otherwise re-reads and re-applies the edit (at least 10 rounds and 3 seconds), so agents editing the same note at once, through one instance or several on the same database, no longer overwrite each other; an edit that still can't get through is refused with a message, never dropped. Before, every call answered "Note edited" while most of the edits were silently overwritten or left as hidden conflict revisions. `read_note` and `get_note_metadata` now show the note's revision, and `write_note` and `edit_note` take an optional `expected_revision` that refuses the write when the note has changed since. Local mode is unchanged and refuses `expected_revision`.
 
 ### Tests
 - `npm run test:concurrency`: concurrent `edit_note` calls through two server instances on one throwaway CouchDB database, read back straight from CouchDB with conflict revisions; `--load 4x50` measures lost edits and latency.
