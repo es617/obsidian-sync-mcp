@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
-import { AttachmentExistsError, AttachmentTooLargeError } from "../src/vault-backend.js";
+import { AttachmentExistsError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { readContent, createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
@@ -53,7 +53,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault", "notemodevault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -412,6 +412,61 @@ step("Attachments/notes: atomic create, move onto itself, case-only rename");
     assert.ok(!(await v.listNotes()).includes("N/Self.md"), "old case gone");
     await v.close();
     console.log("atomic create, refused overwrite on move, self-move and case-only renames keep the file");
+}
+
+// --- Note write modes (WRITE_FOLDERS create/update) and moves that never replace ---
+step("Notes: create/update modes, concurrent creates, moves never replace");
+{
+    const v = new Vault({ ...base, database: "notemodevault", passphrase, obfuscatePaths: true });
+    await v.init();
+
+    // create: a new note, then refused once it exists; the refusal changes nothing.
+    assert.equal(await v.writeNote("Raw/a.md", "v1", { mode: "create" }), true);
+    await assert.rejects(() => v.writeNote("Raw/a.md", "v2", { mode: "create" }), NoteExistsError);
+    // LiveSync's default is case-insensitive: another spelling is the same document.
+    await assert.rejects(() => v.writeNote("raw/A.md", "v2", { mode: "create" }), NoteExistsError);
+    assert.equal(await v.readNote("Raw/a.md"), "v1");
+
+    // update: refuses a missing note without creating it; replaces an existing one.
+    await assert.rejects(() => v.writeNote("Live/missing.md", "x", { mode: "update" }), NoteNotFoundError);
+    assert.equal(await v.readNote("Live/missing.md"), null);
+    assert.ok(!(await v.listNotes()).includes("Live/missing.md"), "nothing written");
+    assert.equal(await v.writeNote("Raw/a.md", "v3", { mode: "update" }), true);
+    assert.equal(await v.readNote("Raw/a.md"), "v3");
+
+    // A deleted note is gone for both modes: update is refused, create works again.
+    assert.equal(await v.deleteNote("Raw/a.md"), true);
+    await assert.rejects(() => v.writeNote("Raw/a.md", "x", { mode: "update" }), NoteNotFoundError);
+    assert.equal(await v.writeNote("Raw/a.md", "reborn", { mode: "create" }), true, "a deleted note doesn't count as existing");
+    assert.equal(await v.readNote("Raw/a.md"), "reborn");
+
+    // Concurrent creates of one new note: exactly one wins.
+    const writers = ["one", "two", "three"];
+    const results = await Promise.allSettled(writers.map((c) => v.writeNote("Raw/race.md", c, { mode: "create" })));
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "one create wins");
+    for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof NoteExistsError, String(r.reason));
+    assert.equal(await v.readNote("Raw/race.md"), writers[results.findIndex((r) => r.status === "fulfilled")]);
+
+    // moveNote never replaces an existing note, across folders.
+    assert.equal(await v.writeNote("A/src.md", "src"), true);
+    assert.equal(await v.writeNote("B/dest.md", "dest"), true);
+    await assert.rejects(() => v.moveNote("A/src.md", "B/dest.md"), NoteExistsError);
+    assert.equal(await v.readNote("A/src.md"), "src", "source kept after a refused move");
+    assert.equal(await v.readNote("B/dest.md"), "dest", "destination kept after a refused move");
+    assert.equal(await v.moveNote("A/src.md", "B/sub/src.md"), true);
+    assert.equal(await v.readNote("A/src.md"), null);
+    assert.equal(await v.readNote("B/sub/src.md"), "src");
+
+    // Two concurrent moves onto one new path: one wins, the other source stays.
+    assert.equal(await v.writeNote("C/one.md", "one"), true);
+    assert.equal(await v.writeNote("C/two.md", "two"), true);
+    const moves = await Promise.allSettled([v.moveNote("C/one.md", "C/won.md"), v.moveNote("C/two.md", "C/won.md")]);
+    assert.deepEqual(moves.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+    const oneWon = moves[0].status === "fulfilled";
+    assert.equal(await v.readNote("C/won.md"), oneWon ? "one" : "two");
+    assert.equal(await v.readNote(oneWon ? "C/two.md" : "C/one.md"), oneWon ? "two" : "one", "the other source is kept");
+    await v.close();
+    console.log("create/update modes, deleted notes, concurrent creates and no-replace moves OK");
 }
 
 step("NFC path identity: vault declared nfc-path-identity-v1 (LiveSync 1.0.49+ default) is detected");

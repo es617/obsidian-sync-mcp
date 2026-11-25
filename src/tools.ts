@@ -1,9 +1,9 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
-import type { VaultBackend } from "./vault-backend.js";
+import { NoteExistsError, NoteNotFoundError, type VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
-import { isPathWritable } from "./write-scope.js";
+import { allowedActions, checkWrite, describeFolders, describeWriteScope, type WriteScope } from "./write-scope.js";
 import { describeListing, describeNoMatch } from "./list-format.js";
 import { describeHits, describeQuery, describeSync, type SyncStatus } from "./search-format.js";
 
@@ -45,19 +45,15 @@ export function registerTools(
     searchIndex: SearchIndex,
     vaultName: string,
     readOnly = false,
-    writeFolders: string[] | null = null,
+    writeFolders: WriteScope = null,
     syncBeforeSearch?: SyncBeforeSearch,
 ) {
     if (readOnly) {
         console.log(`READ_ONLY mode: write tools disabled (${WRITE_TOOLS.join(", ")}).`);
     } else if (writeFolders) {
-        console.log(`WRITE_FOLDERS: writes restricted to ${writeFolders.map((f) => f + "/").join(", ")}.`);
+        console.log(`WRITE_FOLDERS: writes restricted to ${describeFolders(writeFolders)}.`);
     }
-    const writeScopeNote = writeFolders
-        ? ` Writes are only allowed inside: ${writeFolders.map((f) => f + "/").join(", ")}.`
-        : "";
-    const denyWrite = (path: string) =>
-        `Write access denied: '${path}' is outside the writable folders (${writeFolders!.map((f) => f + "/").join(", ")}).`;
+    const writeScopeNote = describeWriteScope(writeFolders);
     const _addTool = server.addTool.bind(server);
     server.addTool = (tool: any) => {
         const original = tool.execute;
@@ -97,8 +93,24 @@ export function registerTools(
             content: z.string().describe("Full markdown content for the note"),
         }),
         execute: async ({ path, content }) => {
-            if (!isPathWritable(path, writeFolders)) return denyWrite(path);
-            const ok = await vault.writeNote(path, content);
+            // Whether this is a create or an update depends on the note existing,
+            // so pass what's allowed down and let the backend decide in the same
+            // step as the write.
+            const allow = allowedActions(path, writeFolders);
+            const canCreate = allow.has("create");
+            const canUpdate = allow.has("update");
+            if (!canCreate && !canUpdate) return checkWrite(path, "create", writeFolders)!;
+            const mode = canCreate && canUpdate ? "upsert" : canCreate ? "create" : "update";
+            let ok: boolean;
+            try {
+                ok = await vault.writeNote(path, content, { mode });
+            } catch (err) {
+                if (err instanceof NoteExistsError) {
+                    return `${checkWrite(path, "update", writeFolders)} The note already exists; choose a new path.`;
+                }
+                if (err instanceof NoteNotFoundError) return checkWrite(path, "create", writeFolders)!;
+                throw err;
+            }
             if (!ok) {
                 return `Failed to write note: ${path}`;
             }
@@ -328,7 +340,8 @@ export function registerTools(
                 .describe("Required for replace operation. Exact text to find and replace. Must match exactly once."),
         }),
         execute: async ({ path, content: newContent, operation, old_text }) => {
-            if (!isPathWritable(path, writeFolders)) return denyWrite(path);
+            const denied = checkWrite(path, "update", writeFolders);
+            if (denied) return denied;
             const existing = await vault.readNote(path);
             if (existing === null) {
                 return `Note not found: ${path}`;
@@ -363,7 +376,14 @@ export function registerTools(
                 updated = existing.endsWith("\n") ? existing + newContent : existing + "\n" + newContent;
             }
 
-            const ok = await vault.writeNote(path, updated);
+            let ok: boolean;
+            try {
+                // "update": a note deleted since it was read isn't recreated.
+                ok = await vault.writeNote(path, updated, { mode: "update" });
+            } catch (err) {
+                if (err instanceof NoteNotFoundError) return `Note not found: ${path}`;
+                throw err;
+            }
             if (!ok) {
                 return `Failed to edit note: ${path}`;
             }
@@ -380,7 +400,8 @@ export function registerTools(
             path: z.string().describe("Vault-relative path to the note to delete"),
         }),
         execute: async ({ path }) => {
-            if (!isPathWritable(path, writeFolders)) return denyWrite(path);
+            const denied = checkWrite(path, "delete", writeFolders);
+            if (denied) return denied;
             // The sync layer reports success even when nothing existed at the
             // path, so "Deleted" would claim a cleanup that never happened.
             // readNote returns "" for an empty note and null only when absent.
@@ -395,17 +416,23 @@ export function registerTools(
     if (!readOnly) server.addTool({
         name: "move_note",
         description:
-            "Move or rename a note. Use this to rename a note within the same folder, move it to a different folder, or both at once. Creates destination folders automatically." + writeScopeNote,
+            "Move or rename a note. Use this to rename a note within the same folder, move it to a different folder, or both at once. Creates destination folders automatically. Never replaces an existing note at the destination." + writeScopeNote,
         parameters: z.object({
             from: z.string().describe("Current path, e.g. 'daily/old-name.md'"),
             to: z.string().describe("New path, e.g. 'projects/new-name.md'"),
         }),
         execute: async ({ from, to }) => {
-            // Moving out of a folder deletes there; moving in writes there — both ends must be writable.
-            if (!isPathWritable(from, writeFolders)) return denyWrite(from);
-            if (!isPathWritable(to, writeFolders)) return denyWrite(to);
+            // A move deletes at the source and creates at the destination.
+            const denied = checkWrite(from, "delete", writeFolders) ?? checkWrite(to, "create", writeFolders);
+            if (denied) return denied;
             const content = await vault.readNote(from);
-            const ok = await vault.moveNote(from, to);
+            let ok: boolean;
+            try {
+                ok = await vault.moveNote(from, to);
+            } catch (err) {
+                if (err instanceof NoteExistsError) return `A note already exists at ${to}. Choose another path.`;
+                throw err;
+            }
             if (!ok) {
                 return `Failed to move: ${from} → ${to}`;
             }

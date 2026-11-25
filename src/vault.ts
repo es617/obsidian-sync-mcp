@@ -14,7 +14,7 @@ import { PouchDB } from "../lib/livesync-commonlib/src/pouchdb/pouchdb-http.ts";
 import { inspectDatabasePathIdentity, type PathIdentityInspection } from "../lib/livesync-commonlib/src/pouchdb/pathIdentityCompatibility.ts";
 import type { EntryDoc } from "../lib/livesync-commonlib/src/common/types.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError, type NoteWriteOptions, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
 import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
@@ -69,8 +69,8 @@ export class Vault implements VaultBackend {
     // (`nfc-path-identity-v1`, the default for databases created by LiveSync
     // 1.0.49+). Detected in init(); the library rejects a mismatch.
     private pathNormalizationVersion: 0 | 1 = 0;
-    // Serializes attachment writes per document id (see writeAttachmentUnlocked).
-    private attachmentLock = new KeyedLock();
+    /** Per-document lock: makes an existence check and the write after it one step (see writeNoteUnlocked). */
+    private docLock = new KeyedLock();
 
     constructor(config: VaultConfig) {
         this.config = config;
@@ -393,8 +393,19 @@ export class Vault implements VaultBackend {
         return null;
     }
 
-    async writeNote(path: string, content: string): Promise<boolean> {
+    async writeNote(path: string, content: string, options: NoteWriteOptions = {}): Promise<boolean> {
         this.validatePath(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.docLock.run([id], () => this.writeNoteUnlocked(path, content, options));
+    }
+
+    /**
+     * As with attachments, the library's put can't be made conditional, so the
+     * create/update checks rely on the caller holding the document's lock. That
+     * covers writes made by this server; a concurrent write from Obsidian is
+     * left to LiveSync's conflict handling.
+     */
+    private async writeNoteUnlocked(path: string, content: string, { mode = "upsert" }: NoteWriteOptions): Promise<boolean> {
         // Clear cached PBKDF2 salt so we re-fetch from CouchDB before encrypting.
         // Prevents stale salt after Obsidian "Overwrite remote" rebuilds (issue #686).
         clearHandlers();
@@ -402,6 +413,8 @@ export class Vault implements VaultBackend {
         // Preserve ctime if note already exists
         let ctime = Date.now();
         const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
+        if (existing && mode === "create") throw new NoteExistsError(path);
+        if (!existing && mode === "update") throw new NoteNotFoundError(path);
         if (existing && "ctime" in existing) {
             ctime = existing.ctime;
         }
@@ -416,23 +429,30 @@ export class Vault implements VaultBackend {
 
     async deleteNote(path: string): Promise<boolean> {
         this.validatePath(path);
-        clearHandlers();
-        return await this.manipulator.delete(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        return await this.docLock.run([id], async () => {
+            clearHandlers();
+            return await this.manipulator.delete(path);
+        });
     }
 
     async moveNote(from: string, to: string): Promise<boolean> {
         this.validatePath(from);
         this.validatePath(to);
-        const content = await this.readNote(from);
-        if (content === null) return false;
-        if (from === to) return true;
-        const wrote = await this.writeNote(to, content);
-        if (!wrote) return false;
-        // A case-only rename on a case-insensitive vault (LiveSync's default)
-        // is one document, which the write above already renamed.
         const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
-        if (fromId === (await this.manipulator.path2id(to as FilePathWithPrefix))) return true;
-        return await this.deleteNote(from);
+        const toId = await this.manipulator.path2id(to as FilePathWithPrefix);
+        return await this.docLock.run([fromId, toId], async () => {
+            const content = await this.readNote(from);
+            if (content === null) return false;
+            if (from === to) return true;
+            // A case-only rename on a case-insensitive vault (LiveSync's default)
+            // is one document: rewrite it under the new path and delete nothing.
+            if (fromId === toId) return await this.writeNoteUnlocked(to, content, { mode: "upsert" });
+            const wrote = await this.writeNoteUnlocked(to, content, { mode: "create" });
+            if (!wrote) return false;
+            clearHandlers();
+            return await this.manipulator.delete(from);
+        });
     }
 
     async getMetadata(path: string): Promise<NoteInfo | null> {
@@ -471,7 +491,7 @@ export class Vault implements VaultBackend {
     async writeAttachment(path: string, data: Uint8Array, options: WriteOptions = {}): Promise<boolean> {
         validateAttachmentPath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
-        return await this.attachmentLock.run([id], () => this.writeAttachmentUnlocked(path, data, options));
+        return await this.docLock.run([id], () => this.writeAttachmentUnlocked(path, data, options));
     }
 
     /**
@@ -502,7 +522,7 @@ export class Vault implements VaultBackend {
     async deleteAttachment(path: string): Promise<boolean> {
         validateAttachmentPath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
-        return await this.attachmentLock.run([id], async () => {
+        return await this.docLock.run([id], async () => {
             clearHandlers();
             return await this.manipulator.delete(path);
         });
@@ -513,7 +533,7 @@ export class Vault implements VaultBackend {
         validateAttachmentPath(to);
         const fromId = await this.manipulator.path2id(from as FilePathWithPrefix);
         const toId = await this.manipulator.path2id(to as FilePathWithPrefix);
-        return await this.attachmentLock.run([fromId, toId], async () => {
+        return await this.docLock.run([fromId, toId], async () => {
             // Checked from metadata first: a move loads the whole file, and a
             // file added in Obsidian can be far larger than any upload.
             const meta = await this.manipulator.get(from as FilePathWithPrefix, true);

@@ -66,6 +66,8 @@ jobs:
           node-version: "22"
       - run: npm ci --ignore-scripts
       - run: npm test
+      # CouchDB Vault against a stubbed manipulator (vault.ts needs bundling, so it runs outside npm test)
+      - run: npm run test:vault-stub
 
   # E2E: start server in local mode, test all tools via MCP protocol
   test-e2e:

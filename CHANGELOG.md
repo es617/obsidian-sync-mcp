@@ -2,7 +2,19 @@
 
 ## Unreleased
 
+### Features
+- **Per-folder write permissions in `WRITE_FOLDERS` (#65).** A folder can now be limited to some of three permissions: `create` (add new files), `update` (change existing files) and `delete` (delete or move away), e.g. `WRITE_FOLDERS=MCP,Raw:create,Notes:create+update`. `Raw:create` makes a write-once inbox: agents can add notes and attachments but can't overwrite, edit, move or delete existing ones. A folder listed without permissions keeps full write access. The most specific folder applies, and `/` stands for the vault root. Paths are matched the way the vault resolves them: `\` counts as a separator and a case variant of a folder (`raw/` for `Raw`) gets only what both spellings allow, so a rule can't be sidestepped on a case-insensitive vault or file system. Whether a write creates or updates is checked in the same step as the write (`O_EXCL` in local mode, a per-document lock in CouchDB mode), so two concurrent writes through this server can't both create the same note. The CouchDB lock is per process: with several server replicas on one database, or a device writing at the same moment, a collision falls back to LiveSync's conflict handling. A config that parses but looks mistyped (`Raw:create,update`, where `+` was meant) logs a warning. Requested by @travislrogers.
+
+### Breaking changes
+- `WRITE_FOLDERS` configs that used to start can now stop the server with an error: an unknown permission after `:`, a folder listed twice (including case variants such as `Raw,raw`), or a folder that can never match a path (a backslash, or an empty, `.` or `..` segment).
+- `/` in `WRITE_FOLDERS` used to be ignored. It now means the vault root, so `WRITE_FOLDERS=MCP,/` makes the whole vault writable instead of only `MCP`. Remove `/` to keep the old behaviour.
+- `move_note` no longer replaces an existing note at the destination (see Fixes).
+- Local mode with `WRITE_FOLDERS` set: notes and attachments reached through a symlink (to a file or a folder) can still be read, but writing, deleting or moving them is refused. The permission check sees the requested path, so a symlink `MCP/alias.md` -> `Raw/a.md` would otherwise let a write in `MCP/` change a create-only note. Without `WRITE_FOLDERS`, symlinks behave as before.
+- Local mode: moves of notes and attachments now hard-link the file to the destination and then remove the source, instead of `rename()`, because `rename()` replaces an existing destination. Filesystems without hard links fall back to copy-then-delete. If the source can't be removed, the move is undone and reported as failed.
+
 ### Fixes
+- `move_note` silently replaced an existing note at the destination, in both local and CouchDB mode. It now refuses and asks for another path, like `move_attachment` without `overwrite=true`.
+- `edit_note` could recreate a note deleted between its read and its write. The write now requires the note to still exist.
 - Frontmatter is now read with a YAML parser, so quoted values (`title: "My Note"`), escapes, comments and every list form of `tags` are read the way Obsidian reads them. Frontmatter that isn't valid YAML is ignored, as in Obsidian. Follow-up to #66.
 - Note bodies are parsed as CommonMark with GFM tables (markdown-it), so `[[links]]` and `#tags` inside code spans and code blocks are no longer indexed, and table links like `[[note\|label]]`, escaped `\#tags` and callouts are read as in Obsidian.
 
