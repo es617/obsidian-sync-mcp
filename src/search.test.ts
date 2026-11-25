@@ -1,9 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { createHash } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
 import { SearchIndex, snippetAround } from "./search.js";
+import { PARSER_VERSION } from "./parse.js";
 
 let tmpDir: string;
 
@@ -230,6 +232,48 @@ describe("SearchIndex persistence", () => {
     it("returns false when no persist path configured", async () => {
         const idx = new SearchIndex();
         assert.equal(await idx.loadFromDisk(), false);
+    });
+
+    describe("reusing saved metadata", () => {
+        const text = "---\ntags: [real]\n---\nBody";
+        const hash = createHash("sha1").update(text).digest("base64");
+        const saved = (parser: string) => JSON.stringify({
+            mtimes: { "n.md": 1 }, tags: { "n.md": ["saved"] }, links: {},
+            parser, hashes: { "n.md": hash }, titles: {},
+        });
+
+        it("keeps the saved tags, links and title of a note whose text is unchanged", async () => {
+            const path = join(tmpDir, "reuse.json");
+            await writeFile(path, saved(PARSER_VERSION));
+            const idx = new SearchIndex(path);
+            await idx.loadFromDisk();
+            idx.update("n.md", text, 2);
+            assert.deepEqual(idx.getTags("n.md"), ["saved"], "not parsed again");
+            idx.update("n.md", text + " #edited", 3);
+            assert.deepEqual(idx.getTags("n.md").sort(), ["edited", "real"]);
+        });
+
+        it("parses again when the metadata was saved by another parser version", async () => {
+            const path = join(tmpDir, "reparse.json");
+            await writeFile(path, saved("an older parser"));
+            const idx = new SearchIndex(path);
+            await idx.loadFromDisk();
+            idx.update("n.md", text, 2);
+            assert.deepEqual(idx.getTags("n.md"), ["real"]);
+        });
+
+        it("saves what it needs to skip parsing after a restart", async () => {
+            const path = join(tmpDir, "roundtrip.json");
+            const first = new SearchIndex(path);
+            first.update("t.md", "---\ntitle: Kanban board\n---\n[[Other]] #x", 1);
+            await first.saveToDisk();
+            const second = new SearchIndex(path);
+            await second.loadFromDisk();
+            second.update("t.md", "---\ntitle: Kanban board\n---\n[[Other]] #x", 1);
+            assert.deepEqual(second.getTags("t.md"), ["x"]);
+            assert.deepEqual(second.getBacklinks("Other"), ["t.md"]);
+            assert.equal(second.search({ terms: ["kanban"] }).hits[0]?.nameHit, true, "title kept");
+        });
     });
 });
 

@@ -41,6 +41,8 @@ mtimes: Map<path, number> ─── modification timestamps
 tags: Map<path, string[]> ─── extracted from frontmatter + inline #tags
 links: Map<path, string[]>── outgoing [[wikilinks]] and [markdown](links.md)
 backlinks: Map<target, Set<source>> ─── reverse link index (case-insensitive keys)
+titles: Map<path, string> ─── frontmatter title, searched with the path
+hashes: Map<path, string> ─── SHA-1 of the text tags/links/title were parsed from
 attachments: Map<path, {size, mtime}> ─── binary attachments, metadata only (ATTACHMENTS_ENABLED)
 since: string             ─── CouchDB _changes sequence (CouchDB mode only)
 ```
@@ -49,7 +51,7 @@ since: string             ─── CouchDB _changes sequence (CouchDB mode only
 
 Everything is serialized to a single JSON file at `DATA_DIR/<vault-hash>/search-index.json`:
 - No inverted full-text index (FlexSearch was removed for memory efficiency); `search_notes` scans the in-memory text (≈120 ms round trip over ~360 notes including the catch-up; ≈100 ms for a name hit) after a `_changes` catch-up from the index's own sequence, and never persists content to disk
-- Metadata (mtimes, tags, links, since)
+- Metadata (mtimes, tags, links, titles, hashes, since) and the `PARSER_VERSION` that produced it. `update()` skips parsing a note whose text hashes the same as when its saved metadata was produced, so a restart only parses new and changed notes; metadata from another parser version is parsed again
 - Encrypted with AES-256-GCM when `COUCHDB_PASSPHRASE` is set
 - Saved every 5 minutes + on graceful shutdown
 - Concurrent saves guarded by a lock flag

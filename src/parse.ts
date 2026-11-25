@@ -2,203 +2,263 @@
  * Parse Obsidian markdown content for frontmatter, tags, and links.
  */
 
-import { isValidAttachmentPath } from "./attachment-path.js";
+import MarkdownIt, { type StateInline, type Token } from "markdown-it";
+import { isAlias, isMap, isScalar, isSeq, parseDocument, visit, type Document, type YAMLSeq } from "yaml";
+import { SUPPORTED_ATTACHMENT_EXTENSIONS, isValidAttachmentPath } from "./attachment-path.js";
+
+/**
+ * Changes whenever parseFrontmatterAndLinks may return something different for
+ * the same note, so metadata the search index saved from an older parser is
+ * parsed again, not reused. Bump the number when changing the parser; the
+ * attachment extensions are part of it because they decide which link targets
+ * count.
+ */
+export const PARSER_VERSION = `4:${SUPPORTED_ATTACHMENT_EXTENSIONS.join(",")}`;
 
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
     links: string[];
+    /** Why the frontmatter was ignored, when it isn't valid YAML. */
+    frontmatterError?: string;
 }
 
-// Link patterns. Each part stops at a bracket, paren or newline, so a failed
-// match only scans up to the next one. Otherwise it rescans the rest of the
-// note, which is quadratic on input like "[".repeat(20000), and parsing is
-// synchronous and runs on every note at startup. No length cap is needed on
-// top: attachment targets are capped by isValidAttachmentPath after decoding.
+// Frontmatter: a "---" first line up to the next line that is just "---".
+const FRONTMATTER = /^---[ \t]*\n(?:([\s\S]*?)\n)?---[ \t]*(?:\n|$)/;
 
-// [[wikilinks]]. A #heading, #^block or #page=2 suffix points into the target,
-// so [[Note#Heading]] links Note and ![[paper.pdf#page=2]] embeds paper.pdf.
-// [[#Heading]] (same note) is not a link.
+// [[wikilinks]] and ![[embeds]], which markdown doesn't know. A #heading,
+// #^block or #page=2 suffix points into the target, so [[Note#Heading]] links
+// Note; [[#Heading]] (same note) is not a link. Each part stops at a bracket
+// or newline, so a failed match only scans up to the next one.
 const WIKILINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
-// Markdown link text: plain characters, or one level of [brackets], so
-// [see [1]](note.md) and [![thumb](t.png)](full.png) parse. The two
-// alternatives never match the same character, so this adds no backtracking.
-const LINK_LABEL = String.raw`[^[\]\n]|\[[^[\]\n]*\]`;
+// Inline #tags. A tag must contain at least one non-numerical character
+// ("#1984 isn't a valid tag, but #y1984 is" — obsidian.md/help/tags).
+const TAG = /(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu;
 
-// [markdown links](path.md), also with a #heading: [x](path.md#Heading) links path.md.
-const NOTE_LINK = new RegExp(String.raw`\[(?:${LINK_LABEL})+\]\(([^()#\n]+\.md)(?:#[^()\n]*)?\)`, "g");
+// CommonMark plus GFM tables. Raw HTML is recognised, so a backtick inside a
+// tag's attribute can't open a code span.
+const markdown = new MarkdownIt({ html: true, linkify: false });
 
-// Markdown links and embeds to attachments: ![](Attachments/shot.png),
-// [report](<docs/Q1 report.pdf>), ![alt](my%20image.png "title").
-const ATTACHMENT_LINK = new RegExp(String.raw`\[((?:${LINK_LABEL})*)\]\((<[^<>\n]+>|[^()\s]+)(?:\s+"[^"\n]*")?\)`, "g");
+// markdown-it doesn't say where a code span sits in its block's text, so its
+// backticks rule is wrapped to record that: env.codeSpans maps a block's
+// inline source to its code spans, start offset to end. Blocks with the same
+// text have the same spans and share an entry. __rules__ and __find__ are
+// internal, which is why markdown-it is pinned to an exact version; should the
+// rule go missing, links in code spans are indexed rather than failing startup.
+type Env = { codeSpans: Map<string, Map<number, number>> };
+const backticksAt = markdown.inline.ruler.__find__("backticks");
+if (backticksAt === -1) console.warn("markdown-it has no backticks rule: links and tags inside `code` will be indexed.");
+else wrapBackticks(markdown.inline.ruler.__rules__[backticksAt].fn);
 
-// A YAML scalar may be quoted: tags: ["a", 'b'] holds the strings a and b.
-function unquote(value: string): string {
-    const m = value.match(/^(["'])(.*)\1$/);
-    return m ? m[2].trim() : value;
+function wrapBackticks(backticks: (state: StateInline, silent: boolean) => boolean): void {
+    markdown.inline.ruler.at("backticks", (state, silent) => {
+        const start = state.pos;
+        const tokens = state.tokens.length;
+        if (!backticks(state, silent)) return false;
+        // A run with no closing run is literal text (no token is pushed), and the
+        // rule also runs silently while markdown-it scans ahead; neither is a span.
+        if (!silent && state.tokens.length > tokens && state.tokens.at(-1)?.type === "code_inline") {
+            const spans = (state.env as Env).codeSpans;
+            if (!spans.has(state.src)) spans.set(state.src, new Map());
+            spans.get(state.src)!.set(start, state.pos);
+        }
+        return true;
+    });
 }
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
-    const frontmatter: Record<string, any> = {};
-    const tags = new Set<string>();
+    content = content.replace(/\r\n/g, "\n");
+    const fm = content.match(FRONTMATTER);
+    const yaml = fm?.[1] ?? "";
+    const body = fm ? content.slice(fm[0].length) : content;
+
+    const { frontmatter, tags: yamlTags, error } = readFrontmatter(yaml);
+    const { text, links } = readBody(body);
+    const tags = new Set(yamlTags);
+    // Wikilinks in properties (related: "[[Note]]") count too.
+    for (const match of (yaml + "\n" + text).matchAll(WIKILINK)) {
+        // [[note\|alias]] outside a table: the backslash escapes the pipe.
+        links.push(match[1].replace(/\\$/, ""));
+    }
+    for (const match of text.matchAll(TAG)) {
+        if (!/^\p{Nd}+$/u.test(match[2])) tags.add(match[2]);
+    }
+    const metadata: NoteMetadata = { frontmatter, tags: [...tags], links: [...new Set(links)] };
+    if (error) metadata.frontmatterError = error;
+    return metadata;
+}
+
+/**
+ * Frontmatter as YAML ("failsafe": every value is a string as written, so 1.10
+ * stays 1.10 and dates aren't converted). A list of plain values is joined
+ * with ", ", anything else is kept as written. Tags come from `tags`: a list,
+ * or a string of comma- or line-separated tags. Frontmatter that isn't valid
+ * YAML is ignored, as Obsidian does.
+ */
+function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: string[]; error?: string } {
+    const frontmatter: Record<string, string> = {};
+    const tags: string[] = [];
+    const doc = parseDocument(yaml, { schema: "failsafe", uniqueKeys: false });
+    // The first line of yaml's message, without the snippet it introduces:
+    // "Invalid escape sequence \Users\me" at line 1, column 10".
+    if (doc.errors.length > 0) return { frontmatter, tags, error: doc.errors[0].message.split("\n")[0].replace(/:$/, "") };
+    if (!isMap(doc.contents)) return { frontmatter, tags };
+
+    const resolve = aliasResolver(doc);
+    for (const pair of doc.contents.items) {
+        const key = resolve(pair.key);
+        if (!isScalar(key)) continue;
+        const value = resolve(pair.value);
+        const shown = showValue(value, resolve, yaml);
+        if (shown) frontmatter[String(key.value)] = shown;
+        if (key.value !== "tags") continue;
+        const raw = isScalar(value) ? String(value.value).split(/[,\n]/) : isSeq(value) ? scalars(value, resolve) : [];
+        for (const tag of raw) if (tag.trim()) tags.push(tag.trim());
+    }
+    return { frontmatter, tags };
+}
+
+type Resolve = (node: unknown) => unknown;
+
+/**
+ * Resolve aliases (*name) to the node they point to: the last node before
+ * them with that anchor. Worked out in one pass, since yaml's Alias.resolve
+ * rescans the whole document on every call.
+ */
+function aliasResolver(doc: Document): Resolve {
+    const anchors = new Map<string, unknown>();
+    const targets = new Map<unknown, unknown>();
+    visit(doc, {
+        Node(_, node) {
+            if (isAlias(node)) targets.set(node, anchors.get(node.source));
+            else if (node.anchor) anchors.set(node.anchor, node);
+        },
+    });
+    return (node) => (isAlias(node) ? targets.get(node) : node);
+}
+
+/** The plain values in a list, skipping nested lists and maps. */
+function scalars(seq: YAMLSeq, resolve: Resolve): string[] {
+    return seq.items.map(resolve).filter(isScalar).map((item) => String(item.value ?? ""));
+}
+
+/** A value as get_note_info shows it: as is, a plain list joined, else as written. */
+function showValue(value: unknown, resolve: Resolve, yaml: string): string {
+    if (isScalar(value)) return String(value.value ?? "");
+    if (isSeq(value) && value.items.every((item) => isScalar(resolve(item)))) return scalars(value, resolve).join(", ");
+    if ((isMap(value) || isSeq(value)) && value.range) return yaml.slice(value.range[0], value.range[1]).trim();
+    return "";
+}
+
+// Blocks that only hold other blocks; their lines are claimed by what's inside.
+const CONTAINERS = new Set(["blockquote_open", "bullet_list_open", "ordered_list_open", "list_item_open"]);
+
+/**
+ * The note's markdown link and image targets, and its source text with code
+ * left out, for the wikilink and tag patterns: each block's raw text with its
+ * code spans blanked out, and as written, raw HTML blocks (whose markdown
+ * links count too), indented code, table rows with more cells than the header
+ * (markdown-it drops the extra ones) and the lines no block claims (reference
+ * and footnote definitions). Indented code is read because markdown-it
+ * doesn't know footnotes, whose continuation lines are indented. Fenced code
+ * is left out, as Obsidian doesn't link or tag inside code.
+ */
+function readBody(body: string): { text: string; links: string[] } {
+    const env: Env = { codeSpans: new Map() };
+    const tokens = markdown.parse(body, env);
+    const lines = body.split("\n");
+    const parts: string[] = [];
     const links: string[] = [];
-
-    // Parse YAML frontmatter
-    if (content.startsWith("---\n")) {
-        const end = content.indexOf("\n---", 4);
-        if (end !== -1) {
-            const yaml = content.slice(4, end);
-            let inTagsList = false;
-            for (const line of yaml.split("\n")) {
-                // Multi-line tags list item: "  - tagname"
-                if (inTagsList) {
-                    const listItem = line.match(/^\s+-\s+(.+)/);
-                    if (listItem) {
-                        const trimmed = unquote(listItem[1].trim());
-                        if (trimmed) tags.add(trimmed);
-                        continue;
-                    }
-                    inTagsList = false;
+    const claimed = new Set<number>();
+    let row = { line: 0, cells: 0 };
+    for (const token of tokens) {
+        if (token.map && !CONTAINERS.has(token.type)) {
+            for (let line = token.map[0]; line < token.map[1]; line++) claimed.add(line);
+        }
+        switch (token.type) {
+            case "inline":
+                parts.push(blankOut(token.content, env.codeSpans.get(token.content)));
+                addTargets(token.children ?? [], links);
+                break;
+            case "html_block":
+                // Markdown inside HTML isn't rendered, but a ![](img.png)
+                // there still marks the file as used.
+                parts.push(token.content);
+                addTargets(markdown.parseInline(token.content, env)[0].children ?? [], links);
+                break;
+            case "code_block":
+                parts.push(token.content);
+                break;
+            case "tr_open":
+                row = { line: token.map![0], cells: 0 };
+                break;
+            case "th_open":
+            case "td_open":
+                row.cells++;
+                break;
+            case "tr_close":
+                if (countCells(lines[row.line]) > row.cells) {
+                    parts.push(lines[row.line]);
+                    addTargets(markdown.parseInline(lines[row.line], env)[0].children ?? [], links);
                 }
-
-                const match = line.match(/^([\p{L}\p{N}_][\p{L}\p{M}\p{N}_-]*)\s*:\s*(.+)/u);
-                if (match) {
-                    frontmatter[match[1]] = match[2].trim();
-                }
-                // Frontmatter tags (inline: [a, b] or start of multi-line list)
-                if (/^tags\s*:/.test(line)) {
-                    const value = line.replace(/^tags\s*:\s*/, "").trim();
-                    if (value) {
-                        // Inline: tags: [a, b] or tags: a, b
-                        const tagValues = value.replace(/[[\]]/g, "");
-                        for (const t of tagValues.split(",")) {
-                            const trimmed = unquote(t.trim());
-                            if (trimmed) tags.add(trimmed);
-                        }
-                    } else {
-                        // Multi-line list follows
-                        inTagsList = true;
-                    }
-                }
-            }
+                break;
         }
     }
+    lines.forEach((line, i) => {
+        if (!claimed.has(i)) parts.push(line);
+    });
+    return { text: parts.join("\n"), links };
+}
 
-    // Inline #tags. Obsidian does not read tags out of code, and a tag must
-    // contain at least one non-numerical character ("#1984 isn't a valid tag,
-    // but #y1984 is" — obsidian.md/help/tags), so code spans and fenced blocks
-    // are masked out first and all-digit matches are dropped.
-    for (const match of maskCode(content).matchAll(/(^|\s)#([\p{L}\p{N}_/-][\p{L}\p{M}\p{N}_/-]*)/gu)) {
-        if (/^\p{Nd}+$/u.test(match[2])) continue;
-        tags.add(match[2]);
-    }
-
-    // Inside a table Obsidian writes [[note\|alias]]: the backslash escapes the
-    // pipe and is not part of the target.
-    for (const match of content.matchAll(WIKILINK)) {
-        const target = match[1];
-        links.push(target.endsWith("\\") ? target.slice(0, -1) : target);
-    }
-    for (const match of content.matchAll(NOTE_LINK)) links.push(match[1]);
-    addAttachmentLinks(content, links);
-
-    return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+/** The cells in a table row as written: split at unescaped pipes, outer pipes optional. */
+function countCells(line: string): number {
+    return line.trim().replace(/^\||(?<!\\)\|$/g, "").split(/(?<!\\)\|/).length;
 }
 
 /**
- * Add the attachment targets of markdown links in `text` to `links`, recorded
- * URL-decoded so list_attachments can tell which files are still used. Also
- * looks inside each link's text once, since matches don't overlap and the
- * outer link of [![thumb](t.png)](full.png) would hide the inner image.
+ * Replace the code spans in `text` with "|", which can't start a tag or a
+ * wikilink target, so `x`#tag isn't a tag and [[`Note`]] isn't a link while
+ * [[note|`alias`]] still links note. Newlines are kept.
  */
-function addAttachmentLinks(text: string, links: string[], nested = false): void {
-    for (const match of text.matchAll(ATTACHMENT_LINK)) {
-        if (!nested && match[1].includes("[")) addAttachmentLinks(match[1], links, true);
-        // Drop a #page=2 fragment, as for wikilinks. Before decoding, since a
-        // literal # in a file name is written %23.
-        let target = match[2].replace(/^<|>$/g, "").replace(/#.*$/, "");
-        if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.endsWith(".md")) continue;
-        // Obsidian URL-decodes markdown link targets (a literal % is written %25).
-        try { target = decodeURIComponent(target); } catch { continue; }
-        target = target.replace(/^(\.\.?\/)+/, "");
-        if (isValidAttachmentPath(target)) links.push(target);
-    }
-}
-
-/**
- * Replace fenced code blocks (``` or ~~~, opener at line start with up to three
- * spaces of indent, closer of the same character and at least the same length;
- * an unclosed fence runs to the end) and inline code spans (a backtick run of
- * length n closes at the next run of exactly n within the same paragraph — a
- * span never crosses a blank line; an unmatched run is literal)
- * with dots, so offsets are preserved and nothing inside can start or extend a
- * tag. Indented code blocks, %% comments and math are not masked.
- */
-export function maskCode(content: string): string {
-    const lines = content.split("\n");
-    const out: string[] = [];
-    let fence: { char: string; len: number } | null = null;
-    const inline: string[] = [];
-    const flushInline = () => {
-        if (inline.length === 0) return;
-        out.push(...maskInlineSpans(inline.join("\n")).split("\n"));
-        inline.length = 0;
-    };
-    for (const line of lines) {
-        const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
-        if (fence) {
-            const close = open && open[1][0] === fence.char && open[1].length >= fence.len && line.trim() === open[1];
-            out.push(".".repeat(line.length));
-            if (close) fence = null;
-            continue;
-        }
-        if (open && (open[1][0] === "~" || !line.slice(open[0].length).includes("`"))) {
-            flushInline();
-            fence = { char: open[1][0], len: open[1].length };
-            out.push(".".repeat(line.length));
-            continue;
-        }
-        if (line.trim() === "") {
-            flushInline();
-            out.push(line);
-            continue;
-        }
-        inline.push(line);
-    }
-    flushInline();
-    return out.join("\n");
-}
-
-function maskInlineSpans(text: string): string {
-    // Collect backtick runs in one pass, then link each run to the next run of
-    // the same length (scanning right to left) so matching stays linear.
-    const runs: { at: number; len: number }[] = [];
-    for (let i = 0; i < text.length; ) {
-        if (text[i] !== "`") { i++; continue; }
-        let n = 0;
-        while (text[i + n] === "`") n++;
-        runs.push({ at: i, len: n });
-        i += n;
-    }
-    const next: number[] = [];
-    const seen = new Map<number, number>();
-    for (let r = runs.length - 1; r >= 0; r--) {
-        next[r] = seen.get(runs[r].len) ?? -1;
-        seen.set(runs[r].len, r);
-    }
-    let result = "";
+function blankOut(text: string, spans: Map<number, number> = new Map()): string {
+    let out = "";
     let from = 0;
-    for (let r = 0; r < runs.length; ) {
-        const c = next[r];
-        if (c === -1) { r++; continue; }
-        const start = runs[r].at;
-        const end = runs[c].at + runs[c].len;
-        result += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, ".");
+    for (const [start, end] of [...spans].sort((a, b) => a[0] - b[0])) {
+        out += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, "|");
         from = end;
-        r = c + 1;
     }
-    return result + text.slice(from);
+    return out + text.slice(from);
+}
+
+/**
+ * Add the targets of the markdown links and images among `tokens` to `links`.
+ * A link's text is among its siblings, but an image's alt text is in its
+ * children, where another image can be.
+ */
+function addTargets(tokens: Token[], links: string[]): void {
+    for (const token of tokens) {
+        if (token.type === "link_open") addTarget(token.attrGet("href"), links);
+        if (token.type === "image") {
+            addTarget(token.attrGet("src"), links);
+            addTargets(token.children ?? [], links);
+        }
+    }
+}
+
+/**
+ * Record a markdown link target: a note (.md) or an attachment, URL-decoded as
+ * Obsidian does, so list_attachments can tell which files are still used.
+ * External URLs and same-note #heading links are skipped.
+ */
+function addTarget(href: string | number | null, links: string[]): void {
+    // Drop a #heading or #page=2 fragment. Before decoding, since a literal #
+    // in a file name is written %23.
+    let target = String(href ?? "").replace(/#.*$/, "");
+    if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) return;
+    try { target = decodeURIComponent(target); } catch { return; }
+    target = target.replace(/^(\.\.?\/)+/, "");
+    if (target.endsWith(".md") || isValidAttachmentPath(target)) links.push(target);
 }
 
 export function extractSnippet(content: string, query: string, context = 80): string {

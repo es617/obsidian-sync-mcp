@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import MarkdownIt from "markdown-it";
 import { parseFrontmatterAndLinks } from "./parse.js";
 
 describe("parseFrontmatterAndLinks", () => {
@@ -52,10 +53,95 @@ Content`;
         assert.deepEqual(list.tags.sort(), ["alpha", "beta/gamma", "delta"]);
     });
 
-    it("keeps a lone or mismatched quote in a tag", () => {
-        const result = parseFrontmatterAndLinks(`---\ntags: ["alpha', it's]\n---\nText`);
-        assert.ok(result.tags.includes(`"alpha'`));
-        assert.ok(result.tags.includes("it's"));
+    it("strips YAML quotes from frontmatter values", () => {
+        const result = parseFrontmatterAndLinks(`---\ntitle: "My Note"\nstatus: 'draft'\nnote: it's "fine"\n---\nText`);
+        assert.equal(result.frontmatter.title, "My Note");
+        assert.equal(result.frontmatter.status, "draft");
+        assert.equal(result.frontmatter.note, `it's "fine"`);
+    });
+
+    it("reads YAML quoting rules in frontmatter values", () => {
+        const yaml = String.raw`---
+single: 'it''s'
+double: "say \"hi\"\tthen"
+padded: "  kept  "
+commented: "My Note" # draft
+version: 1.10
+list: [a, "b"]
+---
+Text`;
+        const fm = parseFrontmatterAndLinks(yaml).frontmatter;
+        assert.equal(fm.single, "it's");
+        assert.equal(fm.double, 'say "hi"\tthen');
+        assert.equal(fm.padded, "  kept  ");
+        assert.equal(fm.commented, "My Note");
+        assert.equal(fm.version, "1.10", "values stay strings as written");
+        assert.equal(fm.list, "a, b");
+    });
+
+    it("ends frontmatter only at a line that is just ---", () => {
+        const empty = parseFrontmatterAndLinks("---\n---\nBody #t");
+        assert.deepEqual(empty.frontmatter, {});
+        assert.deepEqual(empty.tags, ["t"]);
+        assert.equal(empty.frontmatterError, undefined);
+
+        assert.equal(parseFrontmatterAndLinks("---\ntitle: a\n---  \nBody").frontmatter.title, "a");
+
+        // "----" doesn't close it, so it is part of the (then invalid) YAML.
+        const dashes = parseFrontmatterAndLinks("---\ntitle: a\n----\n---\n[[Body]]");
+        assert.deepEqual(dashes.links, ["Body"]);
+        assert.ok(dashes.frontmatterError);
+    });
+
+    it("says why frontmatter that isn't valid YAML was ignored", () => {
+        // \U starts an escape in double quotes, so a Windows path there is invalid YAML.
+        const result = parseFrontmatterAndLinks('---\npath: "C:\\Users\\me"\ntags: [a]\n---\nBody');
+        assert.deepEqual(result.tags, []);
+        assert.match(result.frontmatterError ?? "", /escape/i);
+        assert.equal(parseFrontmatterAndLinks("---\npath: 'C:\\Users\\me'\n---\n").frontmatter.path, "C:\\Users\\me");
+    });
+
+    it("can still wrap markdown-it's backticks rule (pinned internal API)", () => {
+        assert.notEqual(new MarkdownIt().inline.ruler.__find__("backticks"), -1);
+    });
+
+    it("reads YAML aliases, quickly", () => {
+        const result = parseFrontmatterAndLinks("---\ncommon: &t [work, review]\ntags: *t\nsame: *t\n---\nBody");
+        assert.deepEqual(result.tags, ["work", "review"]);
+        assert.equal(result.frontmatter.same, "work, review");
+
+        const hostile = "---\na: &x [" + "*x,".repeat(50) + "]\n" + "k: v\n".repeat(20000) + "---\nBody [[L]]";
+        const start = performance.now();
+        assert.deepEqual(parseFrontmatterAndLinks(hostile).links, ["L"]);
+        assert.ok(performance.now() - start < 2000);
+    });
+
+    it("resolves many alias references in linear time", () => {
+        const time = (n: number) => {
+            const yaml = "---\nbase: &a [x, y]\n" + Array.from({ length: n }, (_, i) => `k${i}: *a`).join("\n") + "\n---\n";
+            const start = performance.now();
+            assert.equal(parseFrontmatterAndLinks(yaml).frontmatter[`k${n - 1}`], "x, y");
+            return performance.now() - start;
+        };
+        time(500);
+        assert.ok(time(8000) < 2000, "8000 alias references took over 2 s");
+    });
+
+    it("reads the plain tags of a list that also holds other values", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntags: [a, [x, y], b]\n---\n").tags, ["a", "b"]);
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntags: |\n  a\n  b\n---\n").tags, ["a", "b"]);
+    });
+
+    it("keeps nested frontmatter values as written", () => {
+        const fm = parseFrontmatterAndLinks("---\nlist:\n  - [a, b]\n  - {k: v}\nmap:\n  k: v\n---\n").frontmatter;
+        assert.equal(fm.list, "- [a, b]\n  - {k: v}");
+        assert.equal(fm.map, "k: v");
+    });
+
+    it("ignores frontmatter that isn't valid YAML, as Obsidian does", () => {
+        const result = parseFrontmatterAndLinks(`---\ntitle: "a" and "b"\ntags: ["alpha', it's]\n---\nBody #real`);
+        assert.deepEqual(result.frontmatter, {});
+        assert.deepEqual(result.tags, ["real"]);
     });
 
     it("parses inline #tags", () => {
@@ -119,9 +205,15 @@ Text #${nfdTag} here`;
     });
 
     it("treats an unclosed fence as running to the end", () => {
-        const content = "#kept\n```\n#lost\n#also-lost";
+        const content = "#kept\n```\n#lost [[Lost]]";
         const result = parseFrontmatterAndLinks(content);
         assert.deepEqual(result.tags, ["kept"]);
+        assert.deepEqual(result.links, []);
+    });
+
+    it("masks fences in list items and callouts", () => {
+        const content = "- ```bash\n  [[in-list]]\n  ```\n- see [[Next]]\n> [!note]\n> ```\n> [[in-callout]]\n> ```\n\nMore [[After]]";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["After", "Next"]);
     });
 
     it("leaves an unmatched backtick run as literal text", () => {
@@ -209,6 +301,134 @@ Also #shared inline`;
         const content = "| Note | Where |\n| --- | --- |\n| [[folder/note\\|label]] | [[other\\|x]] |";
         const result = parseFrontmatterAndLinks(content);
         assert.deepEqual(result.links.sort(), ["folder/note", "other"]);
+    });
+
+    it("ignores links written inside code", () => {
+        const content = "Use `[[span]]` or `[x](span.md)`.\n\n```md\n[[fenced]] ![](fenced.png)\n```\n\n[[real]]";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links, ["real"]);
+    });
+
+    it("keeps links whose label contains code", () => {
+        const content = "[`run`](scripts/run.md) [[note|`alias`]] ![`shot`](img/shot.png)";
+        const result = parseFrontmatterAndLinks(content);
+        assert.deepEqual(result.links.sort(), ["img/shot.png", "note", "scripts/run.md"]);
+    });
+
+    it("does not link a wikilink whose target is code", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("[[`Note`]]").links, []);
+    });
+
+    it("does not let a stray backtick hide links in the next block", () => {
+        const cases: [string, string[]][] = [
+            ["- run `foo\n- see [[List]] and `bar`", ["List"]],
+            ["# Use ` here\n[[Heading]] then `code`", ["Heading"]],
+            ["| `x | [[Row]] |\n|---|---|\n| ![](pic.png) | y` |", ["Row", "pic.png"]],
+            ["Text `x\n> [[Quote]] `y`", ["Quote"]],
+            ["---\ncmd: `ls\n---\nSee [[Body]] and ![](img.png) then `x`", ["Body", "img.png"]],
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), links.sort(), content);
+        }
+    });
+
+    it("masks code spans across lines and per table cell", () => {
+        const cases: [string, string[]][] = [
+            ["Title `x\n===\n[[Setext]] `y`", ["Setext"]],
+            ["a `x\n***\n[[Break]] `y`", ["Break"]],
+            ["> - a `x\n> - see [[Callout]] `y`", ["Callout"]],
+            ["[^1]: `x\n[^2]: [[Footnote]] `y`", ["Footnote"]],
+            ["| a | b |\n|---|---|\n| `x | [[Cell]] | y` |", ["Cell"]],
+            ["| `[[a\\|b]]` | `[[c]]` |", []],
+            ["See `[[wrapped\nspan]]` and `[[in-code]]`", []],
+        ];
+        for (const [content, links] of cases) {
+            assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), links.sort(), content);
+        }
+    });
+
+    it("reads CRLF notes like LF ones", () => {
+        const result = parseFrontmatterAndLinks("---\r\ntitle: \"T\"\r\ncmd: \"a ` b\"\r\ntags: [a]\r\n---\r\n[[Body]] `x`\r\n");
+        assert.equal(result.frontmatter.title, "T");
+        assert.deepEqual(result.tags, ["a"]);
+        assert.deepEqual(result.links, ["Body"]);
+    });
+
+    it("does not read inline #tags from frontmatter values", () => {
+        const result = parseFrontmatterAndLinks("---\ncolor: #ff0000\nnote: see #idea\n---\nBody #real");
+        assert.deepEqual(result.tags, ["real"]);
+    });
+
+    it("does not read escaped or entity-encoded tags and links", () => {
+        const result = parseFrontmatterAndLinks("\\#escaped &#35;entity #tag \\[\\[escaped]] [[a\\|alias]] [[link]]");
+        assert.deepEqual(result.tags, ["tag"]);
+        assert.deepEqual(result.links.sort(), ["a", "link"]);
+    });
+
+    it("stays fast with many code spans, also in identical blocks", () => {
+        for (const content of ["`a` ".repeat(100000), "| `a` |\n|---|\n" + "| `a` |\n".repeat(50000)]) {
+            const start = performance.now();
+            parseFrontmatterAndLinks(content);
+            assert.ok(performance.now() - start < 3000, `${content.slice(0, 20)}… took too long`);
+        }
+    });
+
+    it("reads links in table cells beyond the header's", () => {
+        const cases: [string, string[]][] = [
+            ["| h |\n|---|\n| a | [[Extra]] |", ["Extra"]],
+            ["| h | i |\n|---|---|\n| a | b | ![](extra.png) |", ["extra.png"]],
+            ["h | i\n--|--\na | b | [[NoPipes]]", ["NoPipes"]],
+            ["| h | i |\n|---|---|\n| [[a\\|alias]] | b |", ["a"]],
+        ];
+        for (const [content, links] of cases) assert.deepEqual(parseFrontmatterAndLinks(content).links, links, content);
+    });
+
+    it("reads indented lines, which continue footnotes in Obsidian", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("[^1]: Source\n    more [[Cont]] #fn").links, ["Cont"]);
+        assert.deepEqual(parseFrontmatterAndLinks("[^1]: Source\n    more [[Cont]] #fn").tags, ["fn"]);
+        assert.deepEqual(parseFrontmatterAndLinks("# Heading\n\t[[A]]").links, ["A"]);
+        assert.deepEqual(parseFrontmatterAndLinks("---\ntitle: x\n---\n\t[[AfterFM]]").links, ["AfterFM"]);
+    });
+
+    it("does not treat an unmatched backtick as code", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("![[embed `x.png]]").links, ["embed `x.png"]);
+        assert.deepEqual(parseFrontmatterAndLinks("[[My `note]] and #tag").links, ["My `note"]);
+    });
+
+    it("reads wikilinks in reference and footnote definitions", () => {
+        const content = "x[^a] and [see][src]\n\n[^a]: ![[diagram.png]]\n[src]: [[Other]]\n> [^q]: [[Quoted]]";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["Other", "Quoted", "diagram.png"]);
+    });
+
+    it("does not let a reference definition hide a wikilink", () => {
+        const content = "See [[Project]] and ![[logo.png]].\n\n[project]: https://x\n[logo.png]: https://y";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["Project", "logo.png"]);
+    });
+
+    it("keeps emphasis characters in wikilink targets", () => {
+        const content = "![[_assets/img_.png]] [[__init__]] [[_a]] and [[b_]] [[a ~~b~~ c]] [[x]](y.md)";
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["__init__", "_a", "_assets/img_.png", "a ~~b~~ c", "b_", "x", "y.md"]);
+    });
+
+    it("reads links inside HTML blocks and an unclosed comment", () => {
+        const content = '<p align="center">![](logo.png)</p>\n\n<details><summary>s</summary>\n[[det]]\n</details>\n\n<!-- todo\n\n[[later]]';
+        assert.deepEqual(parseFrontmatterAndLinks(content).links.sort(), ["det", "later", "logo.png"]);
+    });
+
+    it("reads no tags or links out of image alt text after the image", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("![](a.png)#t [[![x](i.png)]]").tags, []);
+        assert.deepEqual(parseFrontmatterAndLinks("[[a\\#b]]").links, ["a"]);
+    });
+
+    it("treats a backslash-escaped backtick as literal", () => {
+        assert.deepEqual(parseFrontmatterAndLinks("\\`[[a]]\\` [[b]]").links.sort(), ["a", "b"]);
+        // The rest of an escaped run still opens a span: \``x` is a literal ` and then code `x`.
+        assert.deepEqual(parseFrontmatterAndLinks("\\``[[a]]` [[b]]").links, ["b"]);
+        // An even number of backslashes escapes nothing.
+        assert.deepEqual(parseFrontmatterAndLinks("\\\\`[[a]]` [[b]]").links, ["b"]);
+        // Inside a span a backslash is literal, so `C:\` closes.
+        assert.deepEqual(parseFrontmatterAndLinks("`C:\\` [[b]] `[[c]]`").links, ["b"]);
+        assert.deepEqual(parseFrontmatterAndLinks("\\` #tag \\`").tags, ["tag"]);
     });
 
     it("drops #heading, #^block and #page anchors from wikilink targets", () => {
@@ -316,8 +536,9 @@ Also #shared inline`;
     });
 
     it("does not let a link span lines", () => {
+        // A markdown link's text may wrap (CommonMark), a wikilink may not.
         const result = parseFrontmatterAndLinks("[[broken\nlink]] [label\n](x.png)");
-        assert.deepEqual(result.links, []);
+        assert.deepEqual(result.links, ["x.png"]);
     });
 
     it("deduplicates links", () => {
