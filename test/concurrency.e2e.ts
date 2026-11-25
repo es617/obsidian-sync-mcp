@@ -21,6 +21,9 @@
  *             their own line at the same moment. Every edit must be present.
  *   same-line two workers replace the same line at the same moment. Exactly one
  *             may succeed; the other must be told, not silently overwritten.
+ *   group-with-refusal
+ *             nine edits at once on one instance, one of them for text that is
+ *             not in the note: the eight land, the ninth is told why.
  *   expected-revision
  *             a write_note with the revision read on one instance succeeds on the
  *             other; repeating it with that now-stale revision writes nothing.
@@ -240,6 +243,26 @@ async function sameLine(clients: Client[]): Promise<void> {
         `${succeeded}/2 answered "Note edited", ${present} of them present, ${conflicts.length} conflict leaves; answers: ${JSON.stringify(answers.map((x) => x.split("\n")[0]))}`);
 }
 
+/**
+ * One instance, several edits in flight at once: the server writes them as a
+ * group. A member that cannot apply (its old_text is not in the note) must be
+ * answered on its own and must not keep the others from landing.
+ */
+async function groupWithRefusal(clients: Client[]): Promise<void> {
+    const path = "Boards/group.md";
+    const n = 8;
+    await seed(clients[0], path, board(Array.from({ length: n }, (_, i) => `- [ ] ${task(i)}`)));
+    const workers = await Promise.all(Array.from({ length: n + 1 }, () => new Client(clients[0].port).connect()));
+    const answers = await Promise.all(workers.map((w, i) => i < n
+        ? w.tool("edit_note", { path, operation: "replace", old_text: `- [ ] ${task(i)}`, content: `- [x] ${task(i)}` })
+        : w.tool("edit_note", { path, operation: "replace", old_text: "- [ ] no such task", content: "- [x] no such task" })));
+    const { winner, conflicts } = await readFromCouch(path);
+    const done = Array.from({ length: n }, (_, i) => winner.includes(`- [x] ${task(i)}`)).filter(Boolean).length;
+    const refusal = answers[n].split("\n")[0];
+    check("group-with-refusal", done === n && /old_text not found/.test(refusal) && conflicts.length === 0,
+        `${done}/${n} edits present on one instance, the bad one answered ${JSON.stringify(refusal)}, ${conflicts.length} conflict leaves`);
+}
+
 function percentile(sorted: number[], p: number): number {
     if (sorted.length === 0) return 0;
     return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
@@ -351,6 +374,7 @@ try {
         await control(clients);
         await disjoint(clients);
         await sameLine(clients);
+        await groupWithRefusal(clients);
         await expectedRevision(clients);
         await editVsWrite(clients);
     }
