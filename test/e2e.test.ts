@@ -382,6 +382,75 @@ describe("E2E: modern-protocol requests must not crash the server", () => {
     });
 });
 
+// #16: clients that fall back to Latin-1 showed Cyrillic and CJK as mojibake
+// because MCP responses had no charset. #18 and #64: the mcp-proxy versions
+// that add it broke, or slowed by ~1 s, every connect from clients speaking the
+// 2026-07-28 protocol. So real clients of both SDK generations connect here,
+// the newer one also in the negotiating mode Claude uses, and every MCP
+// response must declare charset=utf-8.
+describe("E2E: charset=utf-8 for both MCP client generations (#16, #18)", () => {
+    const url = new URL(BASE);
+    const requestInit = { headers: { Authorization: `Bearer ${AUTH}` } };
+
+    before(async () => {
+        await writeFile(join(vaultDir, "Тест.md"), "Кириллица и 漢字");
+    });
+
+    function recording(types: Set<string>) {
+        return async (input: any, init?: any) => {
+            const resp = await fetch(input, init);
+            const type = resp.headers.get("content-type");
+            if (type) types.add(type);
+            return resp;
+        };
+    }
+
+    function assertUtf8(types: Set<string>) {
+        const mcp = [...types].filter((t) => /application\/json|text\/event-stream/i.test(t));
+        assert.ok(mcp.length > 0, `no MCP responses recorded: ${[...types].join(", ")}`);
+        for (const type of mcp) assert.match(type, /;\s*charset=utf-8/i, `missing charset: ${type}`);
+    }
+
+    // A connect takes tens of milliseconds; mcp-proxy 6.10 (#64) made it ~1 s.
+    const CONNECT_BUDGET_MS = 500;
+
+    it("SDK 1.x client: connects quickly, reads Cyrillic, every response declares charset=utf-8", async () => {
+        const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+        const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+        const types = new Set<string>();
+        const client = new Client({ name: "e2e-sdk1", version: "1.0" });
+        const start = performance.now();
+        await client.connect(new StreamableHTTPClientTransport(url, { requestInit, fetch: recording(types) as any }));
+        const ms = performance.now() - start;
+        const result: any = await client.callTool({ name: "read_note", arguments: { path: "Тест.md" } });
+        await client.close();
+        assert.match(result.content.map((c: any) => c.text ?? "").join(""), /Кириллица и 漢字/);
+        assertUtf8(types);
+        assert.ok(ms < CONNECT_BUDGET_MS, `connect took ${ms.toFixed(0)} ms`);
+    });
+
+    for (const mode of ["legacy", "auto"] as const) {
+        it(`MCP client 2.x (versionNegotiation=${mode}): connects quickly, reads Cyrillic, charset=utf-8`, async () => {
+            const v2: any = await import("@modelcontextprotocol/client");
+            const types = new Set<string>();
+            const client = new v2.Client({ name: `e2e-v2-${mode}`, version: "1.0" }, { versionNegotiation: { mode } });
+            const start = performance.now();
+            await client.connect(new v2.StreamableHTTPClientTransport(url, { requestInit, fetch: recording(types) }));
+            const ms = performance.now() - start;
+            assert.ok((await client.listTools()).tools.some((t: any) => t.name === "read_note"));
+            const result = await client.callTool({ name: "read_note", arguments: { path: "Тест.md" } });
+            await client.close();
+            assert.match((result.content ?? []).map((c: any) => c.text ?? "").join(""), /Кириллица и 漢字/);
+            assertUtf8(types);
+            assert.ok(ms < CONNECT_BUDGET_MS, `connect took ${ms.toFixed(0)} ms`);
+        });
+    }
+
+    it("logged no transport errors", () => {
+        assert.doesNotMatch(serverLogs, /modern handler error|TypeError/);
+    });
+});
+
 describe("E2E: attachments", () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x7f, 0x80]);
 

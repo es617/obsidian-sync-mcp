@@ -16,6 +16,7 @@ import { registerAttachmentTools, ATTACHMENT_WRITE_TOOLS, formatBytes } from "./
 import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
 import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 import { parsePathNormalization, type PathNormalizationSetting } from "./path-identity-config.js";
+import { declareUtf8Charset } from "./http-charset.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -541,6 +542,8 @@ setInterval(async () => {
 }, 5 * 60 * 1000).unref();
 
 // --- Start server ---
+// MCP responses declare charset=utf-8 (#16); see http-charset.ts for why it's done here.
+declareUtf8Charset();
 server.start({
     transportType: "httpStream",
     httpStream: { port: PORT, endpoint: "/mcp", host: process.env.HOST ?? "0.0.0.0" },
