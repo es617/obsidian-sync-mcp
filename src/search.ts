@@ -199,6 +199,9 @@ export class SearchIndex {
         this.clearBacklinks(path);
         this.hashes.delete(path);
         const parsed = parseFrontmatterAndLinks(content);
+        if (parsed.frontmatterError) {
+            console.warn(`Frontmatter of ${path} is not valid YAML, so its properties and tags are ignored: ${parsed.frontmatterError}`);
+        }
         const title = parsed.frontmatter["title"];
         if (typeof title === "string" && title.trim().length > 0) {
             this.titles.set(path, title.trim());

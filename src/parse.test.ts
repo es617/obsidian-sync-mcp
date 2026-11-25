@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import MarkdownIt from "markdown-it";
 import { parseFrontmatterAndLinks } from "./parse.js";
 
 describe("parseFrontmatterAndLinks", () => {
@@ -76,6 +77,32 @@ Text`;
         assert.equal(fm.commented, "My Note");
         assert.equal(fm.version, "1.10", "values stay strings as written");
         assert.equal(fm.list, "a, b");
+    });
+
+    it("ends frontmatter only at a line that is just ---", () => {
+        const empty = parseFrontmatterAndLinks("---\n---\nBody #t");
+        assert.deepEqual(empty.frontmatter, {});
+        assert.deepEqual(empty.tags, ["t"]);
+        assert.equal(empty.frontmatterError, undefined);
+
+        assert.equal(parseFrontmatterAndLinks("---\ntitle: a\n---  \nBody").frontmatter.title, "a");
+
+        // "----" doesn't close it, so it is part of the (then invalid) YAML.
+        const dashes = parseFrontmatterAndLinks("---\ntitle: a\n----\n---\n[[Body]]");
+        assert.deepEqual(dashes.links, ["Body"]);
+        assert.ok(dashes.frontmatterError);
+    });
+
+    it("says why frontmatter that isn't valid YAML was ignored", () => {
+        // \U starts an escape in double quotes, so a Windows path there is invalid YAML.
+        const result = parseFrontmatterAndLinks('---\npath: "C:\\Users\\me"\ntags: [a]\n---\nBody');
+        assert.deepEqual(result.tags, []);
+        assert.match(result.frontmatterError ?? "", /escape/i);
+        assert.equal(parseFrontmatterAndLinks("---\npath: 'C:\\Users\\me'\n---\n").frontmatter.path, "C:\\Users\\me");
+    });
+
+    it("can still wrap markdown-it's backticks rule (pinned internal API)", () => {
+        assert.notEqual(new MarkdownIt().inline.ruler.__find__("backticks"), -1);
     });
 
     it("reads YAML aliases, quickly", () => {

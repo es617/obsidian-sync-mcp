@@ -15,7 +15,7 @@
 ### Fixes
 - `move_note` silently replaced an existing note at the destination, in both local and CouchDB mode. It now refuses and asks for another path, like `move_attachment` without `overwrite=true`.
 - `edit_note` could recreate a note deleted between its read and its write. The write now requires the note to still exist.
-- Frontmatter is now read with a YAML parser, so quoted values (`title: "My Note"`), escapes, comments and every list form of `tags` are read the way Obsidian reads them. Frontmatter that isn't valid YAML is ignored, as in Obsidian. Follow-up to #66.
+- Frontmatter is now read with a YAML parser, so quoted values (`title: "My Note"`), escapes, comments and every list form of `tags` are read the way Obsidian reads them. Frontmatter that isn't valid YAML is ignored, as in Obsidian; the server logs why, and `get_note_info` shows it. One case that used to work: a backslash in double quotes is a YAML escape, so `path: "C:\Users\me"` is invalid (write it in single quotes). Frontmatter now ends only at a line that is just `---`. Follow-up to #66, with suggestions from @Nerodacles.
 - Note bodies are parsed as CommonMark with GFM tables (markdown-it), so `[[links]]` and `#tags` inside code spans and code blocks are no longer indexed, and table links like `[[note\|label]]`, escaped `\#tags` and callouts are read as in Obsidian.
 
 ### Performance

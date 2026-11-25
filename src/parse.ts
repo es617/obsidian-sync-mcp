@@ -2,7 +2,7 @@
  * Parse Obsidian markdown content for frontmatter, tags, and links.
  */
 
-import MarkdownIt, { type Token } from "markdown-it";
+import MarkdownIt, { type StateInline, type Token } from "markdown-it";
 import { isAlias, isMap, isScalar, isSeq, parseDocument, visit, type Document, type YAMLSeq } from "yaml";
 import { SUPPORTED_ATTACHMENT_EXTENSIONS, isValidAttachmentPath } from "./attachment-path.js";
 
@@ -13,13 +13,18 @@ import { SUPPORTED_ATTACHMENT_EXTENSIONS, isValidAttachmentPath } from "./attach
  * attachment extensions are part of it because they decide which link targets
  * count.
  */
-export const PARSER_VERSION = `3:${SUPPORTED_ATTACHMENT_EXTENSIONS.join(",")}`;
+export const PARSER_VERSION = `4:${SUPPORTED_ATTACHMENT_EXTENSIONS.join(",")}`;
 
 export interface NoteMetadata {
     frontmatter: Record<string, string>;
     tags: string[];
     links: string[];
+    /** Why the frontmatter was ignored, when it isn't valid YAML. */
+    frontmatterError?: string;
 }
+
+// Frontmatter: a "---" first line up to the next line that is just "---".
+const FRONTMATTER = /^---[ \t]*\n(?:([\s\S]*?)\n)?---[ \t]*(?:\n|$)/;
 
 // [[wikilinks]] and ![[embeds]], which markdown doesn't know. A #heading,
 // #^block or #page=2 suffix points into the target, so [[Note#Heading]] links
@@ -39,31 +44,36 @@ const markdown = new MarkdownIt({ html: true, linkify: false });
 // backticks rule is wrapped to record that: env.codeSpans maps a block's
 // inline source to its code spans, start offset to end. Blocks with the same
 // text have the same spans and share an entry. __rules__ and __find__ are
-// internal, which is why markdown-it is pinned to an exact version.
+// internal, which is why markdown-it is pinned to an exact version; should the
+// rule go missing, links in code spans are indexed rather than failing startup.
 type Env = { codeSpans: Map<string, Map<number, number>> };
-const backticks = markdown.inline.ruler.__rules__[markdown.inline.ruler.__find__("backticks")].fn;
-markdown.inline.ruler.at("backticks", (state, silent) => {
-    const start = state.pos;
-    const tokens = state.tokens.length;
-    if (!backticks(state, silent)) return false;
-    // A run with no closing run is literal text (no token is pushed), and the
-    // rule also runs silently while markdown-it scans ahead; neither is a span.
-    if (!silent && state.tokens.length > tokens && state.tokens.at(-1)?.type === "code_inline") {
-        const spans = (state.env as Env).codeSpans;
-        if (!spans.has(state.src)) spans.set(state.src, new Map());
-        spans.get(state.src)!.set(start, state.pos);
-    }
-    return true;
-});
+const backticksAt = markdown.inline.ruler.__find__("backticks");
+if (backticksAt === -1) console.warn("markdown-it has no backticks rule: links and tags inside `code` will be indexed.");
+else wrapBackticks(markdown.inline.ruler.__rules__[backticksAt].fn);
+
+function wrapBackticks(backticks: (state: StateInline, silent: boolean) => boolean): void {
+    markdown.inline.ruler.at("backticks", (state, silent) => {
+        const start = state.pos;
+        const tokens = state.tokens.length;
+        if (!backticks(state, silent)) return false;
+        // A run with no closing run is literal text (no token is pushed), and the
+        // rule also runs silently while markdown-it scans ahead; neither is a span.
+        if (!silent && state.tokens.length > tokens && state.tokens.at(-1)?.type === "code_inline") {
+            const spans = (state.env as Env).codeSpans;
+            if (!spans.has(state.src)) spans.set(state.src, new Map());
+            spans.get(state.src)!.set(start, state.pos);
+        }
+        return true;
+    });
+}
 
 export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     content = content.replace(/\r\n/g, "\n");
-    // Frontmatter runs from a "---" first line to the next "---" line.
-    const end = content.startsWith("---\n") ? content.indexOf("\n---", 4) : -1;
-    const yaml = end === -1 ? "" : content.slice(4, end);
-    const body = end === -1 ? content : content.slice(end + 4);
+    const fm = content.match(FRONTMATTER);
+    const yaml = fm?.[1] ?? "";
+    const body = fm ? content.slice(fm[0].length) : content;
 
-    const { frontmatter, tags: yamlTags } = readFrontmatter(yaml);
+    const { frontmatter, tags: yamlTags, error } = readFrontmatter(yaml);
     const { text, links } = readBody(body);
     const tags = new Set(yamlTags);
     // Wikilinks in properties (related: "[[Note]]") count too.
@@ -74,7 +84,9 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
     for (const match of text.matchAll(TAG)) {
         if (!/^\p{Nd}+$/u.test(match[2])) tags.add(match[2]);
     }
-    return { frontmatter, tags: [...tags], links: [...new Set(links)] };
+    const metadata: NoteMetadata = { frontmatter, tags: [...tags], links: [...new Set(links)] };
+    if (error) metadata.frontmatterError = error;
+    return metadata;
 }
 
 /**
@@ -84,11 +96,14 @@ export function parseFrontmatterAndLinks(content: string): NoteMetadata {
  * or a string of comma- or line-separated tags. Frontmatter that isn't valid
  * YAML is ignored, as Obsidian does.
  */
-function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: string[] } {
+function readFrontmatter(yaml: string): { frontmatter: Record<string, string>; tags: string[]; error?: string } {
     const frontmatter: Record<string, string> = {};
     const tags: string[] = [];
     const doc = parseDocument(yaml, { schema: "failsafe", uniqueKeys: false });
-    if (doc.errors.length > 0 || !isMap(doc.contents)) return { frontmatter, tags };
+    // The first line of yaml's message, without the snippet it introduces:
+    // "Invalid escape sequence \Users\me" at line 1, column 10".
+    if (doc.errors.length > 0) return { frontmatter, tags, error: doc.errors[0].message.split("\n")[0].replace(/:$/, "") };
+    if (!isMap(doc.contents)) return { frontmatter, tags };
 
     const resolve = aliasResolver(doc);
     for (const pair of doc.contents.items) {

@@ -463,6 +463,9 @@ export function registerTools(
                 `Created: ${new Date(meta.ctime).toISOString()}`,
                 `Modified: ${new Date(meta.mtime).toISOString()}`,
             ];
+            if (meta.frontmatterError) {
+                lines.push(`\nFrontmatter: not read, it isn't valid YAML (${meta.frontmatterError})`);
+            }
             if (Object.keys(meta.frontmatter).length > 0) {
                 lines.push(`\nFrontmatter:`);
                 for (const [k, v] of Object.entries(meta.frontmatter)) {
