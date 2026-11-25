@@ -61,6 +61,7 @@
         "zod": "^4.6.7"
     },
     "devDependencies": {
+        "@modelcontextprotocol/client": "2.4.0",
         "@types/node": "^22",
         "tsup": "^8",
         "tsx": "^4",

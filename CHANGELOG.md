@@ -15,6 +15,7 @@
 ### Fixes
 - `move_note` silently replaced an existing note at the destination, in both local and CouchDB mode. It now refuses and asks for another path, like `move_attachment` without `overwrite=true`.
 - `edit_note` could recreate a note deleted between its read and its write. The write now requires the note to still exist.
+- MCP responses declare `charset=utf-8` again, so clients that default to Latin-1 (such as Python's `urllib`) no longer show Cyrillic or CJK note text as mojibake (#16). The server adds the charset itself, keeping mcp-proxy 6.4: the mcp-proxy releases that add it crash with current Claude clients (6.7, #18) or slow every connect by about a second (6.10).
 - Frontmatter is now read with a YAML parser, so quoted values (`title: "My Note"`), escapes, comments and every list form of `tags` are read the way Obsidian reads them. Frontmatter that isn't valid YAML is ignored, as in Obsidian; the server logs why, and `get_note_info` shows it. One case that used to work: a backslash in double quotes is a YAML escape, so `path: "C:\Users\me"` is invalid (write it in single quotes). Frontmatter now ends only at a line that is just `---`. Follow-up to #66, with suggestions from @Nerodacles.
 - Note bodies are parsed as CommonMark with GFM tables (markdown-it), so `[[links]]` and `#tags` inside code spans and code blocks are no longer indexed, and table links like `[[note\|label]]`, escaped `\#tags` and callouts are read as in Obsidian.
 
