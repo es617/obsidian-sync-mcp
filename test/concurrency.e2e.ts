@@ -21,6 +21,9 @@
  *             their own line at the same moment. Every edit must be present.
  *   same-line two workers replace the same line at the same moment. Exactly one
  *             may succeed; the other must be told, not silently overwritten.
+ *   expected-revision
+ *             a write_note with the revision read on one instance succeeds on the
+ *             other; repeating it with that now-stale revision writes nothing.
  *
  * The final note is read straight from CouchDB (not through the servers under
  * test), with its conflict leaves, so a loss hidden in a sibling revision
@@ -29,6 +32,8 @@
  * `--load WxE` (e.g. `--load 4x50`) instead runs W writers that each append
  * E unique lines to one note, alternating instances, and prints one JSON line
  * with what was sent, answered and present, plus latency percentiles.
+ * `--think MS` makes each writer pause a random 0..MS ms between its edits;
+ * without it the writers loop flat out, which saturates the note.
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -230,7 +235,7 @@ function percentile(sorted: number[], p: number): number {
     return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 }
 
-async function load(clients: Client[], writers: number, edits: number): Promise<void> {
+async function load(clients: Client[], writers: number, edits: number, thinkMs: number): Promise<void> {
     const path = "Boards/load.md";
     await seed(clients[0], path, board(["- [ ] seed"]));
     const workers = await Promise.all(Array.from({ length: writers }, (_, w) => new Client(clients[w % clients.length].port).connect()));
@@ -239,6 +244,7 @@ async function load(clients: Client[], writers: number, edits: number): Promise<
     const start = performance.now();
     await Promise.all(workers.map(async (worker, w) => {
         for (let e = 0; e < edits; e++) {
+            if (thinkMs > 0) await new Promise((r) => setTimeout(r, Math.random() * thinkMs));
             const t0 = performance.now();
             const answer = await worker.tool("edit_note", { path, operation: "append", content: `- [ ] load-w${w}-e${e}` });
             latencies.push(performance.now() - t0);
@@ -251,12 +257,37 @@ async function load(clients: Client[], writers: number, edits: number): Promise<
     let present = 0;
     for (let w = 0; w < writers; w++) for (let e = 0; e < edits; e++) if (winner.includes(`- [ ] load-w${w}-e${e}\n`) || winner.endsWith(`- [ ] load-w${w}-e${e}`)) present++;
     latencies.sort((x, y) => x - y);
+    const ok = [...answers.entries()].filter(([k]) => k.startsWith("Note edited")).reduce((n, [, v]) => n + v, 0);
     console.log(JSON.stringify({
-        writers, edits, sent: writers * edits, answers: Object.fromEntries(answers), present,
-        lost: writers * edits - present, conflictLeaves: conflicts.length,
+        writers, edits, thinkMs, sent: writers * edits, answers: Object.fromEntries(answers), present,
+        // An edit refused with an error is not lost: its caller was told. A lost
+        // edit is one answered "Note edited" that is not in the note.
+        silentlyLost: Math.max(0, ok - present), refused: writers * edits - ok, conflictLeaves: conflicts.length,
         p50ms: Math.round(percentile(latencies, 50)), p95ms: Math.round(percentile(latencies, 95)), maxMs: Math.round(latencies[latencies.length - 1]),
         wallMs: Math.round(wallMs),
     }));
+}
+
+async function expectedRevision(clients: Client[]): Promise<void> {
+    const path = "Boards/pinned.md";
+    await seed(clients[0], path, "v1\n");
+    const read = await clients[0].tool("read_note", { path });
+    const revision = read.match(/^Revision: (\S+)$/m)?.[1];
+    if (!revision) {
+        check("expected-revision", false, `read_note returned no revision: ${JSON.stringify(read.split("\n")[0])}`);
+        return;
+    }
+    const other = clients[1 % clients.length];
+    const first = await other.tool("write_note", { path, content: "v2\n", expected_revision: revision });
+    const stale = await clients[0].tool("write_note", { path, content: "v3\n", expected_revision: revision });
+    const { winner, conflicts } = await readFromCouch(path);
+    check("expected-revision", first.startsWith("Note saved") && stale.startsWith("Revision mismatch") && winner === "v2\n" && conflicts.length === 0,
+        `fresh: ${JSON.stringify(first.split("\n")[0])}, stale: ${JSON.stringify(stale.split("\n")[0])}, body ${JSON.stringify(winner)}, ${conflicts.length} conflict leaves`);
+}
+
+/** Server-side retry rounds, from the debug log line the CouchDB backend writes for each. */
+function retriesLogged(servers: Server[]): number {
+    return servers.reduce((n, s) => n + (s.logs.match(/revision conflict on attempt/g)?.length ?? 0), 0);
 }
 
 // --- Main ---
@@ -269,15 +300,18 @@ const loadArg = process.argv.indexOf("--load");
 const servers: Server[] = [];
 try {
     // Start one first so the empty database gets its path identity declared once.
-    for (const port of PORTS) servers.push(await startServer(port));
+    for (const port of PORTS) servers.push(await startServer(port, loadArg !== -1 ? { LOG_LEVEL: "debug" } : {}));
     const clients = await Promise.all(PORTS.map((p) => new Client(p).connect()));
     if (loadArg !== -1) {
         const [w, e] = (process.argv[loadArg + 1] ?? "4x50").split("x").map(Number);
-        await load(clients, w, e);
+        const thinkArg = process.argv.indexOf("--think");
+        await load(clients, w, e, thinkArg === -1 ? 0 : Number(process.argv[thinkArg + 1]));
+        console.log(JSON.stringify({ retriesLogged: retriesLogged(servers) }));
     } else {
         await control(clients);
         await disjoint(clients);
         await sameLine(clients);
+        await expectedRevision(clients);
     }
 } finally {
     if (process.env.CONCURRENCY_SERVER_LOGS) {

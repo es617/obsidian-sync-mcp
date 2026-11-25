@@ -115,6 +115,7 @@ jobs:
         run: npm run test:couchdb
         env:
           TEST_PATH_NORMALIZATION: legacy
+      - run: npm run test:concurrency
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

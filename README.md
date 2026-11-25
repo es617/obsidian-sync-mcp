@@ -201,16 +201,26 @@ Set `BASE_URL` to the tunnel URL when using authentication.
 
 | Tool | Description |
 |---|---|
-| `read_note` | Read a note's markdown content by path |
-| `write_note` | Create or overwrite a note (replaces entire content) |
-| `edit_note` | Edit a note without rewriting it — append, prepend (after frontmatter), or replace exact text |
+| `read_note` | Read a note's markdown content by path (CouchDB mode: with its revision) |
+| `write_note` | Create or overwrite a note (replaces entire content); optional `expected_revision` |
+| `edit_note` | Edit a note without rewriting it — append, prepend (after frontmatter), or replace exact text; optional `expected_revision` |
 | `list_folders` | List all folders in the vault with note counts — use to discover folder names |
 | `list_tags` | List all tags in the vault with counts — use to discover tags before filtering |
 | `list_notes` | List notes with timestamps. Filter by folder, name, tag, or date. Sort by name or modified. |
 | `search_notes` | Search note text for terms (OR, case-insensitive substrings); paths and frontmatter titles are searched first. Filter by folder, tag, or date. Returns paths with one context line each, never the note body, after a status line that states which CouchDB sequence the index is caught up with. |
 | `delete_note` | Delete a note |
 | `move_note` | Move or rename a note — works across folders, creates destination folders automatically |
-| `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, and timestamps — navigate the knowledge graph |
+| `get_note_metadata` | Get frontmatter, tags, outgoing links, backlinks, size, timestamps and (CouchDB mode) revision — navigate the knowledge graph |
+
+### Concurrent edits (CouchDB mode)
+
+Several agents, or several server instances on one database, can edit the same note at once without losing each other's changes:
+
+- `read_note` and `get_note_metadata` show the note's revision (`Revision: 12-3f9c…`, CouchDB's `_rev`).
+- `edit_note` applies its change to the text it read and writes only if the note is still at that revision. If another writer got there first, it reads the note again and re-applies the change, up to 10 times; a `replace` checks `old_text` again each time, so two agents replacing the same text get one success and one `old_text not found`. If the note keeps changing for all 10 rounds, nothing is written and the answer says so.
+- `write_note` and `edit_note` accept an optional `expected_revision`: the write only happens if the note is still at that revision; otherwise nothing is written and the answer names the current revision. `edit_note` with `expected_revision` does not retry.
+
+Local mode has no revisions: reads show none, and `expected_revision` is refused rather than ignored. `delete_note` and `move_note` do not check revisions yet. Edits made in Obsidian reach CouchDB through LiveSync replication, which has no revision check; an Obsidian edit racing an agent edit is still left to LiveSync's conflict handling.
 
 ### Attachments (opt-in)
 
@@ -326,7 +336,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 
 - **Single vault per instance.** Each server connects to one vault. For multiple vaults, run multiple instances on different ports.
 - **Single machine on Fly.io.** Auth state is in-memory, so multiple machines break the OAuth flow. The setup script enforces this automatically.
-- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins.
+- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins. Agents editing through this server (one instance or several) don't overwrite each other in CouchDB mode; see [Concurrent edits](#concurrent-edits-couchdb-mode).
 - **Attachments are write-and-describe only.** With `ATTACHMENTS_ENABLED=true` agents can store, move and delete media files, but the server does not return attachment contents to the model.
 - **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
 - **Node 22+ required.**

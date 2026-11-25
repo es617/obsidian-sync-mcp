@@ -23,6 +23,8 @@ function fakeBackend(withRemote = false) {
     if (withRemote) {
         backend.catchUp = async (since) => { calls.push(`catchUp:${since}`); return "42"; };
         backend.watchChanges = () => { calls.push("watch"); };
+        backend.readNoteRevision = async (p) => { calls.push(`readRev:${p}`); return { content: "content", revision: "1-a" }; };
+        backend.updateNote = async (p) => { calls.push(`update:${p}`); return { content: "x", revision: "2-b", attempts: 1 }; };
     }
     return { backend, calls };
 }
@@ -71,5 +73,15 @@ describe("readOnlyVault", () => {
         const ro = readOnlyVault(fakeBackend(false).backend);
         assert.equal(ro.catchUp, undefined);
         assert.equal(ro.watchChanges, undefined);
+        assert.equal(ro.readNoteRevision, undefined);
+        assert.equal(ro.updateNote, undefined);
+    });
+
+    it("delegates readNoteRevision and rejects updateNote without touching the backend", async () => {
+        const { backend, calls } = fakeBackend(true);
+        const ro = readOnlyVault(backend);
+        assert.deepEqual(await ro.readNoteRevision!("a.md"), { content: "content", revision: "1-a" });
+        await assert.rejects(ro.updateNote!("a.md", (c) => c), { message: READ_ONLY_MESSAGE });
+        assert.deepEqual(calls, ["readRev:a.md"]);
     });
 });

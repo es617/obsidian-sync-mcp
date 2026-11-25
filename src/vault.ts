@@ -4,8 +4,8 @@
 
 import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
 import type { DirectFileManipulatorOptions } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
-import { createTextBlob, createBinaryBlob, readContent } from "../lib/livesync-commonlib/src/common/utils.ts";
-import type { LoadedEntry } from "../lib/livesync-commonlib/src/common/types.ts";
+import { createTextBlob, createBinaryBlob, readContent, determineTypeFromBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
+import type { LoadedEntry, SavingEntry, DocumentID } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { FilePathWithPrefix } from "../lib/livesync-commonlib/src/common/types.ts";
 import type { MetaEntry } from "../lib/livesync-commonlib/src/API/DirectFileManipulatorV2.ts";
 import { isPathProbablyObfuscated, decrypt } from "octagonal-wheels/encryption/encryption";
@@ -14,7 +14,7 @@ import { PouchDB } from "../lib/livesync-commonlib/src/pouchdb/pouchdb-http.ts";
 import { inspectDatabasePathIdentity, type PathIdentityInspection } from "../lib/livesync-commonlib/src/pouchdb/pathIdentityCompatibility.ts";
 import type { EntryDoc } from "../lib/livesync-commonlib/src/common/types.ts";
 import { parseFrontmatterAndLinks } from "./parse.js";
-import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError, type NoteWriteOptions, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
+import { AttachmentExistsError, AttachmentMoveIncompleteError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError, RevisionMismatchError, UpdateRetriesExhaustedError, type RevisedNote, type UpdateOptions, type UpdateResult, type NoteWriteOptions, type MoveOptions, type VaultBackend, type NoteInfo, type NoteListing, type AttachmentInfo, type AttachmentChangeCallback, type WriteOptions } from "./vault-backend.js";
 import { KeyedLock } from "./keyed-lock.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
 import { validateAttachmentPath, isValidAttachmentPath } from "./attachment-path.js";
@@ -24,6 +24,10 @@ import { deriveContent } from "./index-sync.js";
 import { classifyIds, isNamespacedId, ID_SAMPLE_TARGET } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
 import { resolvePathIdentity, type PathNormalizationSetting } from "./path-identity-config.js";
+
+const debugLog = process.env.LOG_LEVEL === "debug";
+/** Upper bound of the random pause between two attempts of updateNote. */
+const RETRY_JITTER_MS = 25;
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -393,6 +397,72 @@ export class Vault implements VaultBackend {
         return null;
     }
 
+    async readNoteRevision(path: string): Promise<RevisedNote | null> {
+        this.validatePath(path);
+        const entry = await this.manipulator.get(path as FilePathWithPrefix);
+        if (!entry || !("data" in entry) || !Array.isArray(entry.data) || !entry._rev) return null;
+        return { content: entry.data.join(""), revision: entry._rev };
+    }
+
+    async updateNote(path: string, apply: (content: string) => string, { expectedRevision, maxAttempts = 1 }: UpdateOptions = {}): Promise<UpdateResult> {
+        this.validatePath(path);
+        const id = await this.manipulator.path2id(path as FilePathWithPrefix);
+        // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
+        const allowed = expectedRevision ? 1 : Math.max(1, maxAttempts);
+        let refusedBase: string | undefined;
+        for (let attempt = 1; ; attempt++) {
+            // The lock only orders this server's own writers, so they don't spend
+            // attempts on each other; CouchDB's revision check orders everyone else.
+            const result = await this.docLock.run([id], async (): Promise<UpdateResult | { stale: string }> => {
+                clearHandlers();
+                const entry = await this.manipulator.get(path as FilePathWithPrefix);
+                if (!entry || !("data" in entry) || !Array.isArray(entry.data) || !entry._rev) throw new NoteNotFoundError(path);
+                // The library answers false both for a 409 and for a write it could
+                // not store at all. After a 409 the note has moved on; if it is still
+                // at the refused base, the write failed for another reason.
+                if (refusedBase === entry._rev) throw new Error(`CouchDB did not store the write to ${path}`);
+                if (expectedRevision && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
+                const content = apply(entry.data.join(""));
+                const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
+                return revision ? { content, revision, attempts: attempt } : { stale: entry._rev };
+            });
+            if ("revision" in result) return result;
+            refusedBase = result.stale;
+            if (expectedRevision) {
+                const now = await this.manipulator.get(path as FilePathWithPrefix, true);
+                if (now && now._rev === expectedRevision) throw new Error(`CouchDB did not store the write to ${path}`);
+                throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");
+            }
+            if (attempt >= allowed) throw new UpdateRetriesExhaustedError(path, attempt);
+            if (debugLog) console.log(`[vault] revision conflict on attempt ${attempt}, retrying`);
+            if (RETRY_JITTER_MS > 0) await new Promise((r) => setTimeout(r, Math.random() * RETRY_JITTER_MS));
+        }
+    }
+
+    /**
+     * Write a note as a child of `baseRevision` with a plain (non-forced) put,
+     * so CouchDB itself refuses it when another writer advanced the note first.
+     * Returns the new revision, or false when CouchDB refused it.
+     */
+    private async putAtRevision(path: string, id: DocumentID, content: string, ctime: number, baseRevision: string): Promise<string | false> {
+        const data = createTextBlob(content);
+        const type = determineTypeFromBlob(data);
+        const doc = {
+            _id: id,
+            path: path as FilePathWithPrefix,
+            data,
+            ctime,
+            mtime: Date.now(),
+            size: new TextEncoder().encode(content).byteLength,
+            type,
+            datatype: type,
+            eden: {},
+            children: [] as string[],
+        } as SavingEntry;
+        const result = await this.manipulator.liveSyncLocalDB.putDBEntryWithLiveBaseRevision(doc, baseRevision);
+        return result ? result.rev : false;
+    }
+
     async writeNote(path: string, content: string, options: NoteWriteOptions = {}): Promise<boolean> {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
@@ -465,6 +535,7 @@ export class Vault implements VaultBackend {
             size: entry.size,
             ctime: entry.ctime,
             mtime: entry.mtime,
+            revision: entry._rev,
             ...parseFrontmatterAndLinks(content),
         };
     }
