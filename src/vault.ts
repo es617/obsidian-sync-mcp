@@ -492,8 +492,10 @@ export class Vault implements VaultBackend {
     /**
      * The create/update checks rely on the caller holding the document's lock.
      * Replacing an existing note is a revision-checked put, retried on a 409
-     * (the new text doesn't depend on the old one), so a concurrent writer on
-     * another instance or in Obsidian can't leave a conflict revision with it.
+     * (the new text doesn't depend on the old one), so a concurrent write
+     * through another instance of this server can't leave a conflict revision
+     * with it. Obsidian's edits arrive by LiveSync replication, which has no
+     * revision check, and are still left to LiveSync's conflict handling.
      * Creating a missing note is still the library's forced put: two instances
      * creating the same new note at the same moment can still conflict.
      */
