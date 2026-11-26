@@ -28,6 +28,16 @@ import { resolvePathIdentity, type PathNormalizationSetting } from "./path-ident
 const debugLog = process.env.LOG_LEVEL === "debug";
 /** Upper bound of the random pause between two attempts of updateNote. */
 const RETRY_JITTER_MS = 25;
+/** writeNote's default rounds for replacing an existing note; write_note passes edit_note's budget. */
+const OVERWRITE_MAX_ATTEMPTS = 10;
+
+/** CouchDB answered false while the note was still at the write's base: not a 409. */
+class WriteNotStoredError extends Error {
+    constructor(readonly path: string) {
+        super(`CouchDB did not store the write to ${path}`);
+        this.name = "WriteNotStoredError";
+    }
+}
 
 export interface VaultConfig {
     couchdbUrl: string;
@@ -73,7 +83,7 @@ export class Vault implements VaultBackend {
     // (`nfc-path-identity-v1`, the default for databases created by LiveSync
     // 1.0.49+). Detected in init(); the library rejects a mismatch.
     private pathNormalizationVersion: 0 | 1 = 0;
-    /** Per-document lock: makes an existence check and the write after it one step (see writeNoteUnlocked). */
+    /** Per-document lock: makes an existence check and the write after it one step, and orders this server's own retries (see updateNote). */
     private docLock = new KeyedLock();
 
     constructor(config: VaultConfig) {
@@ -404,41 +414,49 @@ export class Vault implements VaultBackend {
         return { content: entry.data.join(""), revision: entry._rev };
     }
 
-    async updateNote(path: string, apply: (content: string) => string, { expectedRevision, maxAttempts = 1, minRetryMs = 0 }: UpdateOptions = {}): Promise<UpdateResult> {
+    async updateNote(path: string, apply: (content: string) => string, options: UpdateOptions = {}): Promise<UpdateResult> {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
-        // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
-        const allowed = expectedRevision !== undefined ? 1 : Math.max(1, maxAttempts);
         // The lock orders this server's own writers, so they never spend attempts
         // on each other, and is held across retries so a writer that lost to
         // another instance keeps its turn here. CouchDB's revision check orders
         // everyone else.
-        return await this.docLock.run([id], async () => {
-            const started = performance.now();
-            let refusedBase: string | undefined;
-            for (let attempt = 1; ; attempt++) {
-                clearHandlers();
-                const entry = await this.manipulator.get(path as FilePathWithPrefix);
-                if (!entry || !("data" in entry) || !Array.isArray(entry.data) || !entry._rev) throw new NoteNotFoundError(path);
-                // The library answers false both for a 409 and for a write it could
-                // not store at all. After a 409 the note has moved on; if it is still
-                // at the refused base, the write failed for another reason.
-                if (refusedBase === entry._rev) throw new Error(`CouchDB did not store the write to ${path}`);
-                if (expectedRevision !== undefined && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
-                const content = apply(entry.data.join(""));
-                const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
-                if (revision) return { content, revision, attempts: attempt };
-                refusedBase = entry._rev;
-                if (expectedRevision !== undefined) {
-                    const now = await this.manipulator.get(path as FilePathWithPrefix, true);
-                    if (now && now._rev === expectedRevision) throw new Error(`CouchDB did not store the write to ${path}`);
-                    throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");
-                }
-                if (attempt >= allowed && (attempt >= allowed * 5 || performance.now() - started >= minRetryMs)) throw new UpdateRetriesExhaustedError(path, attempt);
-                if (debugLog) console.log(`[vault] revision conflict on attempt ${attempt}, retrying`);
-                if (RETRY_JITTER_MS > 0) await new Promise((r) => setTimeout(r, Math.random() * RETRY_JITTER_MS));
+        return await this.docLock.run([id], () => this.updateUnlocked(path, id, apply, options));
+    }
+
+    /**
+     * The retry loop of updateNote; the caller holds the document's lock.
+     * `readText: false` is a blind overwrite (write_note): only the revision is
+     * fetched, `apply` gets "", and since its result doesn't depend on the old
+     * text, retrying it is always safe.
+     */
+    private async updateUnlocked(path: string, id: DocumentID, apply: (content: string) => string, { expectedRevision, maxAttempts = 1, minRetryMs = 0 }: UpdateOptions, readText = true): Promise<UpdateResult> {
+        // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
+        const allowed = expectedRevision !== undefined ? 1 : Math.max(1, maxAttempts);
+        const started = performance.now();
+        let refusedBase: string | undefined;
+        for (let attempt = 1; ; attempt++) {
+            clearHandlers();
+            const entry = await this.manipulator.get(path as FilePathWithPrefix, !readText);
+            if (!entry || !entry._rev || (readText && (!("data" in entry) || !Array.isArray(entry.data)))) throw new NoteNotFoundError(path);
+            // The library answers false both for a 409 and for a write it could
+            // not store at all. After a 409 the note has moved on; if it is still
+            // at the refused base, the write failed for another reason.
+            if (refusedBase === entry._rev) throw new WriteNotStoredError(path);
+            if (expectedRevision !== undefined && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
+            const content = apply(readText ? (entry.data as string[]).join("") : "");
+            const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
+            if (revision) return { content, revision, attempts: attempt };
+            refusedBase = entry._rev;
+            if (expectedRevision !== undefined) {
+                const now = await this.manipulator.get(path as FilePathWithPrefix, true);
+                if (now && now._rev === expectedRevision) throw new WriteNotStoredError(path);
+                throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");
             }
-        });
+            if (attempt >= allowed && (attempt >= allowed * 5 || performance.now() - started >= minRetryMs)) throw new UpdateRetriesExhaustedError(path, attempt);
+            if (debugLog) console.log(`[vault] revision conflict on attempt ${attempt}, retrying`);
+            if (RETRY_JITTER_MS > 0) await new Promise((r) => setTimeout(r, Math.random() * RETRY_JITTER_MS));
+        }
     }
 
     /**
@@ -468,33 +486,42 @@ export class Vault implements VaultBackend {
     async writeNote(path: string, content: string, options: NoteWriteOptions = {}): Promise<boolean> {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
-        return await this.docLock.run([id], () => this.writeNoteUnlocked(path, content, options));
+        return await this.docLock.run([id], () => this.writeNoteUnlocked(path, id, content, options));
     }
 
     /**
-     * As with attachments, the library's put can't be made conditional, so the
-     * create/update checks rely on the caller holding the document's lock. That
-     * covers writes made by this server; a concurrent write from Obsidian is
-     * left to LiveSync's conflict handling.
+     * The create/update checks rely on the caller holding the document's lock.
+     * Replacing an existing note is a revision-checked put, retried on a 409
+     * (the new text doesn't depend on the old one), so a concurrent writer on
+     * another instance or in Obsidian can't leave a conflict revision with it.
+     * Creating a missing note is still the library's forced put: two instances
+     * creating the same new note at the same moment can still conflict.
      */
-    private async writeNoteUnlocked(path: string, content: string, { mode = "upsert" }: NoteWriteOptions): Promise<boolean> {
+    private async writeNoteUnlocked(path: string, id: DocumentID, content: string, { mode = "upsert", maxAttempts = OVERWRITE_MAX_ATTEMPTS, minRetryMs = 0 }: NoteWriteOptions): Promise<boolean> {
         // Clear cached PBKDF2 salt so we re-fetch from CouchDB before encrypting.
         // Prevents stale salt after Obsidian "Overwrite remote" rebuilds (issue #686).
         clearHandlers();
 
-        // Preserve ctime if note already exists
-        let ctime = Date.now();
         const existing = await this.manipulator.get(path as FilePathWithPrefix, true);
         if (existing && mode === "create") throw new NoteExistsError(path);
         if (!existing && mode === "update") throw new NoteNotFoundError(path);
-        if (existing && "ctime" in existing) {
-            ctime = existing.ctime;
+        if (existing) {
+            try {
+                await this.updateUnlocked(path, id, () => content, { maxAttempts, minRetryMs }, false);
+                return true;
+            } catch (err) {
+                if (err instanceof WriteNotStoredError) return false;
+                // Deleted while we retried: an upsert creates it, as it would have
+                // had it come after the delete; an update refuses.
+                if (!(err instanceof NoteNotFoundError) || mode === "update") throw err;
+            }
         }
 
         const blob = createTextBlob(content);
+        const now = Date.now();
         return await this.manipulator.put(path, blob, {
-            ctime,
-            mtime: Date.now(),
+            ctime: now,
+            mtime: now,
             size: new TextEncoder().encode(content).byteLength,
         });
     }
@@ -519,8 +546,8 @@ export class Vault implements VaultBackend {
             if (from === to) return true;
             // A case-only rename on a case-insensitive vault (LiveSync's default)
             // is one document: rewrite it under the new path and delete nothing.
-            if (fromId === toId) return await this.writeNoteUnlocked(to, content, { mode: "upsert" });
-            const wrote = await this.writeNoteUnlocked(to, content, { mode: "create" });
+            if (fromId === toId) return await this.writeNoteUnlocked(to, toId, content, { mode: "upsert" });
+            const wrote = await this.writeNoteUnlocked(to, toId, content, { mode: "create" });
             if (!wrote) return false;
             clearHandlers();
             return await this.manipulator.delete(from);

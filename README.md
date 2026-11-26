@@ -218,9 +218,10 @@ Several agents, or several server instances on one database, can edit the same n
 
 - `read_note` and `get_note_metadata` show the note's revision (`Revision: 12-3f9c…`, CouchDB's `_rev`).
 - `edit_note` applies its change to the text it read and writes only if the note is still at that revision. If another writer got there first, it reads the note again and re-applies the change: at least 10 rounds and for at least 3 seconds (at most 50 rounds); a `replace` checks `old_text` again each time, so two agents replacing the same text get one success and one `old_text not found`. If the note keeps changing all that time (several writers hammering one note through different instances), nothing is written and the answer says so: such an edit is refused, never silently lost.
+- `write_note` replacing an existing note also writes only on the revision it just read, and if another writer got in between it retries on the same budget as `edit_note` (always safe: the new text doesn't depend on the old one). The last write still wins, as before, but it no longer leaves a hidden conflict revision next to a concurrent edit. Creating a new note is not checked: two instances creating the same new note at the same moment can still leave one.
 - `write_note` and `edit_note` accept an optional `expected_revision`: the write only happens if the note is still at that revision; otherwise nothing is written and the answer names the current revision. `edit_note` with `expected_revision` does not retry.
 
-Local mode has no revisions: reads show none, and `expected_revision` is refused rather than ignored. `delete_note` and `move_note` do not check revisions yet. Edits made in Obsidian reach CouchDB through LiveSync replication, which has no revision check; an Obsidian edit racing an agent edit is still left to LiveSync's conflict handling.
+Local mode has no revisions: reads show none, and `expected_revision` is refused rather than ignored. `delete_note` and `move_note` do not check revisions yet (except a case-only rename on a case-insensitive vault, which rewrites the one note like `write_note`). Edits made in Obsidian reach CouchDB through LiveSync replication, which has no revision check; an Obsidian edit racing an agent edit is still left to LiveSync's conflict handling.
 
 ### Attachments (opt-in)
 
@@ -336,7 +337,7 @@ Set transport to **Streamable HTTP**, enter `http://localhost:8787/mcp`, and con
 
 - **Single vault per instance.** Each server connects to one vault. For multiple vaults, run multiple instances on different ports.
 - **Single machine on Fly.io.** Auth state is in-memory, so multiple machines break the OAuth flow. The setup script enforces this automatically.
-- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins. Agents editing through this server (one instance or several) don't overwrite each other in CouchDB mode; see [Concurrent edits](#concurrent-edits-couchdb-mode).
+- **No conflict resolution.** If an agent and Obsidian edit the same note simultaneously, last write wins. In CouchDB mode, concurrent `edit_note` calls through this server (one instance or several) don't overwrite each other, and `write_note` replacing an existing note doesn't leave a hidden conflict revision; creating a note, `delete_note` and `move_note` are not revision-checked. See [Concurrent edits](#concurrent-edits-couchdb-mode).
 - **Attachments are write-and-describe only.** With `ATTACHMENTS_ENABLED=true` agents can store, move and delete media files, but the server does not return attachment contents to the model.
 - **Deep links depend on the client.** Obsidian `obsidian://` deep links are included in every tool response. They work on Claude Mobile and in browsers, but some clients (Claude Desktop) may not render them as clickable links.
 - **Node 22+ required.**

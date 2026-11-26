@@ -24,6 +24,13 @@
  *   expected-revision
  *             a write_note with the revision read on one instance succeeds on the
  *             other; repeating it with that now-stale revision writes nothing.
+ *   edit-vs-write
+ *             CONCURRENCY_PAIRS (default 8) edit_note appends racing as many
+ *             plain write_note overwrites (no expected_revision) of one note,
+ *             across the instances, for CONCURRENCY_ROUNDS rounds (default 15)
+ *             on a fresh note each: no round may leave a conflict leaf, every
+ *             write must answer "Note saved", and the note must start with one
+ *             of the written bodies.
  *
  * The final note is read straight from CouchDB (not through the servers under
  * test), with its conflict leaves, so a loss hidden in a sibling revision
@@ -288,6 +295,36 @@ async function expectedRevision(clients: Client[]): Promise<void> {
         `fresh: ${JSON.stringify(first.split("\n")[0])}, stale: ${JSON.stringify(stale.split("\n")[0])}, body ${JSON.stringify(winner)}, ${conflicts.length} conflict leaves`);
 }
 
+async function editVsWrite(clients: Client[]): Promise<void> {
+    const rounds = Number(process.env.CONCURRENCY_ROUNDS ?? 15);
+    const pairs = Number(process.env.CONCURRENCY_PAIRS ?? 8);
+    let leaves = 0;
+    let roundsWithLeaves = 0;
+    const problems: string[] = [];
+    for (let r = 0; r < rounds; r++) {
+        const path = `Boards/edit-vs-write-${r}.md`;
+        await seed(clients[0], path, "seed\n");
+        const editors = await Promise.all(Array.from({ length: pairs }, (_, i) => new Client(clients[i % clients.length].port).connect()));
+        const writers = await Promise.all(Array.from({ length: pairs }, (_, i) => new Client(clients[(i + 1) % clients.length].port).connect()));
+        const bodies = Array.from({ length: pairs }, (_, i) => `written-r${r}-w${i}\n`);
+        const [edits, writes] = await Promise.all([
+            Promise.all(editors.map((e, i) => e.tool("edit_note", { path, operation: "append", content: `- edit-r${r}-e${i}` }))),
+            Promise.all(writers.map((w, i) => w.tool("write_note", { path, content: bodies[i] }))),
+        ]);
+        const { winner, conflicts } = await readFromCouch(path);
+        leaves += conflicts.length;
+        if (conflicts.length) roundsWithLeaves++;
+        const badWrites = writes.filter((a) => !a.startsWith("Note saved"));
+        const badEdits = edits.filter((a) => !a.startsWith("Note edited"));
+        if (badWrites.length) problems.push(`round ${r} writes: ${JSON.stringify([...new Set(badWrites.map((a) => a.split("\n")[0]))])}`);
+        if (badEdits.length) problems.push(`round ${r} edits: ${JSON.stringify([...new Set(badEdits.map((a) => a.split("\n")[0]))])}`);
+        if (!bodies.some((b) => winner.startsWith(b))) problems.push(`round ${r} body: ${JSON.stringify(winner.slice(0, 60))}`);
+    }
+    check("edit-vs-write", leaves === 0 && problems.length === 0,
+        `${rounds} rounds of ${pairs} edit_note vs ${pairs} write_note: ${leaves} conflict leaves in ${roundsWithLeaves} rounds` +
+        (problems.length ? `; ${problems.join("; ")}` : ""));
+}
+
 /** Server-side retry rounds, from the debug log line the CouchDB backend writes for each. */
 function retriesLogged(servers: Server[]): number {
     return servers.reduce((n, s) => n + (s.logs.match(/revision conflict on attempt/g)?.length ?? 0), 0);
@@ -315,6 +352,7 @@ try {
         await disjoint(clients);
         await sameLine(clients);
         await expectedRevision(clients);
+        await editVsWrite(clients);
     }
 } finally {
     if (process.env.CONCURRENCY_SERVER_LOGS) {

@@ -305,3 +305,60 @@ describe("Vault.updateNote retry loop (stubbed manipulator)", () => {
         assert.ok(!textOf("a.md")!.includes("mine"));
     });
 });
+
+describe("Vault.writeNote overwrites through the revision check (stubbed manipulator)", () => {
+    it("overwrites an existing note with a revision-checked put, never the forced one", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "old", 3);
+        assert.equal(await vault.writeNote("a.md", "new"), true);
+        assert.equal(textOf("a.md"), "new");
+        assert.deepEqual(calls.filter((c) => c.startsWith("put")), ["put@rev a.md"]);
+    });
+
+    it("another writer in between: retried on the new revision, and the written text wins", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "old");
+        beforePut.push("other", "other");
+        assert.equal(await vault.writeNote("a.md", "new", { mode: "update" }), true);
+        assert.equal(textOf("a.md"), "new");
+        assert.deepEqual(calls.filter((c) => c.startsWith("put")), ["put@rev a.md", "put@rev a.md", "put@rev a.md"]);
+    });
+
+    it("a note that keeps changing is refused after the budget, and nothing of it is written", async () => {
+        const { vault, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "old");
+        for (let i = 0; i < 50; i++) beforePut.push("other");
+        await assert.rejects(() => vault.writeNote("a.md", "new", { maxAttempts: 2, minRetryMs: 0 }),
+            (e: any) => e instanceof UpdateRetriesExhaustedError && e.attempts === 2);
+        assert.equal(textOf("a.md"), "old+other+other");
+    });
+
+    it("CouchDB failing without a 409 answers false, as before, without retrying", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "old");
+        beforePut.push("fail", "fail");
+        assert.equal(await vault.writeNote("a.md", "new", { maxAttempts: 10 }), false);
+        assert.equal(textOf("a.md"), "old");
+        assert.equal(calls.filter((c) => c.startsWith("put")).length, 1);
+    });
+
+    it("deleted while retrying: upsert creates it, update refuses", async () => {
+        const up = stubVault();
+        up.seed("a.md", "old");
+        up.beforePut.push("delete");
+        assert.equal(await up.vault.writeNote("a.md", "new", { mode: "upsert" }), true);
+        assert.equal(up.textOf("a.md"), "new");
+        const upd = stubVault();
+        upd.seed("a.md", "old");
+        upd.beforePut.push("delete");
+        await assert.rejects(() => upd.vault.writeNote("a.md", "new", { mode: "update" }), NoteNotFoundError);
+        assert.equal(upd.docs.size, 0);
+    });
+
+    it("creating an absent note is unchanged: the plain put, no revision", async () => {
+        const { vault, calls } = stubVault();
+        assert.equal(await vault.writeNote("n.md", "fresh"), true);
+        assert.equal(await vault.writeNote("m.md", "fresh", { mode: "create" }), true);
+        assert.deepEqual(calls.filter((c) => c.startsWith("put")), ["put n.md", "put m.md"]);
+    });
+});

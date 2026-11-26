@@ -76,6 +76,12 @@ export interface NoteWriteOptions {
      * each checked in the same step as the write.
      */
     mode?: "upsert" | "create" | "update";
+    /**
+     * CouchDB mode, replacing an existing note: rounds of the revision-checked
+     * put, with the same meaning as in UpdateOptions. Ignored in local mode.
+     */
+    maxAttempts?: number;
+    minRetryMs?: number;
 }
 
 /** A create-only write or a move found a note already at the path. */

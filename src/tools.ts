@@ -178,12 +178,17 @@ export function registerTools(
             const mode = canCreate && canUpdate ? "upsert" : canCreate ? "create" : "update";
             let ok: boolean;
             try {
-                ok = await vault.writeNote(path, content, { mode });
+                // CouchDB mode replaces an existing note with a revision-checked put,
+                // retried within edit_note's budget.
+                ok = await vault.writeNote(path, content, { mode, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
             } catch (err) {
                 if (err instanceof NoteExistsError) {
                     return `${checkWrite(path, "update", writeFolders)} The note already exists; choose a new path.`;
                 }
                 if (err instanceof NoteNotFoundError) return checkWrite(path, "create", writeFolders)!;
+                if (err instanceof UpdateRetriesExhaustedError) {
+                    return `Failed to write note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
+                }
                 throw err;
             }
             if (!ok) {

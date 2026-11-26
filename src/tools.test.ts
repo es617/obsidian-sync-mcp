@@ -6,7 +6,7 @@ import { join } from "path";
 import { LocalVault } from "./vault-local.js";
 import { SearchIndex } from "./search.js";
 import { parseWriteFolders } from "./write-scope.js";
-import { registerTools, READ_NOTE_MAX_RESULT_SIZE_CHARS, SEARCH_MAX_TERMS, SEARCH_MAX_TERM_LENGTH, cleanSearchTerms, EDIT_MAX_ATTEMPTS, NO_REVISIONS_MESSAGE } from "./tools.js";
+import { registerTools, READ_NOTE_MAX_RESULT_SIZE_CHARS, SEARCH_MAX_TERMS, SEARCH_MAX_TERM_LENGTH, cleanSearchTerms, EDIT_MAX_ATTEMPTS, EDIT_MIN_RETRY_MS, NO_REVISIONS_MESSAGE } from "./tools.js";
 import { RevisionMismatchError, UpdateRetriesExhaustedError } from "./vault-backend.js";
 
 function captureTools(): { name: string; _meta?: Record<string, unknown> }[] {
@@ -540,6 +540,15 @@ describe("revisions (expected_revision)", () => {
             assert.doesNotThrow(() => tool.parameters.parse({ path: "a.md", content: "v2", expected_revision: "12-3f9c0a" }));
         }
         assert.equal(vault.content, "v1");
+    });
+
+    it("write_note passes edit_note's retry budget down and reports exhaustion without claiming a save", async () => {
+        let options: any;
+        const call = setup({
+            writeNote: async (_p: string, _c: string, o: any) => { options = o; throw new UpdateRetriesExhaustedError("a.md", 12); },
+        });
+        assert.equal(await call("write_note", { path: "a.md", content: "v2" }), "Failed to write note: a.md kept changing during 12 attempts. Nothing was written; try again.");
+        assert.deepEqual(options, { mode: "upsert", maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
     });
 
     it("write_note with expected_revision needs update permission", async () => {
