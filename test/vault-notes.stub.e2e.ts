@@ -230,4 +230,78 @@ describe("Vault.updateNote retry loop (stubbed manipulator)", () => {
         assert.equal(textOf("a.md"), "v1");
         assert.equal(puts(calls), 0, calls.join(", "));
     });
+
+    it("re-applies the edit to the new text after each 409 and reports the attempts", async () => {
+        const { vault, seed, beforePut, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("other", "other");
+        const seen: string[] = [];
+        const result = await vault.updateNote("a.md", (c) => { seen.push(c); return c + "+mine"; }, { maxAttempts: 10 });
+        assert.deepEqual(seen, ["base", "base+other", "base+other+other"]);
+        assert.equal(result.attempts, 3);
+        assert.equal(result.content, "base+other+other+mine");
+        assert.equal(textOf("a.md"), "base+other+other+mine");
+        assert.equal(result.revision, revOf("a.md"));
+    });
+
+    it("pinned: a 409 is one attempt and names the revision that won", async () => {
+        const { vault, seed, beforePut, revOf, textOf } = stubVault();
+        seed("a.md", "base");
+        const pinned = revOf("a.md")!;
+        beforePut.push("other");
+        let applied = 0;
+        await assert.rejects(() => vault.updateNote("a.md", (c) => { applied++; return c + "+mine"; }, { expectedRevision: pinned, maxAttempts: 10 }),
+            (e: any) => e instanceof RevisionMismatchError && e.expected === pinned && e.current === revOf("a.md") && e.current !== pinned);
+        assert.equal(applied, 1);
+        assert.equal(textOf("a.md"), "base+other");
+    });
+
+    it("pinned: a note deleted under the write is a mismatch against (deleted)", async () => {
+        const { vault, seed, beforePut, revOf, docs } = stubVault();
+        seed("a.md", "base");
+        const pinned = revOf("a.md")!;
+        beforePut.push("delete");
+        await assert.rejects(() => vault.updateNote("a.md", (c) => c + "+mine", { expectedRevision: pinned }),
+            (e: any) => e instanceof RevisionMismatchError && e.current === "(deleted)");
+        assert.equal(docs.size, 0);
+    });
+
+    it("pinned: false while the note is still at the pin is a failed write, not a mismatch", async () => {
+        const { vault, seed, beforePut, revOf, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("fail");
+        await assert.rejects(() => vault.updateNote("a.md", (c) => c + "+mine", { expectedRevision: revOf("a.md")! }),
+            (e: any) => !(e instanceof RevisionMismatchError) && /CouchDB did not store the write to a\.md/.test(e.message));
+        assert.equal(textOf("a.md"), "base");
+    });
+
+    it("unpinned: false with the note unchanged stops at once instead of retrying", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("fail", "fail", "fail");
+        await assert.rejects(() => vault.updateNote("a.md", (c) => c + "+mine", { maxAttempts: 10, minRetryMs: 60_000 }),
+            (e: any) => !(e instanceof UpdateRetriesExhaustedError) && /CouchDB did not store the write to a\.md/.test(e.message));
+        assert.equal(puts(calls), 1, calls.join(", "));
+        assert.equal(textOf("a.md"), "base");
+    });
+
+    it("gives up after exactly maxAttempts when minRetryMs has passed", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        for (let i = 0; i < 50; i++) beforePut.push("other");
+        await assert.rejects(() => vault.updateNote("a.md", (c) => c + "+mine", { maxAttempts: 3, minRetryMs: 0 }),
+            (e: any) => e instanceof UpdateRetriesExhaustedError && e.attempts === 3);
+        assert.equal(puts(calls), 3);
+        assert.ok(!textOf("a.md")!.includes("mine"));
+    });
+
+    it("keeps retrying past maxAttempts until minRetryMs, but never more than 5 x maxAttempts", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        for (let i = 0; i < 50; i++) beforePut.push("other");
+        await assert.rejects(() => vault.updateNote("a.md", (c) => c + "+mine", { maxAttempts: 3, minRetryMs: 60_000 }),
+            (e: any) => e instanceof UpdateRetriesExhaustedError && e.attempts === 15);
+        assert.equal(puts(calls), 15);
+        assert.ok(!textOf("a.md")!.includes("mine"));
+    });
 });
