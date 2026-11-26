@@ -74,8 +74,13 @@ function describeMismatch(err: RevisionMismatchError): string {
     return `Revision mismatch: ${err.path} is at revision ${err.current}, not ${err.expected}. Nothing was written; read the note again and reapply your change.`;
 }
 
+// Shaped like a CouchDB revision (`<generation>-<hex>`): the value is echoed in
+// the mismatch answer, so an empty, huge or multi-line value is refused here.
 const expectedRevisionParam = z
     .string()
+    .min(1)
+    .max(100)
+    .regex(/^[1-9]\d*-[0-9a-f]+$/, "expected_revision must be a revision from read_note or get_note_metadata, like 12-3f9c...")
     .optional()
     .describe("Optional, CouchDB mode: the revision from read_note or get_note_metadata. The write only happens if the note is still at that revision; otherwise nothing is written and the current revision is returned.");
 

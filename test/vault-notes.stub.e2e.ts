@@ -13,13 +13,16 @@
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
-import { NoteExistsError, NoteNotFoundError } from "../src/vault-backend.js";
+import { NoteExistsError, NoteNotFoundError, RevisionMismatchError, UpdateRetriesExhaustedError } from "../src/vault-backend.js";
 
 // tsup strips the "node:" prefix from imports, and node:test only exists under
 // that name, so load it at run time instead.
 const { describe, it } = createRequire(import.meta.url)("node:test") as typeof import("node:test");
 
-type Doc = { path: string; data: string[]; ctime: number; mtime: number; size: number };
+type Doc = { path: string; data: string[]; ctime: number; mtime: number; size: number; _rev: string };
+
+/** What happens just before a revision-checked put lands: another writer gets in, the note is deleted, or CouchDB fails without a 409. */
+type BeforePut = "other" | "delete" | "fail";
 
 /**
  * Enough of DirectFileManipulator for the note methods. Ids are lowercased like
@@ -29,8 +32,12 @@ type Doc = { path: string; data: string[]; ctime: number; mtime: number; size: n
 function stubVault({ caseSensitive = false } = {}) {
     const docs = new Map<string, Doc>();
     const calls: string[] = [];
+    /** Consumed one per revision-checked put, in order. */
+    const beforePut: BeforePut[] = [];
     const tick = () => new Promise((r) => setTimeout(r, 1));
     const id = (p: string) => (caseSensitive ? p : p.toLowerCase());
+    let generation = 0;
+    const nextRev = (prev?: string) => `${(prev ? Number(prev.split("-")[0]) : 0) + 1}-${(++generation).toString(16).padStart(8, "0")}`;
     const manipulator = {
         path2id: async (p: string) => id(p),
         get: async (p: string, metaOnly = false) => {
@@ -43,7 +50,7 @@ function stubVault({ caseSensitive = false } = {}) {
             calls.push(`put ${p}`);
             const text = await blob.text();
             await tick();
-            docs.set(id(p), { path: p, data: [text], ...info });
+            docs.set(id(p), { path: p, data: [text], ...info, _rev: nextRev(docs.get(id(p))?._rev) });
             return true;
         },
         delete: async (p: string) => {
@@ -51,11 +58,31 @@ function stubVault({ caseSensitive = false } = {}) {
             await tick();
             return docs.delete(id(p));
         },
+        liveSyncLocalDB: {
+            // Like CouchDB: stored only if the note is still at baseRevision, otherwise false (a 409).
+            putDBEntryWithLiveBaseRevision: async (doc: { _id: string; path: string; data: Blob; ctime: number; mtime: number; size: number }, baseRevision: string) => {
+                calls.push(`put@rev ${doc.path}`);
+                const text = await doc.data.text();
+                await tick();
+                const event = beforePut.shift();
+                const current = docs.get(doc._id);
+                if (event === "other" && current) docs.set(doc._id, { ...current, data: [current.data.join("") + "+other"], _rev: nextRev(current._rev) });
+                if (event === "delete") docs.delete(doc._id);
+                if (event === "fail") return false;
+                const now = docs.get(doc._id);
+                if (!now || now._rev !== baseRevision) return false;
+                const rev = nextRev(now._rev);
+                docs.set(doc._id, { path: doc.path, data: [text], ctime: doc.ctime, mtime: doc.mtime, size: doc.size, _rev: rev });
+                return { ok: true, id: doc._id, rev };
+            },
+        },
     };
     const vault = new Vault({ couchdbUrl: "http://stub", couchdbUser: "u", couchdbPassword: "p", database: "stub" });
     (vault as any).manipulator = manipulator;
-    const seed = (p: string, text: string, ctime = 1) => docs.set(id(p), { path: p, data: [text], ctime, mtime: ctime, size: text.length });
-    return { vault, docs, calls, seed };
+    const seed = (p: string, text: string, ctime = 1) => docs.set(id(p), { path: p, data: [text], ctime, mtime: ctime, size: text.length, _rev: nextRev() });
+    const revOf = (p: string) => docs.get(id(p))?._rev;
+    const textOf = (p: string) => docs.get(id(p))?.data.join("");
+    return { vault, docs, calls, seed, beforePut, revOf, textOf };
 }
 
 describe("Vault.writeNote modes (stubbed manipulator)", () => {
@@ -189,5 +216,18 @@ describe("Vault.moveNote never replaces (stubbed manipulator)", () => {
         assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
         const t = docs.get("t.md")?.data.join("");
         assert.equal(t, results[0].status === "fulfilled" ? "mover" : "creator");
+    });
+});
+
+describe("Vault.updateNote retry loop (stubbed manipulator)", () => {
+    const puts = (calls: string[]) => calls.filter((c) => c.startsWith("put")).length;
+
+    it("an empty expected_revision is a mismatch, not \"no pin\": nothing is written", async () => {
+        const { vault, calls, seed, revOf, textOf } = stubVault();
+        seed("a.md", "v1");
+        await assert.rejects(() => vault.updateNote("a.md", () => "overwritten", { expectedRevision: "", maxAttempts: 10 }),
+            (e: any) => e instanceof RevisionMismatchError && e.expected === "" && e.current === revOf("a.md"));
+        assert.equal(textOf("a.md"), "v1");
+        assert.equal(puts(calls), 0, calls.join(", "));
     });
 });

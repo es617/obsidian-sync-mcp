@@ -408,7 +408,7 @@ export class Vault implements VaultBackend {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
         // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
-        const allowed = expectedRevision ? 1 : Math.max(1, maxAttempts);
+        const allowed = expectedRevision !== undefined ? 1 : Math.max(1, maxAttempts);
         // The lock orders this server's own writers, so they never spend attempts
         // on each other, and is held across retries so a writer that lost to
         // another instance keeps its turn here. CouchDB's revision check orders
@@ -424,12 +424,12 @@ export class Vault implements VaultBackend {
                 // not store at all. After a 409 the note has moved on; if it is still
                 // at the refused base, the write failed for another reason.
                 if (refusedBase === entry._rev) throw new Error(`CouchDB did not store the write to ${path}`);
-                if (expectedRevision && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
+                if (expectedRevision !== undefined && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
                 const content = apply(entry.data.join(""));
                 const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
                 if (revision) return { content, revision, attempts: attempt };
                 refusedBase = entry._rev;
-                if (expectedRevision) {
+                if (expectedRevision !== undefined) {
                     const now = await this.manipulator.get(path as FilePathWithPrefix, true);
                     if (now && now._rev === expectedRevision) throw new Error(`CouchDB did not store the write to ${path}`);
                     throw new RevisionMismatchError(path, expectedRevision, (now && now._rev) || "(deleted)");

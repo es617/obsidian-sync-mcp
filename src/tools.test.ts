@@ -447,18 +447,18 @@ describe("revisions (expected_revision)", () => {
             get content() { return content; },
             interleave,
             readNote: async () => content,
-            readNoteRevision: async () => ({ content, revision: `${rev}-x` }),
-            getMetadata: async () => ({ path: "a.md", size: content.length, ctime: 0, mtime: 0, frontmatter: {}, tags: [], links: [], revision: `${rev}-x` }),
+            readNoteRevision: async () => ({ content, revision: `${rev}-a` }),
+            getMetadata: async () => ({ path: "a.md", size: content.length, ctime: 0, mtime: 0, frontmatter: {}, tags: [], links: [], revision: `${rev}-a` }),
             updateNote: async (_p: string, apply: (c: string) => string, o: any = {}) => {
-                const allowed = o.expectedRevision ? 1 : (o.maxAttempts ?? 1);
+                const allowed = o.expectedRevision !== undefined ? 1 : (o.maxAttempts ?? 1);
                 for (let attempt = 1; attempt <= allowed; attempt++) {
-                    const base = `${rev}-x`;
-                    if (o.expectedRevision && o.expectedRevision !== base) throw new RevisionMismatchError("a.md", o.expectedRevision, base);
+                    const base = `${rev}-a`;
+                    if (o.expectedRevision !== undefined && o.expectedRevision !== base) throw new RevisionMismatchError("a.md", o.expectedRevision, base);
                     const next = apply(content);
                     const other = interleave.shift();
                     if (other) { content = other(content); rev++; }
-                    if (`${rev}-x` === base) { content = next; rev++; return { content, revision: `${rev}-x`, attempts: attempt }; }
-                    if (o.expectedRevision) throw new RevisionMismatchError("a.md", o.expectedRevision, `${rev}-x`);
+                    if (`${rev}-a` === base) { content = next; rev++; return { content, revision: `${rev}-a`, attempts: attempt }; }
+                    if (o.expectedRevision !== undefined) throw new RevisionMismatchError("a.md", o.expectedRevision, `${rev}-a`);
                 }
                 throw new UpdateRetriesExhaustedError("a.md", allowed);
             },
@@ -467,8 +467,8 @@ describe("revisions (expected_revision)", () => {
 
     it("read_note and get_note_metadata show the revision", async () => {
         const call = setup(revisedVault("hello"));
-        assert.match(await call("read_note", { path: "a.md" }), /^\[Open in Obsidian\]\(.*\)\nRevision: 1-x\n\n---\n\nhello$/);
-        assert.match(await call("get_note_metadata", { path: "a.md" }), /\nRevision: 1-x\n/);
+        assert.match(await call("read_note", { path: "a.md" }), /^\[Open in Obsidian\]\(.*\)\nRevision: 1-a\n\n---\n\nhello$/);
+        assert.match(await call("get_note_metadata", { path: "a.md" }), /\nRevision: 1-a\n/);
     });
 
     it("edit_note re-applies its edit when another writer got in first", async () => {
@@ -476,7 +476,7 @@ describe("revisions (expected_revision)", () => {
         vault.interleave.push((c) => c.replace("- [ ] two", "- [x] two"));
         const call = setup(vault);
         const answer = await call("edit_note", { path: "a.md", operation: "replace", old_text: "- [ ] one", content: "- [x] one" });
-        assert.match(answer, /^Note edited \(replace\): a\.md\nRevision: 3-x\n/);
+        assert.match(answer, /^Note edited \(replace\): a\.md\nRevision: 3-a\n/);
         assert.equal(vault.content, "- [x] one\n- [x] two\n");
     });
 
@@ -500,11 +500,11 @@ describe("revisions (expected_revision)", () => {
     it("a stale expected_revision writes nothing and names the current revision", async () => {
         const vault = revisedVault("v1");
         const call = setup(vault);
-        assert.match(await call("write_note", { path: "a.md", content: "v2", expected_revision: "1-x" }), /^Note saved: a\.md\nRevision: 2-x\n/);
-        assert.equal(await call("write_note", { path: "a.md", content: "v3", expected_revision: "1-x" }),
-            "Revision mismatch: a.md is at revision 2-x, not 1-x. Nothing was written; read the note again and reapply your change.");
-        assert.equal(await call("edit_note", { path: "a.md", content: "v4", expected_revision: "1-x" }),
-            "Revision mismatch: a.md is at revision 2-x, not 1-x. Nothing was written; read the note again and reapply your change.");
+        assert.match(await call("write_note", { path: "a.md", content: "v2", expected_revision: "1-a" }), /^Note saved: a\.md\nRevision: 2-a\n/);
+        assert.equal(await call("write_note", { path: "a.md", content: "v3", expected_revision: "1-a" }),
+            "Revision mismatch: a.md is at revision 2-a, not 1-a. Nothing was written; read the note again and reapply your change.");
+        assert.equal(await call("edit_note", { path: "a.md", content: "v4", expected_revision: "1-a" }),
+            "Revision mismatch: a.md is at revision 2-a, not 1-a. Nothing was written; read the note again and reapply your change.");
         assert.equal(vault.content, "v2");
     });
 
@@ -515,8 +515,8 @@ describe("revisions (expected_revision)", () => {
             await vault.writeNote("a.md", "v1");
             const call = setup(vault);
             assert.ok(!(await call("read_note", { path: "a.md" })).includes("Revision:"));
-            assert.equal(await call("write_note", { path: "a.md", content: "v2", expected_revision: "1-x" }), NO_REVISIONS_MESSAGE);
-            assert.equal(await call("edit_note", { path: "a.md", content: "v3", expected_revision: "1-x" }), NO_REVISIONS_MESSAGE);
+            assert.equal(await call("write_note", { path: "a.md", content: "v2", expected_revision: "1-a" }), NO_REVISIONS_MESSAGE);
+            assert.equal(await call("edit_note", { path: "a.md", content: "v3", expected_revision: "1-a" }), NO_REVISIONS_MESSAGE);
             assert.equal(await vault.readNote("a.md"), "v1");
             // Without expected_revision, local mode works as before.
             assert.match(await call("edit_note", { path: "a.md", content: "v4" }), /^Note edited \(append\): a\.md\n\[Open/);
@@ -525,10 +525,27 @@ describe("revisions (expected_revision)", () => {
         }
     });
 
+    it("an empty, over-long or multi-line expected_revision fails the schema and is never echoed", async () => {
+        const tools: any[] = [];
+        const vault = revisedVault("v1");
+        registerTools({ addTool: (t: any) => tools.push(t) } as any, vault as any, new SearchIndex(), "vault");
+        const bad = ["", "1-" + "a".repeat(200_000), "1-a\nRevision: 9-b", "1-x", "0-a", "a-1"];
+        for (const name of ["write_note", "edit_note"]) {
+            const tool = tools.find((t) => t.name === name);
+            for (const expected_revision of bad) {
+                let message = "";
+                assert.throws(() => tool.parameters.parse({ path: "a.md", content: "v2", expected_revision }), (e: any) => { message = String(e?.message ?? e); return true; }, `${name} accepted ${JSON.stringify(expected_revision.slice(0, 20))}`);
+                if (expected_revision.length > 3) assert.ok(!message.includes(expected_revision), `${name} echoed the value`);
+            }
+            assert.doesNotThrow(() => tool.parameters.parse({ path: "a.md", content: "v2", expected_revision: "12-3f9c0a" }));
+        }
+        assert.equal(vault.content, "v1");
+    });
+
     it("write_note with expected_revision needs update permission", async () => {
         const tools: any[] = [];
         registerTools({ addTool: (t: any) => tools.push(t) } as any, revisedVault("v1") as any, new SearchIndex(), "vault", false, parseWriteFolders("Raw:create"));
         const tool = tools.find((t) => t.name === "write_note");
-        assert.match(await tool.execute(tool.parameters.parse({ path: "Raw/a.md", content: "v2", expected_revision: "1-x" }), {}), /allows only create/);
+        assert.match(await tool.execute(tool.parameters.parse({ path: "Raw/a.md", content: "v2", expected_revision: "1-a" }), {}), /allows only create/);
     });
 });
