@@ -9,6 +9,7 @@
 
 ### Changed
 - `read_note`, `get_note_metadata` and `edit_note` answers (CouchDB mode), and `write_note` answers to a call with `expected_revision`, now carry a `Revision: <rev>` line. Clients that parse these answers must accept the extra line.
+- A plain `write_note` replacing a note that keeps changing during its whole retry budget now answers "Failed to write note: ... kept changing during N attempts. Nothing was written; try again." instead of always overwriting. An `expected_revision` that is empty or not shaped like a revision (`12-3f9c...`) fails parameter validation.
 
 ### Tests
 - `npm run test:concurrency`: concurrent `edit_note` calls through two server instances on one throwaway CouchDB database, read back straight from CouchDB with conflict revisions, including `edit_note` racing plain `write_note` calls; `--load 4x50` measures lost edits and latency.
