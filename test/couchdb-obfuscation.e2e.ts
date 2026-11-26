@@ -608,12 +608,20 @@ step("Revisions on an encrypted, obfuscated vault: read with revision, condition
     assert.equal(u2.content, "one two three");
     assert.equal(await b.readNote("Notes/rev.md"), "one two three");
     await assert.rejects(a.updateNote("Notes/missing.md", (c) => c), NoteNotFoundError);
+    // writeNote replacing an existing note goes through the revision check, not
+    // the library's forced put: with that put disabled it still lands, on top.
+    const forced = (b as any).manipulator.put;
+    (b as any).manipulator.put = async () => { throw new Error("forced put used for an overwrite"); };
+    assert.equal(await b.writeNote("Notes/rev.md", "replaced"), true);
+    (b as any).manipulator.put = forced;
+    const r4 = await a.readNoteRevision("Notes/rev.md");
+    assert.ok(r4 && r4.content === "replaced" && /^4-/.test(r4.revision), `overwrite at the next revision: ${JSON.stringify(r4)}`);
     // The stored document is still encrypted and path-obfuscated.
     const ids = await rawAllDocIds("revisionvault");
     assert.ok(ids.some((id) => id.startsWith("f:")) && !ids.some((id) => id.includes("rev.md")), "obfuscated ids");
     await a.close();
     await b.close();
-    console.log("revision read, refused stale update and retried update OK on an E2EE vault");
+    console.log("revision read, refused stale update, retried update and checked overwrite OK on an E2EE vault");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");
