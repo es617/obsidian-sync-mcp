@@ -1,19 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 ### Features
-- **Concurrent edits no longer lose changes (CouchDB mode, #2).** `edit_note` writes only if the note is still at the revision it read, and otherwise re-reads and re-applies the edit, so agents editing the same note at once, through one instance or several on the same database, no longer overwrite each other. The retries are bounded: at least 10 rounds, then it stops at 50 rounds or once 3 seconds have passed, whichever comes first; on a fast database the 50-round cap usually ends it in 1-2 seconds. Time spent waiting behind other edits of the same note on the same instance is not counted, so a call can take longer than that. An edit that still can't get through is refused with a message, never dropped. Before, every call answered "Note edited" while most of the edits were silently overwritten or left as hidden conflict revisions.
-- `write_note` replacing an existing note goes through the same revision check and retries on the same budget (its text doesn't depend on the old one, so a retry is always safe); the last write still wins, but it no longer leaves a hidden conflict revision next to a concurrent edit. Creating a note, `delete_note` and `move_note` are not revision-checked.
-- `write_note` and `edit_note` take an optional `expected_revision` that refuses the write when the note has changed since it was read; an empty or malformed value is refused. Local mode is unchanged and refuses `expected_revision`.
+- **Concurrent edits no longer get lost (CouchDB mode, #2).** `edit_note` writes only if the note hasn't changed since it read it; otherwise it re-reads and re-applies the edit, with bounded retries. This holds across several server instances on one database. An edit that can't get through is refused, never silently dropped. `write_note` overwrites use the same check, so they no longer leave hidden conflict revisions. Creating a note, `delete_note` and `move_note` are not checked yet. Thanks @Nerodacles.
+- `write_note` and `edit_note` take an optional `expected_revision`: the write only happens if the note is still at that revision.
 
 ### Changed
-- `read_note`, `get_note_metadata` and `edit_note` answers (CouchDB mode), and `write_note` answers to a call with `expected_revision`, now carry a `Revision: <rev>` line. Clients that parse these answers must accept the extra line.
-- A plain `write_note` replacing a note that keeps changing during its whole retry budget now answers "Failed to write note: ... kept changing during N attempts. Nothing was written; try again." instead of always overwriting. An `expected_revision` that is empty or not shaped like a revision (`12-3f9c...`) fails parameter validation.
-
-### Tests
-- `npm run test:concurrency`: concurrent `edit_note` calls through two server instances on one throwaway CouchDB database, read back straight from CouchDB with conflict revisions, including `edit_note` racing plain `write_note` calls; `--load 4x50` measures lost edits and latency.
-- `npm run test:vault-stub` now drives the real retry loop in `Vault.updateNote` and the revision-checked overwrite of `writeNote`.
+- `read_note`, `get_note_metadata` and write answers now include a `Revision: <rev>` line (CouchDB mode). Clients that parse these answers must accept it.
+- A `write_note` on a note that keeps changing during the whole retry budget is now refused instead of overwriting.
 
 ## 0.13.0
 
