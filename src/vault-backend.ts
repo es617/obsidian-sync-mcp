@@ -5,6 +5,48 @@ export interface NoteInfo extends NoteMetadata {
     size: number;
     ctime: number;
     mtime: number;
+    /** CouchDB mode: the note's current revision (`_rev`), opaque. Undefined in local mode. */
+    revision?: string;
+}
+
+/** A note read together with the revision it was read at. */
+export interface RevisedNote {
+    content: string;
+    revision: string;
+}
+
+export interface UpdateOptions {
+    /** Apply only to this revision; a mismatch throws RevisionMismatchError instead of retrying. */
+    expectedRevision?: string;
+    /** Re-reads allowed when another writer changes the note between the read and the write. */
+    maxAttempts?: number;
+    /**
+     * Keep retrying past maxAttempts until this long has passed since the first
+     * read (up to 5 x maxAttempts rounds), so a writer outpaced by a burst on
+     * another instance waits the burst out instead of giving up.
+     */
+    minRetryMs?: number;
+}
+
+export interface UpdateResult extends RevisedNote {
+    /** How many read-apply-write rounds it took (1 when nobody else wrote meanwhile). */
+    attempts: number;
+}
+
+/** A conditional write found the note at another revision than the one it was based on. */
+export class RevisionMismatchError extends Error {
+    constructor(readonly path: string, readonly expected: string, readonly current: string) {
+        super(`Note ${path} is at revision ${current}, not ${expected}`);
+        this.name = "RevisionMismatchError";
+    }
+}
+
+/** An update kept losing to other writers and gave up without writing. */
+export class UpdateRetriesExhaustedError extends Error {
+    constructor(readonly path: string, readonly attempts: number) {
+        super(`Note ${path} changed during each of ${attempts} attempts; nothing was written`);
+        this.name = "UpdateRetriesExhaustedError";
+    }
 }
 
 export interface NoteListing {
@@ -34,6 +76,12 @@ export interface NoteWriteOptions {
      * each checked in the same step as the write.
      */
     mode?: "upsert" | "create" | "update";
+    /**
+     * CouchDB mode, replacing an existing note: rounds of the revision-checked
+     * put, with the same meaning as in UpdateOptions. Ignored in local mode.
+     */
+    maxAttempts?: number;
+    minRetryMs?: number;
 }
 
 /** A create-only write or a move found a note already at the path. */
@@ -90,6 +138,19 @@ export interface VaultBackend {
     readNote(path: string): Promise<string | null>;
     writeNote(path: string, content: string, options?: NoteWriteOptions): Promise<boolean>;
     deleteNote(path: string): Promise<boolean>;
+    /**
+     * CouchDB mode only: the note and the revision it was read at, from one
+     * fetch. Absent in local mode, which has no revisions.
+     */
+    readNoteRevision?(path: string): Promise<RevisedNote | null>;
+    /**
+     * CouchDB mode only: read the note, pass its text to `apply`, and write the
+     * result only if the note is still at the revision that was read. When
+     * another writer got there first, read again and re-apply, up to
+     * `maxAttempts` rounds; `apply` may throw to refuse (its error propagates
+     * and nothing is written). Throws NoteNotFoundError when the note is absent.
+     */
+    updateNote?(path: string, apply: (content: string) => string, options?: UpdateOptions): Promise<UpdateResult>;
     /** Never replaces a note at `to`: throws NoteExistsError instead, checked in the same step as the move. */
     moveNote(from: string, to: string): Promise<boolean>;
     getMetadata(path: string): Promise<NoteInfo | null>;

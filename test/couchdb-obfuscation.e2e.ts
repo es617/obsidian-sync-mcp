@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { Vault } from "../src/vault.js";
-import { AttachmentExistsError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError } from "../src/vault-backend.js";
+import { AttachmentExistsError, AttachmentTooLargeError, NoteExistsError, NoteNotFoundError, RevisionMismatchError } from "../src/vault-backend.js";
 import { computeKeyedId } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
 import { readContent, createTextBlob } from "../lib/livesync-commonlib/src/common/utils.ts";
 import { DirectFileManipulator } from "../lib/livesync-commonlib/src/API/DirectFileManipulator.ts";
@@ -53,7 +53,7 @@ async function rawAllDocIds(db: string): Promise<string[]> {
 }
 
 // Reset databases so the harness is idempotent across runs.
-for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault", "notemodevault"]) {
+for (const db of ["obfvault", "plainvault", "keyedvault", "casevault", "watchervault", "attachvault", "movevault", "nfcvault", "freshnfc", "freshlegacy", "internalvault", "notemodevault", "revisionvault"]) {
     await fetch(`${base.couchdbUrl}/${db}`, { method: "DELETE", headers: auth });
     const res = await fetch(`${base.couchdbUrl}/${db}`, { method: "PUT", headers: auth });
     if (!res.ok) throw new Error(`could not create ${db}: ${res.status}`);
@@ -585,6 +585,43 @@ step("#62: internal-file docs (i:f:) at the head of the feed don't flip a correc
     assert.equal(await v2.readNote("Notes/real.md"), "real note");
     await v2.close();
     console.log("internal-file docs ignored; correct setting kept, wrong setting still corrected");
+}
+
+step("Revisions on an encrypted, obfuscated vault: read with revision, conditional update, two instances");
+{
+    const cfg = { ...base, database: "revisionvault", passphrase, obfuscatePaths: true };
+    const a = new Vault(cfg);
+    await a.init();
+    const b = new Vault(cfg);
+    await b.init();
+    assert.equal(await a.writeNote("Notes/rev.md", "one"), true);
+    const r1 = await a.readNoteRevision("Notes/rev.md");
+    assert.ok(r1 && r1.content === "one" && /^1-/.test(r1.revision), `read with revision: ${JSON.stringify(r1)}`);
+    assert.equal((await a.getMetadata("Notes/rev.md"))?.revision, r1!.revision);
+    // b writes on top of the revision a read; a's write at that revision is then refused.
+    const u = await b.updateNote("Notes/rev.md", (c) => c + " two", { expectedRevision: r1!.revision });
+    assert.equal(u.content, "one two");
+    await assert.rejects(a.updateNote("Notes/rev.md", () => "stale", { expectedRevision: r1!.revision }), RevisionMismatchError);
+    assert.equal(await a.readNote("Notes/rev.md"), "one two");
+    // Without a pinned revision, a's update re-reads and applies on top.
+    const u2 = await a.updateNote("Notes/rev.md", (c) => c + " three", { maxAttempts: 3 });
+    assert.equal(u2.content, "one two three");
+    assert.equal(await b.readNote("Notes/rev.md"), "one two three");
+    await assert.rejects(a.updateNote("Notes/missing.md", (c) => c), NoteNotFoundError);
+    // writeNote replacing an existing note goes through the revision check, not
+    // the library's forced put: with that put disabled it still lands, on top.
+    const forced = (b as any).manipulator.put;
+    (b as any).manipulator.put = async () => { throw new Error("forced put used for an overwrite"); };
+    assert.equal(await b.writeNote("Notes/rev.md", "replaced"), true);
+    (b as any).manipulator.put = forced;
+    const r4 = await a.readNoteRevision("Notes/rev.md");
+    assert.ok(r4 && r4.content === "replaced" && /^4-/.test(r4.revision), `overwrite at the next revision: ${JSON.stringify(r4)}`);
+    // The stored document is still encrypted and path-obfuscated.
+    const ids = await rawAllDocIds("revisionvault");
+    assert.ok(ids.some((id) => id.startsWith("f:")) && !ids.some((id) => id.includes("rev.md")), "obfuscated ids");
+    await a.close();
+    await b.close();
+    console.log("revision read, refused stale update, retried update and checked overwrite OK on an E2EE vault");
 }
 
 console.log("\nAll obfuscation-detection scenarios passed.");

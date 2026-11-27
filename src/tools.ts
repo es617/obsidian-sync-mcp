@@ -1,7 +1,7 @@
 import type { FastMCP } from "fastmcp";
 import { z } from "zod";
 import { makeDeepLink } from "./deeplink.js";
-import { NoteExistsError, NoteNotFoundError, type VaultBackend } from "./vault-backend.js";
+import { NoteExistsError, NoteNotFoundError, RevisionMismatchError, UpdateRetriesExhaustedError, type VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
 import { allowedActions, checkWrite, describeFolders, describeWriteScope, type WriteScope } from "./write-scope.js";
 import { describeListing, describeNoMatch } from "./list-format.js";
@@ -27,6 +27,64 @@ export function cleanSearchTerms(terms: string[] | undefined): string[] {
 }
 
 const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as const;
+
+/**
+ * edit_note rounds when another writer changes the note between its read and
+ * its write (CouchDB mode): at least this many, then more until
+ * EDIT_MIN_RETRY_MS has passed or 5 x this many rounds have run, whichever
+ * comes first (on a fast database usually the round cap). write_note uses the
+ * same budget to replace an existing note. Measured with the
+ * concurrency harness on two instances: a burst of 20 simultaneous edits all
+ * land; writers looping flat out on one note, or 20 writers with up to 200 ms
+ * between edits, saw about 1 refusal in 200. A refused edit answers "Failed
+ * to edit note" and writes nothing; it is never silently dropped.
+ */
+export const EDIT_MAX_ATTEMPTS = 10;
+/** edit_note keeps retrying past EDIT_MAX_ATTEMPTS until this much time has passed or 5 x the attempts have run. */
+export const EDIT_MIN_RETRY_MS = 3000;
+
+export const NO_REVISIONS_MESSAGE =
+    "expected_revision needs CouchDB mode: this vault has no revisions. Nothing was written.";
+
+/** An edit that can't be applied to the note's current text. */
+class EditRefused extends Error {}
+
+/** Apply one edit_note operation to a note's text; throws EditRefused when it can't be applied. */
+export function applyEdit(existing: string, op: "append" | "prepend" | "replace", newContent: string, oldText?: string): string {
+    if (op === "replace") {
+        if (!oldText) throw new EditRefused("old_text is required for replace operation.");
+        const idx = existing.indexOf(oldText);
+        if (idx === -1) throw new EditRefused("old_text not found in note.");
+        if (existing.indexOf(oldText, idx + 1) !== -1) {
+            throw new EditRefused("old_text matches multiple times. Provide a longer, unique string.");
+        }
+        return existing.slice(0, idx) + newContent + existing.slice(idx + oldText.length);
+    }
+    if (op === "prepend") {
+        // Insert after frontmatter if present
+        const fmMatch = existing.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+        if (fmMatch) {
+            const afterFm = fmMatch[0].length;
+            return existing.slice(0, afterFm) + newContent + "\n" + existing.slice(afterFm);
+        }
+        return newContent + "\n" + existing;
+    }
+    return existing.endsWith("\n") ? existing + newContent : existing + "\n" + newContent;
+}
+
+function describeMismatch(err: RevisionMismatchError): string {
+    return `Revision mismatch: ${err.path} is at revision ${err.current}, not ${err.expected}. Nothing was written; read the note again and reapply your change.`;
+}
+
+// Shaped like a CouchDB revision (`<generation>-<hex>`): the value is echoed in
+// the mismatch answer, so an empty, huge or multi-line value is refused here.
+const expectedRevisionParam = z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[1-9]\d*-[0-9a-f]+$/, "expected_revision must be a revision from read_note or get_note_metadata, like 12-3f9c...")
+    .optional()
+    .describe("Optional, CouchDB mode: the revision from read_note or get_note_metadata. The write only happens if the note is still at that revision; otherwise nothing is written and the current revision is returned.");
 
 // Claude Code persists any MCP tool result above ~50 000 characters to a file
 // and hands the model a 2 kB preview instead of the text. A tool can raise its
@@ -69,18 +127,21 @@ export function registerTools(
     server.addTool({
         name: "read_note",
         description:
-            "Read the content of a note from the Obsidian vault. Returns the markdown content and a deep link to open it in Obsidian.",
+            "Read the content of a note from the Obsidian vault. Returns the markdown content and a deep link to open it in Obsidian; in CouchDB mode also the note's revision, which write_note and edit_note accept as expected_revision.",
         _meta: { "anthropic/maxResultSizeChars": READ_NOTE_MAX_RESULT_SIZE_CHARS },
         parameters: z.object({
             path: z.string().describe("Vault-relative path to the note, e.g. 'daily/2026-03-23.md'"),
         }),
         execute: async ({ path }) => {
-            const content = await vault.readNote(path);
+            // Text and revision come from one fetch, so the revision names exactly this text.
+            const revised = vault.readNoteRevision ? await vault.readNoteRevision(path) : null;
+            const content = revised ? revised.content : await vault.readNote(path);
             if (content === null) {
                 return `Note not found: ${path}`;
             }
             const deepLink = makeDeepLink(vaultName, path);
-            return `[Open in Obsidian](${deepLink})\n\n---\n\n${content}`;
+            const revisionLine = revised ? `\nRevision: ${revised.revision}` : "";
+            return `[Open in Obsidian](${deepLink})${revisionLine}\n\n---\n\n${content}`;
         },
     });
 
@@ -91,8 +152,24 @@ export function registerTools(
         parameters: z.object({
             path: z.string().describe("Vault-relative path to the note, e.g. 'daily/2026-03-23.md'"),
             content: z.string().describe("Full markdown content for the note"),
+            expected_revision: expectedRevisionParam,
         }),
-        execute: async ({ path, content }) => {
+        execute: async ({ path, content, expected_revision }) => {
+            if (expected_revision !== undefined) {
+                // A revision names an existing note, so this is an update.
+                const denied = checkWrite(path, "update", writeFolders);
+                if (denied) return denied;
+                if (!vault.updateNote) return NO_REVISIONS_MESSAGE;
+                try {
+                    const { revision } = await vault.updateNote(path, () => content, { expectedRevision: expected_revision });
+                    searchIndex.update(path, content, Date.now());
+                    return `Note saved: ${path}\nRevision: ${revision}\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
+                } catch (err) {
+                    if (err instanceof RevisionMismatchError) return describeMismatch(err);
+                    if (err instanceof NoteNotFoundError) return `Note not found: ${path}`;
+                    throw err;
+                }
+            }
             // Whether this is a create or an update depends on the note existing,
             // so pass what's allowed down and let the backend decide in the same
             // step as the write.
@@ -103,12 +180,17 @@ export function registerTools(
             const mode = canCreate && canUpdate ? "upsert" : canCreate ? "create" : "update";
             let ok: boolean;
             try {
-                ok = await vault.writeNote(path, content, { mode });
+                // CouchDB mode replaces an existing note with a revision-checked put,
+                // retried within edit_note's budget.
+                ok = await vault.writeNote(path, content, { mode, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
             } catch (err) {
                 if (err instanceof NoteExistsError) {
                     return `${checkWrite(path, "update", writeFolders)} The note already exists; choose a new path.`;
                 }
                 if (err instanceof NoteNotFoundError) return checkWrite(path, "create", writeFolders)!;
+                if (err instanceof UpdateRetriesExhaustedError) {
+                    return `Failed to write note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
+                }
                 throw err;
             }
             if (!ok) {
@@ -338,42 +420,49 @@ export function registerTools(
                 .string()
                 .optional()
                 .describe("Required for replace operation. Exact text to find and replace. Must match exactly once."),
+            expected_revision: expectedRevisionParam,
         }),
-        execute: async ({ path, content: newContent, operation, old_text }) => {
+        execute: async ({ path, content: newContent, operation, old_text, expected_revision }) => {
             const denied = checkWrite(path, "update", writeFolders);
             if (denied) return denied;
+            const op = operation ?? "append";
+
+            if (vault.updateNote) {
+                // CouchDB mode: the edit is applied to the text it was read with and
+                // written only if the note is still at that revision. When another
+                // writer got in between, the edit is re-applied to the new text
+                // (a replace re-checks old_text each time), so nobody's edit is lost.
+                try {
+                    const { content: updated, revision, attempts } = await vault.updateNote(
+                        path,
+                        (existing) => applyEdit(existing, op, newContent, old_text),
+                        { expectedRevision: expected_revision, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS },
+                    );
+                    if (debugLogging && attempts > 1) console.log(`[tool] edit_note applied after ${attempts} attempts`);
+                    searchIndex.update(path, updated, Date.now());
+                    return `Note edited (${op}): ${path}\nRevision: ${revision}\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
+                } catch (err) {
+                    if (err instanceof EditRefused) return err.message;
+                    if (err instanceof NoteNotFoundError) return `Note not found: ${path}`;
+                    if (err instanceof RevisionMismatchError) return describeMismatch(err);
+                    if (err instanceof UpdateRetriesExhaustedError) {
+                        return `Failed to edit note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
+                    }
+                    throw err;
+                }
+            }
+            if (expected_revision !== undefined) return NO_REVISIONS_MESSAGE;
+
             const existing = await vault.readNote(path);
             if (existing === null) {
                 return `Note not found: ${path}`;
             }
-
             let updated: string;
-            const op = operation ?? "append";
-
-            if (op === "replace") {
-                if (!old_text) {
-                    return "old_text is required for replace operation.";
-                }
-                const idx = existing.indexOf(old_text);
-                if (idx === -1) {
-                    return "old_text not found in note.";
-                }
-                if (existing.indexOf(old_text, idx + 1) !== -1) {
-                    return "old_text matches multiple times. Provide a longer, unique string.";
-                }
-                updated = existing.slice(0, idx) + newContent + existing.slice(idx + old_text.length);
-            } else if (op === "prepend") {
-                // Insert after frontmatter if present
-                const fmMatch = existing.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
-                if (fmMatch) {
-                    const afterFm = fmMatch[0].length;
-                    updated = existing.slice(0, afterFm) + newContent + "\n" + existing.slice(afterFm);
-                } else {
-                    updated = newContent + "\n" + existing;
-                }
-            } else {
-                // append
-                updated = existing.endsWith("\n") ? existing + newContent : existing + "\n" + newContent;
+            try {
+                updated = applyEdit(existing, op, newContent, old_text);
+            } catch (err) {
+                if (err instanceof EditRefused) return err.message;
+                throw err;
             }
 
             let ok: boolean;
@@ -463,6 +552,7 @@ export function registerTools(
                 `Created: ${new Date(meta.ctime).toISOString()}`,
                 `Modified: ${new Date(meta.mtime).toISOString()}`,
             ];
+            if (meta.revision) lines.push(`Revision: ${meta.revision}`);
             if (meta.frontmatterError) {
                 lines.push(`\nFrontmatter: not read, it isn't valid YAML (${meta.frontmatterError})`);
             }
