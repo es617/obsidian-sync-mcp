@@ -11,7 +11,8 @@
  *   docker run -d --name couchdb-conc-test -p 127.0.0.1:5985:5984 \
  *     -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=test couchdb:3
  *
- * Override with TEST_COUCHDB_URL / TEST_COUCHDB_USER / TEST_COUCHDB_PASSWORD;
+ * Override with TEST_COUCHDB_URL / TEST_COUCHDB_USER / TEST_COUCHDB_PASSWORD /
+ * TEST_COUCHDB_DATABASE (default concurrencyvault);
  * CONCURRENCY_INSTANCES (default 2) sets how many server instances share the database.
  *
  * Scenarios (each prints PASS or FAIL; the run exits 1 on any FAIL):
@@ -21,6 +22,13 @@
  *             their own line at the same moment. Every edit must be present.
  *   same-line two workers replace the same line at the same moment. Exactly one
  *             may succeed; the other must be told, not silently overwritten.
+ *   group-with-refusal
+ *             nine edits at once on one instance, one of them for text that is
+ *             not in the note: the eight land in one or two writes (their
+ *             answers carry at most two distinct revisions), the ninth is told why.
+ *   group-index
+ *             after that group, search_notes, list_tags and backlinks on the
+ *             same instance see every one of the eight edits.
  *   expected-revision
  *             a write_note with the revision read on one instance succeeds on the
  *             other; repeating it with that now-stale revision writes nothing.
@@ -51,7 +59,7 @@ import { join } from "node:path";
 const COUCH = (process.env.TEST_COUCHDB_URL ?? "http://localhost:5985").replace(/\/+$/, "");
 const COUCH_USER = process.env.TEST_COUCHDB_USER ?? "admin";
 const COUCH_PASSWORD = process.env.TEST_COUCHDB_PASSWORD ?? "test";
-const DB = "concurrencyvault";
+const DB = process.env.TEST_COUCHDB_DATABASE ?? "concurrencyvault";
 const AUTH = "concurrency-test-token";
 /** CONCURRENCY_INSTANCES=1 runs every worker against a single instance. */
 const INSTANCES = Number(process.env.CONCURRENCY_INSTANCES ?? 2);
@@ -240,6 +248,43 @@ async function sameLine(clients: Client[]): Promise<void> {
         `${succeeded}/2 answered "Note edited", ${present} of them present, ${conflicts.length} conflict leaves; answers: ${JSON.stringify(answers.map((x) => x.split("\n")[0]))}`);
 }
 
+/**
+ * One instance, several edits in flight at once: the server writes them as a
+ * group. A member that cannot apply (its old_text is not in the note) must be
+ * answered on its own and must not keep the others from landing.
+ */
+async function groupWithRefusal(clients: Client[]): Promise<void> {
+    const path = "Boards/group.md";
+    const n = 8;
+    const target = (i: number) => `Boards/grptarget${i}.md`;
+    for (let i = 0; i < n; i++) await seed(clients[0], target(i), `target ${i}\n`);
+    await seed(clients[0], path, board(Array.from({ length: n }, (_, i) => `- [ ] ${task(i)}`)));
+    const workers = await Promise.all(Array.from({ length: n + 1 }, () => new Client(clients[0].port).connect()));
+    // Each edit adds a word, a tag and a link of its own, so the search index of
+    // the instance that wrote the group can be checked for every member.
+    const answers = await Promise.all(workers.map((w, i) => i < n
+        ? w.tool("edit_note", { path, operation: "replace", old_text: `- [ ] ${task(i)}`, content: `- [x] ${task(i)} grpword${i} #grptag${i} [[grptarget${i}]]` })
+        : w.tool("edit_note", { path, operation: "replace", old_text: "- [ ] no such task", content: "- [x] no such task" })));
+    const { winner, conflicts } = await readFromCouch(path);
+    const done = Array.from({ length: n }, (_, i) => winner.includes(`- [x] ${task(i)}`)).filter(Boolean).length;
+    const refusal = answers[n].split("\n")[0];
+    // Grouping happened: the eight landed in one or two writes (the first edit to
+    // arrive can be written alone, before the rest have queued), not eight.
+    const revisions = new Set(answers.slice(0, n).map((a) => a.match(/^Revision: (\S+)$/m)?.[1]));
+    check("group-with-refusal", done === n && /old_text not found/.test(refusal) && conflicts.length === 0 && revisions.size <= 2 && !revisions.has(undefined),
+        `${done}/${n} edits present on one instance in ${revisions.size} distinct revisions, the bad one answered ${JSON.stringify(refusal)}, ${conflicts.length} conflict leaves`);
+
+    const tags = await clients[0].tool("list_tags", {});
+    let searched = 0, tagged = 0, linked = 0;
+    for (let i = 0; i < n; i++) {
+        if ((await clients[0].tool("search_notes", { terms: [`grpword${i}`] })).includes(path)) searched++;
+        if (tags.includes(`#grptag${i} `)) tagged++;
+        if (/^Backlinks: .*Boards\/group\.md/m.test(await clients[0].tool("get_note_metadata", { path: target(i) }))) linked++;
+    }
+    check("group-index", searched === n && tagged === n && linked === n,
+        `on the instance that wrote the group: search_notes finds ${searched}/${n} edits, list_tags ${tagged}/${n}, backlinks ${linked}/${n}`);
+}
+
 function percentile(sorted: number[], p: number): number {
     if (sorted.length === 0) return 0;
     return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
@@ -351,6 +396,7 @@ try {
         await control(clients);
         await disjoint(clients);
         await sameLine(clients);
+        await groupWithRefusal(clients);
         await expectedRevision(clients);
         await editVsWrite(clients);
     }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+- **Edits to one note through one instance are written together (CouchDB mode).** `edit_note` calls queued on the same note are applied in arrival order to one read and stored in one revision-checked write, at most 64 per write. A busy note costs far fewer rounds: two instances, 20 writers x 20 appends with up to 100 ms between edits, went from 395-399 of 400 landing (p95 up to 3.9 s) to 400/400 in every run (p95 0.4-1.4 s); 200 appends on a 324 KB note take 5 writes instead of 200.
+
+### Changed
+- Edits written together answer with the same `Revision:`, the revision of the write that stored them, and share one retry budget: a group that keeps losing to other writers is refused as a whole.
+- An edit that can't apply is refused on its own; if CouchDB won't store a group's write for a reason other than a conflict, its edits are written one at a time, so only an edit that fails by itself is refused.
+- A `delete_note`, `move_note` or `write_note` arriving while edits of the same note are queued can now run before them.
+
 ## 0.14.0
 
 ### Features

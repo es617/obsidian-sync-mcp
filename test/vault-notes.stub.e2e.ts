@@ -12,7 +12,7 @@
  */
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
-import { Vault } from "../src/vault.js";
+import { MAX_GROUP, Vault } from "../src/vault.js";
 import { NoteExistsError, NoteNotFoundError, RevisionMismatchError, UpdateRetriesExhaustedError } from "../src/vault-backend.js";
 
 // tsup strips the "node:" prefix from imports, and node:test only exists under
@@ -21,15 +21,19 @@ const { describe, it } = createRequire(import.meta.url)("node:test") as typeof i
 
 type Doc = { path: string; data: string[]; ctime: number; mtime: number; size: number; _rev: string };
 
-/** What happens just before a revision-checked put lands: another writer gets in, the note is deleted, or CouchDB fails without a 409. */
-type BeforePut = "other" | "delete" | "fail";
+/**
+ * What happens just before a revision-checked put lands: another writer gets
+ * in, the note is deleted, CouchDB fails without a 409 (answering false, or
+ * throwing), or the put is stored and the answer is lost (it throws anyway).
+ */
+type BeforePut = "other" | "delete" | "fail" | "throw" | "storedThenThrow";
 
 /**
  * Enough of DirectFileManipulator for the note methods. Ids are lowercased like
  * LiveSync's default (case-insensitive) vaults, and every call yields so
  * unlocked check-then-write sequences would interleave.
  */
-function stubVault({ caseSensitive = false } = {}) {
+function stubVault({ caseSensitive = false, maxBytes = Infinity, oversized = "false" as "false" | "throw" } = {}) {
     const docs = new Map<string, Doc>();
     const calls: string[] = [];
     /** Consumed one per revision-checked put, in order. */
@@ -64,15 +68,22 @@ function stubVault({ caseSensitive = false } = {}) {
                 calls.push(`put@rev ${doc.path}`);
                 const text = await doc.data.text();
                 await tick();
+                // Like a body over CouchDB's max_http_request_size: refused whatever the revision.
+                if (text.length > maxBytes) {
+                    if (oversized === "throw") throw Object.assign(new Error("request entity too large"), { status: 413 });
+                    return false;
+                }
                 const event = beforePut.shift();
                 const current = docs.get(doc._id);
                 if (event === "other" && current) docs.set(doc._id, { ...current, data: [current.data.join("") + "+other"], _rev: nextRev(current._rev) });
                 if (event === "delete") docs.delete(doc._id);
                 if (event === "fail") return false;
+                if (event === "throw") throw new Error("socket hang up");
                 const now = docs.get(doc._id);
                 if (!now || now._rev !== baseRevision) return false;
                 const rev = nextRev(now._rev);
                 docs.set(doc._id, { path: doc.path, data: [text], ctime: doc.ctime, mtime: doc.mtime, size: doc.size, _rev: rev });
+                if (event === "storedThenThrow") throw new Error("socket hang up");
                 return { ok: true, id: doc._id, rev };
             },
         },
@@ -360,5 +371,227 @@ describe("Vault.writeNote overwrites through the revision check (stubbed manipul
         assert.equal(await vault.writeNote("n.md", "fresh"), true);
         assert.equal(await vault.writeNote("m.md", "fresh", { mode: "create" }), true);
         assert.deepEqual(calls.filter((c) => c.startsWith("put")), ["put n.md", "put m.md"]);
+    });
+});
+
+describe("Vault.updateNote group commit (stubbed manipulator)", () => {
+    const puts = (calls: string[]) => calls.filter((c) => c.startsWith("put")).length;
+    const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+    /** Hold the note's lock, so edits issued meanwhile queue up and form one group when it is released. */
+    function holdLock(vault: Vault, id: string): () => Promise<void> {
+        let release!: () => void;
+        const held = new Promise<void>((r) => (release = r));
+        const taken = (vault as any).docLock.run([id], () => held);
+        return async () => {
+            release();
+            await taken;
+        };
+    }
+
+    it("a burst of edits queued behind a write is one read and one put", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const pending = Array.from({ length: 10 }, (_, i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base" + Array.from({ length: 10 }, (_, i) => `+e${i}`).join(""));
+        assert.equal(puts(calls), 1, calls.join(", "));
+        assert.equal(calls.filter((c) => c.startsWith("get")).length, 1, calls.join(", "));
+        assert.ok(results.every((r) => r.attempts === 1));
+    });
+
+    it("a member whose edit throws is answered with its error; the others land", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const refused = new Error("old_text not found");
+        const pending = [
+            vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 }),
+            vault.updateNote("a.md", () => { throw refused; }, { maxAttempts: 10 }),
+            vault.updateNote("a.md", (c) => c + "+e3", { maxAttempts: 10 }),
+        ];
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected", "fulfilled"]);
+        assert.equal((results[1] as PromiseRejectedResult).reason, refused);
+        assert.equal(textOf("a.md"), "base+e1+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it("a member that can't apply in round 1 lands in round 2, after another writer's change made it applicable", async () => {
+        const { vault, seed, beforePut, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("other");
+        const release = holdLock(vault, "a.md");
+        const replaceOther = (c: string) => {
+            if (!c.includes("+other")) throw new Error("old_text not found");
+            return c.replace("+other", "+OTHER");
+        };
+        const pending = [vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 }), vault.updateNote("a.md", replaceOther, { maxAttempts: 10 })];
+        await tick();
+        await release();
+        const [first, second] = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base+OTHER+e1");
+        assert.equal(first.attempts, 2);
+        assert.equal(second.attempts, 2);
+        assert.equal(second.content, textOf("a.md"));
+        assert.equal(second.revision, revOf("a.md"));
+    });
+
+    it("a note missing for the group: every member is told NoteNotFound and nothing is written", async () => {
+        const { vault, calls, docs } = stubVault();
+        const release = holdLock(vault, "gone.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("gone.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        for (const r of results) assert.ok(r.status === "rejected" && r.reason instanceof NoteNotFoundError && r.reason.path === "gone.md");
+        assert.equal(puts(calls), 0, calls.join(", "));
+        assert.equal(docs.size, 0);
+    });
+
+    it("a pinned call arriving mid-group is never folded into it: it runs alone, after, and sees the group's revision", async () => {
+        const { vault, calls, seed, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        const pinned = revOf("a.md")!;
+        const release = holdLock(vault, "a.md");
+        const group = [1, 2].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        let pinnedApplied = 0;
+        const pinnedCall = vault.updateNote("a.md", (c) => { pinnedApplied++; return c + "+pinned"; }, { expectedRevision: pinned, maxAttempts: 10 });
+        const late = vault.updateNote("a.md", (c) => c + "+e3", { maxAttempts: 10 });
+        await tick();
+        await release();
+        const [g1, g2] = await Promise.all(group);
+        await assert.rejects(pinnedCall, (e: any) => e instanceof RevisionMismatchError && e.expected === pinned && e.current === g1.revision);
+        // An unpinned edit issued after the pinned one still joins the queued group.
+        const g3 = await late;
+        assert.equal(pinnedApplied, 0, "a pin that no longer matches is refused before its edit runs");
+        assert.deepEqual(new Set([g1.revision, g2.revision, g3.revision]), new Set([revOf("a.md")]));
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it(`a queue longer than MAX_GROUP (${MAX_GROUP}) is written in groups of at most that many, in order`, async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const n = 2 * MAX_GROUP + 5;
+        const release = holdLock(vault, "a.md");
+        const pending = Array.from({ length: n }, (_, i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base" + Array.from({ length: n }, (_, i) => `+e${i}`).join(""));
+        assert.equal(puts(calls), 3, calls.join(", "));
+        const sizes = [...results.reduce((m, r) => m.set(r.revision, (m.get(r.revision) ?? 0) + 1), new Map<string, number>()).values()];
+        assert.deepEqual(sizes, [MAX_GROUP, MAX_GROUP, 5]);
+    });
+
+    it("if the drain itself throws, the group in flight and the queued edits are rejected, and the note's next edit works", async () => {
+        const { vault, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const boom = new Error("boom");
+        (vault as any).writeGroup = async () => {
+            await tick();
+            throw boom;
+        };
+        const release = holdLock(vault, "a.md");
+        const inFlight = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        // These queue while the failing group is in flight.
+        const queued = [4, 5].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        const settled = await Promise.race([Promise.allSettled([...inFlight, ...queued]), tick(500).then(() => "hung" as const)]);
+        assert.notEqual(settled, "hung", "a member was left waiting");
+        for (const r of settled as PromiseSettledResult<unknown>[]) assert.ok(r.status === "rejected" && r.reason === boom);
+        assert.equal((vault as any).pendingUpdates.size, 0);
+        delete (vault as any).writeGroup;
+        const next = await vault.updateNote("a.md", (c) => c + "+after", { maxAttempts: 10 });
+        assert.equal(next.content, "base+after");
+        assert.equal(textOf("a.md"), "base+after");
+    });
+
+    it("a write_note on this instance between two groups runs ahead of queued edits but costs them no round", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const first = vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 });
+        await tick();
+        const write = vault.writeNote("a.md", "written");
+        await tick();
+        await release();
+        // Queue two more while the first group is in flight: the write is already waiting on the lock ahead of them.
+        while (!calls.some((c) => c.startsWith("get a.md"))) await tick(0);
+        const queued = [2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        const results = await Promise.all([first, ...queued]);
+        assert.equal(await write, true);
+        assert.equal(textOf("a.md"), "written+e2+e3", "the write landed before the edits queued after it");
+        assert.ok(results.every((r) => r.attempts === 1), JSON.stringify(results.map((r) => r.attempts)));
+        assert.equal(puts(calls), 3, calls.join(", "));
+    });
+
+    it("every member of a group gets the text that was written with the revision", async () => {
+        const { vault, seed, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3, 4].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3+e4");
+        for (const r of results) {
+            assert.equal(r.content, textOf("a.md"));
+            assert.equal(r.revision, revOf("a.md"));
+        }
+    });
+
+    for (const oversized of ["false", "throw"] as const) {
+        it(`a group write CouchDB won't store (${oversized === "false" ? "answers false" : "throws"}) is retried one member at a time: only the edit too big on its own fails`, async () => {
+            const { vault, calls, seed, textOf } = stubVault({ maxBytes: 100, oversized });
+            seed("a.md", "base");
+            const release = holdLock(vault, "a.md");
+            const edits = ["+s1", "+s2", "+s3", "+" + "B".repeat(200), "+s4", "+s5", "+s6", "+s7"];
+            const pending = edits.map((e) => vault.updateNote("a.md", (c) => c + e, { maxAttempts: 10 }));
+            await tick();
+            await release();
+            const results = await Promise.allSettled(pending);
+            assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled", "rejected", "fulfilled", "fulfilled", "fulfilled", "fulfilled"]);
+            assert.equal(textOf("a.md"), "base+s1+s2+s3+s4+s5+s6+s7");
+            const big = (results[3] as PromiseRejectedResult).reason;
+            assert.match(String(big?.message), oversized === "false" ? /CouchDB did not store the write to a\.md/ : /request entity too large/);
+            // The last small edit's answer is the stored text and revision.
+            assert.equal((results[7] as PromiseFulfilledResult<any>).value.content, textOf("a.md"));
+            assert.equal(puts(calls), 1 + edits.length, calls.join(", "));
+        });
+    }
+
+    it("a group put that threw after it was stored is not re-applied: the group is told, nothing is written twice", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("storedThenThrow");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["rejected", "rejected", "rejected"]);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it("a put that threw before anything was stored falls back too", async () => {
+        const { vault, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("throw");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled"]);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
     });
 });

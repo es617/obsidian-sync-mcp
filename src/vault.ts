@@ -28,6 +28,17 @@ import { resolvePathIdentity, type PathNormalizationSetting } from "./path-ident
 const debugLog = process.env.LOG_LEVEL === "debug";
 /** Upper bound of the random pause between two attempts of updateNote. */
 const RETRY_JITTER_MS = 25;
+/**
+ * Most queued edits of one note written in one group write; the rest wait for
+ * the next. Each round re-applies every member to the whole note on the event
+ * loop, an exhausted retry budget refuses the whole group, and a group CouchDB
+ * won't store is retried one member per write, so this bounds all three.
+ * Measured on a 324 KB note: 64 replaces take ~15 ms to re-apply (200: ~46 ms,
+ * per round, up to 50 rounds under contention), against ~130 ms for the write
+ * itself; 200 simultaneous appends on one instance land in 5 writes, ~0.7 s
+ * (uncapped: 2 writes, ~0.4 s; v0.14.0, one write per edit: 200 writes, ~17 s).
+ */
+export const MAX_GROUP = 64;
 /** writeNote's default rounds for replacing an existing note; write_note passes edit_note's budget. */
 const OVERWRITE_MAX_ATTEMPTS = 10;
 
@@ -37,6 +48,22 @@ class WriteNotStoredError extends Error {
         super(`CouchDB did not store the write to ${path}`);
         this.name = "WriteNotStoredError";
     }
+}
+
+interface GroupMember {
+    apply: (content: string) => string;
+    maxAttempts: number;
+    minRetryMs: number;
+}
+
+interface PendingUpdate extends GroupMember {
+    resolve: (result: UpdateResult) => void;
+    reject: (error: unknown) => void;
+}
+
+interface GroupResult {
+    value?: UpdateResult;
+    error?: unknown;
 }
 
 export interface VaultConfig {
@@ -85,6 +112,8 @@ export class Vault implements VaultBackend {
     private pathNormalizationVersion: 0 | 1 = 0;
     /** Per-document lock: makes an existence check and the write after it one step, and orders this server's own retries (see updateNote). */
     private docLock = new KeyedLock();
+    /** Unpinned updateNote calls waiting for the next group write of their document (see updateNote). */
+    private pendingUpdates = new Map<string, PendingUpdate[]>();
 
     constructor(config: VaultConfig) {
         this.config = config;
@@ -417,22 +446,125 @@ export class Vault implements VaultBackend {
     async updateNote(path: string, apply: (content: string) => string, options: UpdateOptions = {}): Promise<UpdateResult> {
         this.validatePath(path);
         const id = await this.manipulator.path2id(path as FilePathWithPrefix);
-        // The lock orders this server's own writers, so they never spend attempts
-        // on each other, and is held across retries so a writer that lost to
-        // another instance keeps its turn here. CouchDB's revision check orders
-        // everyone else.
-        return await this.docLock.run([id], () => this.updateUnlocked(path, id, apply, options));
+        const { expectedRevision, maxAttempts = 1, minRetryMs = 0 } = options;
+        // A caller-pinned revision is one attempt on its own: re-applying on newer
+        // text, or folding it into other writers' edits, is the caller's call.
+        if (expectedRevision !== undefined) {
+            return await this.docLock.run([id], async () => {
+                const [result] = await this.applyGroup(path, id, [{ apply, maxAttempts: 1, minRetryMs: 0 }], { expectedRevision });
+                if (result.error) throw result.error;
+                return result.value!;
+            });
+        }
+        // Group commit: edits that queue on this server while a write of the note
+        // is in flight are applied together, in arrival order, in the next single
+        // write. Fewer rounds per edit means fewer chances to lose a round to
+        // another instance. CouchDB's revision check still orders every write.
+        return await new Promise<UpdateResult>((resolve, reject) => {
+            const queue = this.pendingUpdates.get(id);
+            const entry: PendingUpdate = { apply, maxAttempts: Math.max(1, maxAttempts), minRetryMs, resolve, reject };
+            if (queue) {
+                queue.push(entry);
+                return;
+            }
+            this.pendingUpdates.set(id, [entry]);
+            void this.drainUpdates(path, id);
+        });
     }
 
     /**
-     * The retry loop of updateNote; the caller holds the document's lock.
-     * `readText: false` is a blind overwrite (write_note): only the revision is
-     * fetched, `apply` gets "", and since its result doesn't depend on the old
-     * text, retrying it is always safe.
+     * Write the queued edits of one document, up to MAX_GROUP per write, until
+     * the queue is empty. Never rejects: should anything here throw, the group
+     * in flight and every edit still queued are rejected with it and the queue
+     * is dropped, so no caller waits forever and later edits start afresh.
      */
-    private async updateUnlocked(path: string, id: DocumentID, apply: (content: string) => string, { expectedRevision, maxAttempts = 1, minRetryMs = 0 }: UpdateOptions, readText = true): Promise<UpdateResult> {
-        // A caller-pinned revision is one attempt: re-applying on newer text is the caller's call.
-        const allowed = expectedRevision !== undefined ? 1 : Math.max(1, maxAttempts);
+    private async drainUpdates(path: string, id: DocumentID): Promise<void> {
+        let group: PendingUpdate[] = [];
+        try {
+            for (;;) {
+                await this.docLock.run([id], async () => {
+                    group = (this.pendingUpdates.get(id) ?? []).splice(0, MAX_GROUP);
+                    if (group.length > 0) await this.writeGroup(path, id, group);
+                });
+                group = [];
+                const queue = this.pendingUpdates.get(id);
+                if (!queue || queue.length === 0) {
+                    this.pendingUpdates.delete(id);
+                    return;
+                }
+            }
+        } catch (err) {
+            // Settling a member twice is a no-op, so members already answered are safe here.
+            const stranded = [...group, ...(this.pendingUpdates.get(id) ?? [])];
+            this.pendingUpdates.delete(id);
+            for (const member of stranded) member.reject(err);
+        }
+    }
+
+    /**
+     * Write one group and answer its members, under the document's lock. When
+     * the group's write fails for a reason other than a revision conflict (too
+     * large for CouchDB, say) and the note is provably still where it was, the
+     * failure can't be pinned on one member, so each member is written on its
+     * own instead, in arrival order: only the edits that fail by themselves are
+     * refused, as when every edit was its own write. A missing note and an
+     * exhausted retry budget are facts about the note, not about one member,
+     * and are answered to the whole group.
+     */
+    private async writeGroup(path: string, id: DocumentID, group: PendingUpdate[]): Promise<void> {
+        const attempt: { base?: string } = {};
+        let results: GroupResult[];
+        try {
+            results = await this.applyGroup(path, id, group, { progress: attempt });
+        } catch (err) {
+            if (group.length > 1 && !(err instanceof NoteNotFoundError || err instanceof UpdateRetriesExhaustedError) && (await this.stillAt(path, attempt.base))) {
+                if (debugLog) console.log(`[vault] group write of ${group.length} edits failed (${err instanceof Error ? err.message : String(err)}), writing them one at a time`);
+                // Each member is answered as its own write lands.
+                for (const member of group) await this.writeGroup(path, id, [member]);
+                return;
+            }
+            for (const member of group) member.reject(err);
+            return;
+        }
+        group.forEach((member, i) => (results[i].error ? member.reject(results[i].error) : member.resolve(results[i].value!)));
+    }
+
+    /**
+     * Whether the note is still at `base`, the revision a failed write was based
+     * on: then nothing of that write was stored. A put that threw may still have
+     * landed, and re-applying its edits on top would write them twice.
+     */
+    private async stillAt(path: string, base: string | undefined): Promise<boolean> {
+        if (base === undefined) return false;
+        try {
+            const now = await this.manipulator.get(path as FilePathWithPrefix, true);
+            return !!now && now._rev === base;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * The one read-apply-write loop, for a group of edits on one document (a
+     * single edit_note or write_note is a group of one); the caller holds the
+     * document's lock. Each round re-reads the note and re-applies every member
+     * in order; a member whose apply throws (old_text no longer found, say) is
+     * left out of that round's write and answered with its error, the others
+     * still land. A revision conflict repeats the round; the budget is the
+     * largest member's, shared by the group. `readText: false` is a blind
+     * overwrite (write_note): only the revision is fetched, `apply` gets "",
+     * and since its result doesn't depend on the old text, retrying it is
+     * always safe. `progress.base` is left at the base revision of the last
+     * put tried.
+     */
+    private async applyGroup(
+        path: string,
+        id: DocumentID,
+        group: GroupMember[],
+        { expectedRevision, readText = true, progress = {} }: { expectedRevision?: string; readText?: boolean; progress?: { base?: string } } = {},
+    ): Promise<GroupResult[]> {
+        const allowed = Math.max(...group.map((m) => m.maxAttempts));
+        const minRetryMs = Math.max(...group.map((m) => m.minRetryMs));
         const started = performance.now();
         let refusedBase: string | undefined;
         for (let attempt = 1; ; attempt++) {
@@ -444,9 +576,24 @@ export class Vault implements VaultBackend {
             // at the refused base, the write failed for another reason.
             if (refusedBase === entry._rev) throw new WriteNotStoredError(path);
             if (expectedRevision !== undefined && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
-            const content = apply(readText ? (entry.data as string[]).join("") : "");
+            let content = readText ? (entry.data as string[]).join("") : "";
+            const outcomes: Array<{ error?: unknown }> = group.map((member) => {
+                try {
+                    content = member.apply(content);
+                    return {};
+                } catch (error) {
+                    return { error };
+                }
+            });
+            if (outcomes.every((o) => o.error !== undefined)) return outcomes.map((o) => ({ error: o.error }));
+            progress.base = entry._rev;
             const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
-            if (revision) return { content, revision, attempts: attempt };
+            if (revision) {
+                if (debugLog && group.length > 1) console.log(`[vault] group write of ${group.length} edits on attempt ${attempt}`);
+                // Every member that landed gets the text that was written, so its
+                // content and revision describe the same version of the note.
+                return outcomes.map((o) => (o.error !== undefined ? { error: o.error } : { value: { content, revision, attempts: attempt } }));
+            }
             refusedBase = entry._rev;
             if (expectedRevision !== undefined) {
                 const now = await this.manipulator.get(path as FilePathWithPrefix, true);
@@ -509,7 +656,8 @@ export class Vault implements VaultBackend {
         if (!existing && mode === "update") throw new NoteNotFoundError(path);
         if (existing) {
             try {
-                await this.updateUnlocked(path, id, () => content, { maxAttempts, minRetryMs }, false);
+                const [result] = await this.applyGroup(path, id, [{ apply: () => content, maxAttempts: Math.max(1, maxAttempts), minRetryMs }], { readText: false });
+                if (result.error) throw result.error;
                 return true;
             } catch (err) {
                 if (err instanceof WriteNotStoredError) return false;
