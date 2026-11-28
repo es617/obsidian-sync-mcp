@@ -983,3 +983,66 @@ describe("E2E: no-auth Host allowlist (DNS-rebinding)", () => {
         assert.equal(await initializeWithHost("attacker.example"), 403);
     });
 });
+
+describe("plugins at startup", () => {
+    let pluginDir: string;
+    let dataDir: string;
+    let ownVault: string;
+    before(async () => {
+        await stopServer();
+        pluginDir = await mkdtemp(join(tmpdir(), "plugins-e2e-"));
+        dataDir = await mkdtemp(join(tmpdir(), "plugins-e2e-data-"));
+        ownVault = await mkdtemp(join(tmpdir(), "plugins-e2e-vault-"));
+        // Rejects in the background while it loads, then keeps the loader waiting long enough for Node to notice.
+        await writeFile(join(pluginDir, "bg.mjs"), `export default async (ctx) => {
+    Promise.reject(new Error("background failure in bg"));
+    await new Promise((r) => setTimeout(r, 200));
+    ctx.addTool({ name: "bg_tool", description: "", parameters: ctx.z.object({}), execute: async () => "bg ok" });
+};`);
+    });
+    after(async () => {
+        await stopServer();
+        for (const d of [pluginDir, dataDir, ownVault]) await rm(d, { recursive: true, force: true });
+    });
+
+    /** Start the server expecting it to exit; resolves with its exit code and output. */
+    async function startupFailure(env: Record<string, string | undefined>): Promise<{ code: unknown; output: string }> {
+        const child = spawn(NODE_BIN, ["dist/main.js"], { env: env as NodeJS.ProcessEnv, stdio: "pipe" });
+        let output = "";
+        child.stdout?.on("data", (d) => { output += d.toString(); });
+        child.stderr?.on("data", (d) => { output += d.toString(); });
+        const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+        const code = await new Promise((r) => child.on("exit", r));
+        clearTimeout(timer);
+        return { code, output };
+    }
+
+    it("a rejection in a plugin's background code while plugins load doesn't end the server", async () => {
+        await startServer({ VAULT_PATH: ownVault, VAULT_NAME: "PluginVault", DATA_DIR: dataDir, PLUGINS: "bg", PLUGIN_DIR: pluginDir });
+        assert.equal(await callTool("bg_tool"), "bg ok");
+        assert.match(serverLogs, /Unhandled rejection: .*background failure in bg/);
+        assert.match(serverLogs, /Plugin loaded: bg \(bg\.mjs -> .*bg\.mjs\)/);
+        await stopServer();
+    });
+
+    it("with no DATA_DIR, HOME or USERPROFILE it refuses to load plugins instead of using /tmp", async () => {
+        const env: Record<string, string | undefined> = { ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: AUTH, VAULT_PATH: ownVault, PLUGINS: "bg" };
+        for (const k of ["HOME", "USERPROFILE", "DATA_DIR", "PLUGIN_DIR"]) delete env[k];
+        const { code, output } = await startupFailure(env);
+        assert.equal(code, 1, output);
+        assert.match(output, /set PLUGIN_DIR/);
+    });
+
+    it("refuses to start when the plugin directory is inside VAULT_PATH", async () => {
+        const inVault = join(ownVault, "plugins");
+        await mkdir(inVault, { recursive: true });
+        await writeFile(join(inVault, "bg.mjs"), "export default () => {};");
+        try {
+            const { code, output } = await startupFailure({ ...process.env, PORT: String(PORT), MCP_AUTH_TOKEN: AUTH, VAULT_PATH: ownVault, DATA_DIR: dataDir, PLUGINS: "bg", PLUGIN_DIR: inVault });
+            assert.equal(code, 1, output);
+            assert.match(output, /plugin directory .* is inside VAULT_PATH/);
+        } finally {
+            await rm(inVault, { recursive: true, force: true });
+        }
+    });
+});

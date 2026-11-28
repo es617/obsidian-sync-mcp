@@ -166,7 +166,8 @@ console.log("Vault ready.");
 if (READ_ONLY) vault = readOnlyVault(vault);
 
 // --- Per-vault data directory ---
-const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
+const homeDir = process.env.HOME ?? process.env.USERPROFILE;
+const baseDataDir = process.env.DATA_DIR ?? join(homeDir ?? "/tmp", ".obsidian-mcp");
 const vaultId = createHash("sha256").update(VAULT_NAME).digest("hex").slice(0, 12);
 const dataDir = join(baseDataDir, vaultId);
 
@@ -530,11 +531,19 @@ if (ATTACHMENTS_ENABLED) {
     );
 }
 
-{
-    const pluginDir = pluginDirectory(process.env.PLUGIN_DIR, baseDataDir);
+// Prevent unhandled rejections from crashing the server (e.g. decryption failures
+// in watcher). Installed before plugins load, so a rejection in a plugin's
+// background code during startup is logged rather than ending the process.
+process.on("unhandledRejection", (err) => {
+    console.error(`Unhandled rejection: ${describeError(err, debugLogging)}`);
+});
+
+if (PLUGINS.kind !== "off") {
     try {
-        const loaded = await loadPlugins(pluginDir, PLUGINS, { server, toolNames, vault, searchIndex, vaultName: VAULT_NAME, readOnly: READ_ONLY, writeFolders: WRITE_FOLDERS });
-        if (PLUGINS.kind !== "off" && loaded.length === 0) console.log(`Plugins: none found in ${pluginDir}.`);
+        // No plugins from the /tmp fallback data directory (pluginDirectory refuses it).
+        const pluginDir = pluginDirectory(process.env.PLUGIN_DIR, process.env.DATA_DIR !== undefined || homeDir !== undefined ? baseDataDir : null);
+        const loaded = await loadPlugins(pluginDir, PLUGINS, { server, toolNames, vault, searchIndex, vaultName: VAULT_NAME, readOnly: READ_ONLY, writeFolders: WRITE_FOLDERS, vaultPath: VAULT_PATH });
+        if (loaded.length === 0) console.log(`Plugins: none found in ${pluginDir}.`);
     } catch (err) {
         console.error(`Plugins: ${(err as Error).message}`);
         process.exit(1);
@@ -570,8 +579,3 @@ server.start({
     httpStream: { port: PORT, endpoint: "/mcp", host: process.env.HOST ?? "0.0.0.0" },
 });
 console.log(`obsidian-sync-mcp v${process.env.npm_package_version ?? "unknown"} listening on port ${PORT}`);
-
-// Prevent unhandled rejections from crashing the server (e.g. decryption failures in watcher)
-process.on("unhandledRejection", (err) => {
-    console.error(`Unhandled rejection: ${describeError(err, debugLogging)}`);
-});
