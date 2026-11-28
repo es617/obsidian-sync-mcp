@@ -231,15 +231,19 @@ async function selectPlugins(root: string, policy: Exclude<PluginPolicy, { kind:
 
 /**
  * Load the plugins `policy` selects from `dir`; with the policy off, nothing
- * is read. Throws, naming the plugin, on the first one that fails. Returns the
- * names loaded.
+ * is read. Throws, naming the plugin, on the first one that fails. Logs each
+ * plugin it loads with its name and file, and returns the names loaded.
  */
 export async function loadPlugins(dir: string, policy: PluginPolicy, options: LoadOptions): Promise<string[]> {
     if (policy.kind === "off") return [];
     const root = resolve(dir);
     const selected = await selectPlugins(root, policy);
     const vault = guardedVault(options.vault, options.searchIndex, options.writeFolders, options.readOnly);
-    for (const [, file] of selected) await loadPlugin(join(root, file), vault, options);
+    for (const [name, file] of selected) {
+        const path = join(root, file);
+        await loadPlugin(path, vault, options);
+        console.log(`Plugin ${name} loaded from ${path}`);
+    }
     return selected.map(([name]) => name);
 }
 

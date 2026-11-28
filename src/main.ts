@@ -534,7 +534,7 @@ if (ATTACHMENTS_ENABLED) {
     const pluginDir = pluginDirectory(process.env.PLUGIN_DIR, baseDataDir);
     try {
         const loaded = await loadPlugins(pluginDir, PLUGINS, { server, toolNames, vault, searchIndex, vaultName: VAULT_NAME, readOnly: READ_ONLY, writeFolders: WRITE_FOLDERS });
-        if (PLUGINS.kind !== "off") console.log(`Plugins from ${pluginDir}: ${loaded.length ? loaded.join(", ") : "none found"}.`);
+        if (PLUGINS.kind !== "off" && loaded.length === 0) console.log(`Plugins: none found in ${pluginDir}.`);
     } catch (err) {
         console.error(`Plugins: ${(err as Error).message}`);
         process.exit(1);

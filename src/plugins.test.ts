@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { LocalVault } from "./vault-local.js";
 import { SearchIndex } from "./search.js";
 import { parseWriteFolders } from "./write-scope.js";
@@ -244,6 +244,21 @@ describe("PLUGINS selects what loads", () => {
         assert.deepEqual(toolNames(), [`tool_${a}`, `tool_${b}`]);
         assert.ok(runs().includes(a) && runs().includes(b));
         assert.ok(!runs().includes(c), "an unlisted plugin's code never runs");
+    });
+
+    it("logs each plugin it loads with its name and file", async () => {
+        const [a, b] = [unique("log-a"), unique("log-b")];
+        const { pluginDir, load } = await folder({ [`${a}.mjs`]: marked(a), [`${b}.js`]: marked(b) });
+        const lines: string[] = [];
+        const original = console.log;
+        console.log = (...args: unknown[]) => { lines.push(args.join(" ")); };
+        try {
+            await load(a);
+        } finally {
+            console.log = original;
+        }
+        const loaded = lines.filter((l) => l.startsWith("Plugin "));
+        assert.deepEqual(loaded, [`Plugin ${a} loaded from ${join(resolve(pluginDir), `${a}.mjs`)}`]);
     });
 
     it("all loads every plugin in the directory", async () => {
