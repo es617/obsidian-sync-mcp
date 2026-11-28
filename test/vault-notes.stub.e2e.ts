@@ -514,6 +514,25 @@ describe("Vault.updateNote group commit (stubbed manipulator)", () => {
         assert.equal(textOf("a.md"), "base+after");
     });
 
+    it("a write_note on this instance between two groups runs ahead of queued edits but costs them no round", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const first = vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 });
+        await tick();
+        const write = vault.writeNote("a.md", "written");
+        await tick();
+        await release();
+        // Queue two more while the first group is in flight: the write is already waiting on the lock ahead of them.
+        while (!calls.some((c) => c.startsWith("get a.md"))) await tick(0);
+        const queued = [2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        const results = await Promise.all([first, ...queued]);
+        assert.equal(await write, true);
+        assert.equal(textOf("a.md"), "written+e2+e3", "the write landed before the edits queued after it");
+        assert.ok(results.every((r) => r.attempts === 1), JSON.stringify(results.map((r) => r.attempts)));
+        assert.equal(puts(calls), 3, calls.join(", "));
+    });
+
     it("every member of a group gets the text that was written with the revision", async () => {
         const { vault, seed, textOf, revOf } = stubVault();
         seed("a.md", "base");
