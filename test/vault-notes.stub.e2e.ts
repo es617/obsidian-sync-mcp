@@ -388,6 +388,93 @@ describe("Vault.updateNote group commit (stubbed manipulator)", () => {
         };
     }
 
+    it("a burst of edits queued behind a write is one read and one put", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const pending = Array.from({ length: 10 }, (_, i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base" + Array.from({ length: 10 }, (_, i) => `+e${i}`).join(""));
+        assert.equal(puts(calls), 1, calls.join(", "));
+        assert.equal(calls.filter((c) => c.startsWith("get")).length, 1, calls.join(", "));
+        assert.ok(results.every((r) => r.attempts === 1));
+    });
+
+    it("a member whose edit throws is answered with its error; the others land", async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const refused = new Error("old_text not found");
+        const pending = [
+            vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 }),
+            vault.updateNote("a.md", () => { throw refused; }, { maxAttempts: 10 }),
+            vault.updateNote("a.md", (c) => c + "+e3", { maxAttempts: 10 }),
+        ];
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected", "fulfilled"]);
+        assert.equal((results[1] as PromiseRejectedResult).reason, refused);
+        assert.equal(textOf("a.md"), "base+e1+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it("a member that can't apply in round 1 lands in round 2, after another writer's change made it applicable", async () => {
+        const { vault, seed, beforePut, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("other");
+        const release = holdLock(vault, "a.md");
+        const replaceOther = (c: string) => {
+            if (!c.includes("+other")) throw new Error("old_text not found");
+            return c.replace("+other", "+OTHER");
+        };
+        const pending = [vault.updateNote("a.md", (c) => c + "+e1", { maxAttempts: 10 }), vault.updateNote("a.md", replaceOther, { maxAttempts: 10 })];
+        await tick();
+        await release();
+        const [first, second] = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base+OTHER+e1");
+        assert.equal(first.attempts, 2);
+        assert.equal(second.attempts, 2);
+        assert.equal(second.content, textOf("a.md"));
+        assert.equal(second.revision, revOf("a.md"));
+    });
+
+    it("a note missing for the group: every member is told NoteNotFound and nothing is written", async () => {
+        const { vault, calls, docs } = stubVault();
+        const release = holdLock(vault, "gone.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("gone.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        for (const r of results) assert.ok(r.status === "rejected" && r.reason instanceof NoteNotFoundError && r.reason.path === "gone.md");
+        assert.equal(puts(calls), 0, calls.join(", "));
+        assert.equal(docs.size, 0);
+    });
+
+    it("a pinned call arriving mid-group is never folded into it: it runs alone, after, and sees the group's revision", async () => {
+        const { vault, calls, seed, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        const pinned = revOf("a.md")!;
+        const release = holdLock(vault, "a.md");
+        const group = [1, 2].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        let pinnedApplied = 0;
+        const pinnedCall = vault.updateNote("a.md", (c) => { pinnedApplied++; return c + "+pinned"; }, { expectedRevision: pinned, maxAttempts: 10 });
+        const late = vault.updateNote("a.md", (c) => c + "+e3", { maxAttempts: 10 });
+        await tick();
+        await release();
+        const [g1, g2] = await Promise.all(group);
+        await assert.rejects(pinnedCall, (e: any) => e instanceof RevisionMismatchError && e.expected === pinned && e.current === g1.revision);
+        // An unpinned edit issued after the pinned one still joins the queued group.
+        const g3 = await late;
+        assert.equal(pinnedApplied, 0, "a pin that no longer matches is refused before its edit runs");
+        assert.deepEqual(new Set([g1.revision, g2.revision, g3.revision]), new Set([revOf("a.md")]));
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
     it("every member of a group gets the text that was written with the revision", async () => {
         const { vault, seed, textOf, revOf } = stubVault();
         seed("a.md", "base");

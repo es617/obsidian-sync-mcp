@@ -24,7 +24,8 @@
  *             may succeed; the other must be told, not silently overwritten.
  *   group-with-refusal
  *             nine edits at once on one instance, one of them for text that is
- *             not in the note: the eight land, the ninth is told why.
+ *             not in the note: the eight land in one or two writes (their
+ *             answers carry at most two distinct revisions), the ninth is told why.
  *   group-index
  *             after that group, search_notes, list_tags and backlinks on the
  *             same instance see every one of the eight edits.
@@ -267,8 +268,11 @@ async function groupWithRefusal(clients: Client[]): Promise<void> {
     const { winner, conflicts } = await readFromCouch(path);
     const done = Array.from({ length: n }, (_, i) => winner.includes(`- [x] ${task(i)}`)).filter(Boolean).length;
     const refusal = answers[n].split("\n")[0];
-    check("group-with-refusal", done === n && /old_text not found/.test(refusal) && conflicts.length === 0,
-        `${done}/${n} edits present on one instance, the bad one answered ${JSON.stringify(refusal)}, ${conflicts.length} conflict leaves`);
+    // Grouping happened: the eight landed in one or two writes (the first edit to
+    // arrive can be written alone, before the rest have queued), not eight.
+    const revisions = new Set(answers.slice(0, n).map((a) => a.match(/^Revision: (\S+)$/m)?.[1]));
+    check("group-with-refusal", done === n && /old_text not found/.test(refusal) && conflicts.length === 0 && revisions.size <= 2 && !revisions.has(undefined),
+        `${done}/${n} edits present on one instance in ${revisions.size} distinct revisions, the bad one answered ${JSON.stringify(refusal)}, ${conflicts.length} conflict leaves`);
 
     const tags = await clients[0].tool("list_tags", {});
     let searched = 0, tagged = 0, linked = 0;
