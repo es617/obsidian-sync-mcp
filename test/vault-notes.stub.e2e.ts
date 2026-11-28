@@ -362,3 +362,33 @@ describe("Vault.writeNote overwrites through the revision check (stubbed manipul
         assert.deepEqual(calls.filter((c) => c.startsWith("put")), ["put n.md", "put m.md"]);
     });
 });
+
+describe("Vault.updateNote group commit (stubbed manipulator)", () => {
+    const puts = (calls: string[]) => calls.filter((c) => c.startsWith("put")).length;
+    const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+    /** Hold the note's lock, so edits issued meanwhile queue up and form one group when it is released. */
+    function holdLock(vault: Vault, id: string): () => Promise<void> {
+        let release!: () => void;
+        const held = new Promise<void>((r) => (release = r));
+        const taken = (vault as any).docLock.run([id], () => held);
+        return async () => {
+            release();
+            await taken;
+        };
+    }
+
+    it("every member of a group gets the text that was written with the revision", async () => {
+        const { vault, seed, textOf, revOf } = stubVault();
+        seed("a.md", "base");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3, 4].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3+e4");
+        for (const r of results) {
+            assert.equal(r.content, textOf("a.md"));
+            assert.equal(r.revision, revOf("a.md"));
+        }
+    });
+});

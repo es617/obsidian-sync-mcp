@@ -542,10 +542,10 @@ export class Vault implements VaultBackend {
             if (refusedBase === entry._rev) throw new WriteNotStoredError(path);
             if (expectedRevision !== undefined && entry._rev !== expectedRevision) throw new RevisionMismatchError(path, expectedRevision, entry._rev);
             let content = entry.data.join("");
-            const outcomes: Array<{ content?: string; error?: unknown }> = group.map((member) => {
+            const outcomes: Array<{ error?: unknown }> = group.map((member) => {
                 try {
                     content = member.apply(content);
-                    return { content };
+                    return {};
                 } catch (error) {
                     return { error };
                 }
@@ -554,7 +554,9 @@ export class Vault implements VaultBackend {
             const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
             if (revision) {
                 if (debugLog && group.length > 1) console.log(`[vault] group write of ${group.length} edits on attempt ${attempt}`);
-                return outcomes.map((o) => (o.error !== undefined ? { error: o.error } : { value: { content: o.content!, revision, attempts: attempt } }));
+                // Every member that landed gets the text that was written, so its
+                // content and revision describe the same version of the note.
+                return outcomes.map((o) => (o.error !== undefined ? { error: o.error } : { value: { content, revision, attempts: attempt } }));
             }
             refusedBase = entry._rev;
             if (expectedRevision !== undefined) {

@@ -149,6 +149,8 @@ export interface VaultBackend {
      * another writer got there first, read again and re-apply, up to
      * `maxAttempts` rounds; `apply` may throw to refuse (its error propagates
      * and nothing is written). Throws NoteNotFoundError when the note is absent.
+     * The result's content is the text stored at its revision, which can hold
+     * other callers' edits written in the same write.
      */
     updateNote?(path: string, apply: (content: string) => string, options?: UpdateOptions): Promise<UpdateResult>;
     /** Never replaces a note at `to`: throws NoteExistsError instead, checked in the same step as the move. */

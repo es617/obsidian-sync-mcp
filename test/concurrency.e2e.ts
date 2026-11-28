@@ -25,6 +25,9 @@
  *   group-with-refusal
  *             nine edits at once on one instance, one of them for text that is
  *             not in the note: the eight land, the ninth is told why.
+ *   group-index
+ *             after that group, search_notes, list_tags and backlinks on the
+ *             same instance see every one of the eight edits.
  *   expected-revision
  *             a write_note with the revision read on one instance succeeds on the
  *             other; repeating it with that now-stale revision writes nothing.
@@ -252,16 +255,30 @@ async function sameLine(clients: Client[]): Promise<void> {
 async function groupWithRefusal(clients: Client[]): Promise<void> {
     const path = "Boards/group.md";
     const n = 8;
+    const target = (i: number) => `Boards/grptarget${i}.md`;
+    for (let i = 0; i < n; i++) await seed(clients[0], target(i), `target ${i}\n`);
     await seed(clients[0], path, board(Array.from({ length: n }, (_, i) => `- [ ] ${task(i)}`)));
     const workers = await Promise.all(Array.from({ length: n + 1 }, () => new Client(clients[0].port).connect()));
+    // Each edit adds a word, a tag and a link of its own, so the search index of
+    // the instance that wrote the group can be checked for every member.
     const answers = await Promise.all(workers.map((w, i) => i < n
-        ? w.tool("edit_note", { path, operation: "replace", old_text: `- [ ] ${task(i)}`, content: `- [x] ${task(i)}` })
+        ? w.tool("edit_note", { path, operation: "replace", old_text: `- [ ] ${task(i)}`, content: `- [x] ${task(i)} grpword${i} #grptag${i} [[grptarget${i}]]` })
         : w.tool("edit_note", { path, operation: "replace", old_text: "- [ ] no such task", content: "- [x] no such task" })));
     const { winner, conflicts } = await readFromCouch(path);
     const done = Array.from({ length: n }, (_, i) => winner.includes(`- [x] ${task(i)}`)).filter(Boolean).length;
     const refusal = answers[n].split("\n")[0];
     check("group-with-refusal", done === n && /old_text not found/.test(refusal) && conflicts.length === 0,
         `${done}/${n} edits present on one instance, the bad one answered ${JSON.stringify(refusal)}, ${conflicts.length} conflict leaves`);
+
+    const tags = await clients[0].tool("list_tags", {});
+    let searched = 0, tagged = 0, linked = 0;
+    for (let i = 0; i < n; i++) {
+        if ((await clients[0].tool("search_notes", { terms: [`grpword${i}`] })).includes(path)) searched++;
+        if (tags.includes(`#grptag${i} `)) tagged++;
+        if (/^Backlinks: .*Boards\/group\.md/m.test(await clients[0].tool("get_note_metadata", { path: target(i) }))) linked++;
+    }
+    check("group-index", searched === n && tagged === n && linked === n,
+        `on the instance that wrote the group: search_notes finds ${searched}/${n} edits, list_tags ${tagged}/${n}, backlinks ${linked}/${n}`);
 }
 
 function percentile(sorted: number[], p: number): number {
