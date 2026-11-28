@@ -8,7 +8,8 @@ import { SearchIndex } from "./search.js";
 import { parseWriteFolders } from "./write-scope.js";
 import { readOnlyVault, READ_ONLY_MESSAGE } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
-import { loadPlugins, parsePluginPolicy, pluginDirectory, trackToolNames, type PluginPolicy } from "./plugins.js";
+import { UpdateRetriesExhaustedError } from "./vault-backend.js";
+import { guardedVault, loadPlugins, parsePluginPolicy, pluginDirectory, PluginWriteError, trackToolNames, type PluginPolicy } from "./plugins.js";
 
 // The example plugin: one tool per vault call, so every guard can be reached from a tool.
 const EXAMPLE = `
@@ -337,5 +338,170 @@ describe("plugins on a backend with revisions", () => {
         const v = guardedVault(backend, new SearchIndex(), null, false);
         assert.equal(await v.editNote("a.md", (t) => t + "!"), "start!");
         assert.deepEqual(calls, ["updateNote maxAttempts=10"]);
+    });
+});
+
+/** A tool's answer; a throw becomes "THREW: <message>", so a comparison shows it instead of stopping the test. */
+async function answer(p: Promise<unknown>): Promise<string> {
+    try {
+        return String(await p);
+    } catch (err) {
+        return `THREW: ${(err as Error).message}`;
+    }
+}
+
+/** A backend that records every write and never touches a disk; `revisions` adds updateNote (CouchDB mode). */
+function recordingBackend(revisions = true, text = "start") {
+    const writes: string[] = [];
+    const backend: any = {
+        readNote: async () => text,
+        writeNote: async (p: string, c: string) => { writes.push(`write ${p} ${JSON.stringify(c)}`); return true; },
+        deleteNote: async (p: string) => { writes.push(`delete ${p}`); return true; },
+        moveNote: async (f: string, t: string) => { writes.push(`move ${f} ${t}`); return true; },
+    };
+    if (revisions) {
+        backend.updateNote = async (p: string, apply: (c: string) => string) => {
+            const next = apply(text);
+            writes.push(`update ${p} ${JSON.stringify(next)}`);
+            return { content: next, revision: "2-a", attempts: 1 };
+        };
+    }
+    return { backend, writes };
+}
+
+describe("ctx.vault refuses values that aren't strings", () => {
+    // A String subclass with its own replace(): the folder check would see "MCP/x.md".
+    class Sneaky extends String {
+        override replace(): string { return "MCP/x.md"; }
+    }
+    const sneaky = new Sneaky("Other/x.md") as unknown as string;
+    const refused = (pattern: RegExp) => (err: unknown) => err instanceof PluginWriteError && pattern.test(err.message);
+
+    for (const revisions of [true, false]) {
+        it(`refuses a non-string path or content before any check or write (${revisions ? "CouchDB" : "local"}-shaped backend)`, async () => {
+            const { backend, writes } = recordingBackend(revisions);
+            const v = guardedVault(backend, new SearchIndex(), parseWriteFolders("MCP"), false);
+            const cases: Array<[string, () => Promise<unknown>, RegExp]> = [
+                ["writeNote path", () => v.writeNote(sneaky, "c"), /^writeNote: path must be a string, got a String object\. Nothing was written\.$/],
+                ["writeNote undefined content", () => v.writeNote("MCP/a.md", undefined as any), /^writeNote: content must be a string, got undefined\./],
+                ["writeNote object content", () => v.writeNote("MCP/a.md", { a: 1 } as any), /^writeNote: content must be a string, got an object\./],
+                ["editNote path", () => v.editNote(sneaky, (t) => t), /^editNote: path must be a string/],
+                ["deleteNote path", () => v.deleteNote(sneaky), /^deleteNote: path must be a string/],
+                ["moveNote from", () => v.moveNote(sneaky, "MCP/b.md"), /^moveNote: from must be a string/],
+                ["moveNote to", () => v.moveNote("MCP/a.md", sneaky), /^moveNote: to must be a string/],
+            ];
+            for (const [what, run, pattern] of cases) await assert.rejects(run(), refused(pattern), what);
+            assert.deepEqual(writes, [], "nothing reached the backend");
+        });
+
+        it(`an editNote callback must return a string (${revisions ? "CouchDB" : "local"}-shaped backend)`, async () => {
+            const { backend, writes } = recordingBackend(revisions);
+            const v = guardedVault(backend, new SearchIndex(), null, false);
+            for (const [what, result, got] of [
+                ["undefined", undefined, "undefined"],
+                ["an object", { text: "x" }, "an object"],
+                ["a Promise", Promise.resolve("x"), "a Promise (the callback must not be async)"],
+                ["a String object", new String("x"), "a String object"],
+            ] as const) {
+                await assert.rejects(v.editNote("a.md", () => result as any), refused(new RegExp(`^editNote: the callback must return the new text as a string, got ${got.replace(/[()]/g, "\\$&")}\\. Nothing was written\\.$`)), what);
+            }
+            assert.deepEqual(writes, []);
+            assert.equal(await v.editNote("a.md", (t) => t + "!"), "start!", "a string still works");
+        });
+    }
+});
+
+describe("plugin answers match the built-in tools", () => {
+    let dir: string;
+    let pluginDir: string;
+    before(async () => {
+        dir = await mkdtemp(join(tmpdir(), "plugin-parity-"));
+        pluginDir = await mkdtemp(join(dir, "p-"));
+        await writeFile(join(pluginDir, "tasks.mjs"), EXAMPLE);
+    });
+    after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+    /** The built-in tools and the example plugin's tools over one backend. */
+    async function both(backend: any, scope?: string) {
+        const tools: any[] = [];
+        const server = { addTool: (t: any) => { tools.push(t); } };
+        const toolNames = trackToolNames(server);
+        const searchIndex = new SearchIndex();
+        const writeFolders = parseWriteFolders(scope);
+        registerTools(server as any, backend, searchIndex, "vault", false, writeFolders);
+        await loadPlugins(pluginDir, { kind: "names", names: ["tasks"] }, { server, toolNames, vault: backend, searchIndex, vaultName: "vault", readOnly: false, writeFolders });
+        return (name: string, args: any) => {
+            const tool = tools.find((t) => t.name === name);
+            return answer(tool.execute(tool.parameters.parse(args), {}));
+        };
+    }
+    const SUCCESS = /^(Note saved|Note edited|Deleted|Moved)/;
+
+    it("every refusal on a local vault under WRITE_FOLDERS reads the same", async () => {
+        const root = await mkdtemp(join(dir, "v-"));
+        const local = new LocalVault(root);
+        for (const p of ["Raw/a.md", "MCP/a.md", "MCP/b.md", "Notes/n.md", "Other/o.md"]) await local.writeNote(p, "text");
+        const call = await both(local, "MCP,Raw:create,Notes:create+update");
+        const cases: Array<[string, [string, any], [string, any]]> = [
+            ["overwrite in a create-only folder", ["write_note", { path: "Raw/a.md", content: "x" }], ["put_note", { path: "Raw/a.md", content: "x" }]],
+            ["createOnly onto a note in a create-only folder", ["write_note", { path: "Raw/a.md", content: "x" }], ["put_note", { path: "Raw/a.md", content: "x", createOnly: true }]],
+            ["write outside every folder", ["write_note", { path: "Other/x.md", content: "x" }], ["put_note", { path: "Other/x.md", content: "x" }]],
+            ["edit in a create-only folder", ["edit_note", { path: "Raw/a.md", content: "x" }], ["add_task", { path: "Raw/a.md", task: "x" }]],
+            ["edit a missing note", ["edit_note", { path: "MCP/missing.md", content: "x" }], ["add_task", { path: "MCP/missing.md", task: "x" }]],
+            ["edit outside every folder", ["edit_note", { path: "Other/o.md", content: "x" }], ["add_task", { path: "Other/o.md", task: "x" }]],
+            ["delete without delete permission", ["delete_note", { path: "Notes/n.md" }], ["drop_note", { path: "Notes/n.md" }]],
+            ["delete a missing note", ["delete_note", { path: "MCP/missing.md" }], ["drop_note", { path: "MCP/missing.md" }]],
+            ["move onto an existing note", ["move_note", { from: "MCP/a.md", to: "MCP/b.md" }], ["shift_note", { from: "MCP/a.md", to: "MCP/b.md" }]],
+            ["move out of a create-only folder", ["move_note", { from: "Raw/a.md", to: "MCP/z.md" }], ["shift_note", { from: "Raw/a.md", to: "MCP/z.md" }]],
+            ["move into a folder outside the scope", ["move_note", { from: "MCP/a.md", to: "Other/z.md" }], ["shift_note", { from: "MCP/a.md", to: "Other/z.md" }]],
+        ];
+        for (const [what, [bt, bargs], [pt, pargs]] of cases) {
+            const builtIn = await call(bt, bargs);
+            assert.doesNotMatch(builtIn, SUCCESS, `${what}: the built-in refuses`);
+            assert.equal(await call(pt, pargs), builtIn, what);
+        }
+        assert.match(await call("shift_note", { from: "MCP/a.md", to: "MCP/b.md" }), /Choose another path\.$/);
+        assert.match(await call("put_note", { path: "Raw/a.md", content: "x" }), /^Write access denied: .*The note already exists; choose a new path\.$/);
+    });
+
+    it("writeNote gets write_note's retry budget", async () => {
+        const seen: any[] = [];
+        const backend: any = { readNote: async () => null, writeNote: async (_p: string, _c: string, o: any) => { seen.push(o); return true; } };
+        const call = await both(backend);
+        await call("write_note", { path: "a.md", content: "x" });
+        await call("put_note", { path: "a.md", content: "x" });
+        assert.equal(seen.length, 2);
+        assert.ok(seen[0].maxAttempts > 0 && seen[0].minRetryMs > 0, JSON.stringify(seen[0]));
+        assert.deepEqual(seen[1], seen[0]);
+    });
+
+    it("a note that kept changing reads the same, on write and on edit", async () => {
+        const backend: any = {
+            readNote: async () => "text",
+            writeNote: async (p: string) => { throw new UpdateRetriesExhaustedError(p, 50); },
+            updateNote: async (p: string) => { throw new UpdateRetriesExhaustedError(p, 50); },
+        };
+        const call = await both(backend);
+        const write = await call("write_note", { path: "a.md", content: "x" });
+        assert.match(write, /kept changing during 50 attempts/);
+        assert.equal(await call("put_note", { path: "a.md", content: "x" }), write);
+        const edit = await call("edit_note", { path: "a.md", content: "x" });
+        assert.match(edit, /kept changing during 50 attempts/);
+        assert.equal(await call("add_task", { path: "a.md", task: "x" }), edit);
+    });
+
+    it("local mode: a write the backend doesn't confirm reads the same, and nothing throws", async () => {
+        const backend: any = { readNote: async () => "text", writeNote: async () => false, deleteNote: async () => false, moveNote: async () => false };
+        const call = await both(backend);
+        for (const [[bt, bargs], [pt, pargs]] of [
+            [["edit_note", { path: "a.md", content: "x" }], ["add_task", { path: "a.md", task: "x" }]],
+            [["write_note", { path: "a.md", content: "x" }], ["put_note", { path: "a.md", content: "x" }]],
+            [["delete_note", { path: "a.md" }], ["drop_note", { path: "a.md" }]],
+            [["move_note", { from: "a.md", to: "b.md" }], ["shift_note", { from: "a.md", to: "b.md" }]],
+        ] as Array<[[string, any], [string, any]]>) {
+            const builtIn = await call(bt, bargs);
+            assert.match(builtIn, /^Failed to /, bt);
+            assert.equal(await call(pt, pargs), builtIn, bt);
+        }
     });
 });

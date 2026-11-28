@@ -79,7 +79,7 @@ export type WriteMode = "upsert" | "create" | "update";
  * refusal to show. Whether it creates or updates depends on the note existing,
  * so the backend decides in the same step as the write.
  */
-export function chooseWriteMode(path: string, writeFolders: WriteScope): { mode: WriteMode } | { denied: string } {
+function chooseWriteMode(path: string, writeFolders: WriteScope): { mode: WriteMode } | { denied: string } {
     const allow = allowedActions(path, writeFolders);
     const canCreate = allow.has("create");
     const canUpdate = allow.has("update");
@@ -88,33 +88,148 @@ export function chooseWriteMode(path: string, writeFolders: WriteScope): { mode:
 }
 
 /**
- * Change a note's text with `apply` the way edit_note does: in CouchDB mode
- * revision-checked and re-applied when another writer got in first, else read
- * then written back without recreating a note deleted in between. Returns the
- * new text, or null when the note doesn't exist. The caller checks
- * WRITE_FOLDERS ("update") first. Shared with plugins.
+ * The whole-note write of write_note (without expected_revision), shared with
+ * plugins so both answer alike: the mode WRITE_FOLDERS allows (only "create"
+ * with `createOnly`), edit_note's retry budget, and on success the search
+ * index updated. Returns null when saved, else the answer to give; nothing
+ * was written then.
  */
-export async function editNoteText(vault: VaultBackend, path: string, apply: (content: string) => string): Promise<string | null> {
+export async function writeNoteChecked(
+    vault: VaultBackend,
+    searchIndex: SearchIndex,
+    writeFolders: WriteScope,
+    path: string,
+    content: string,
+    createOnly = false,
+): Promise<string | null> {
+    let mode: WriteMode;
+    if (createOnly) {
+        const denied = checkWrite(path, "create", writeFolders);
+        if (denied) return denied;
+        mode = "create";
+    } else {
+        const choice = chooseWriteMode(path, writeFolders);
+        if ("denied" in choice) return choice.denied;
+        mode = choice.mode;
+    }
+    let ok: boolean;
+    try {
+        // CouchDB mode replaces an existing note with a revision-checked put,
+        // retried within edit_note's budget.
+        ok = await vault.writeNote(path, content, { mode, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
+    } catch (err) {
+        if (err instanceof NoteExistsError) {
+            // Only "create" refuses an existing note: either the folder allows no update, or createOnly asked for it.
+            const denied = checkWrite(path, "update", writeFolders);
+            return denied ? `${denied} The note already exists; choose a new path.` : `Note already exists: ${path}`;
+        }
+        if (err instanceof NoteNotFoundError) return checkWrite(path, "create", writeFolders) ?? `Note not found: ${path}`;
+        if (err instanceof UpdateRetriesExhaustedError) {
+            return `Failed to write note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
+        }
+        throw err;
+    }
+    if (!ok) return `Failed to write note: ${path}`;
+    searchIndex.update(path, content, Date.now());
+    return null;
+}
+
+/** A refused or failed write: the answer to give. Nothing was written. */
+export interface Refused {
+    refused: string;
+}
+
+/**
+ * Change a note's text with `apply`: edit_note's write path, shared with
+ * plugins. Checks WRITE_FOLDERS ("update"). In CouchDB mode the change is
+ * applied to the text it was read with and written only if the note is still
+ * at that revision (or at `expectedRevision`); when another writer got in
+ * between, `apply` runs again on the new text, so it must have no side
+ * effects. In local mode the note is read, changed and written back, never
+ * recreating a note deleted in between. `apply` throws EditRefused to refuse
+ * with its message; any other throw propagates. Updates the search index.
+ */
+export async function editNoteChecked(
+    vault: VaultBackend,
+    searchIndex: SearchIndex,
+    writeFolders: WriteScope,
+    path: string,
+    apply: (content: string) => string,
+    expectedRevision?: string,
+): Promise<Refused | { content: string; revision?: string }> {
+    const denied = checkWrite(path, "update", writeFolders);
+    if (denied) return { refused: denied };
     if (vault.updateNote) {
         try {
-            return (await vault.updateNote(path, apply, { maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS })).content;
+            const { content, revision, attempts } = await vault.updateNote(path, apply, { expectedRevision, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
+            if (debugLogging && attempts > 1) console.log(`[tool] edit applied after ${attempts} attempts`);
+            searchIndex.update(path, content, Date.now());
+            return { content, revision };
         } catch (err) {
-            if (err instanceof NoteNotFoundError) return null;
+            if (err instanceof EditRefused) return { refused: err.message };
+            if (err instanceof NoteNotFoundError) return { refused: `Note not found: ${path}` };
+            if (err instanceof RevisionMismatchError) return { refused: describeMismatch(err) };
+            if (err instanceof UpdateRetriesExhaustedError) {
+                return { refused: `Failed to edit note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.` };
+            }
             throw err;
         }
     }
+    if (expectedRevision !== undefined) return { refused: NO_REVISIONS_MESSAGE };
     const existing = await vault.readNote(path);
-    if (existing === null) return null;
-    const updated = apply(existing);
-    let ok: boolean;
+    if (existing === null) return { refused: `Note not found: ${path}` };
+    let content: string;
     try {
-        ok = await vault.writeNote(path, updated, { mode: "update" });
+        content = apply(existing);
     } catch (err) {
-        if (err instanceof NoteNotFoundError) return null;
+        if (err instanceof EditRefused) return { refused: err.message };
         throw err;
     }
-    if (!ok) throw new Error(`Failed to edit note: ${path}`);
-    return updated;
+    let ok: boolean;
+    try {
+        // "update": a note deleted since it was read isn't recreated.
+        ok = await vault.writeNote(path, content, { mode: "update" });
+    } catch (err) {
+        if (err instanceof NoteNotFoundError) return { refused: `Note not found: ${path}` };
+        throw err;
+    }
+    if (!ok) return { refused: `Failed to edit note: ${path}` };
+    searchIndex.update(path, content, Date.now());
+    return { content };
+}
+
+/** delete_note's write path, shared with plugins. Returns null when deleted, else the answer to give. */
+export async function deleteNoteChecked(vault: VaultBackend, searchIndex: SearchIndex, writeFolders: WriteScope, path: string): Promise<string | null> {
+    const denied = checkWrite(path, "delete", writeFolders);
+    if (denied) return denied;
+    // The sync layer reports success even when nothing existed at the
+    // path, so "Deleted" would claim a cleanup that never happened.
+    // readNote returns "" for an empty note and null only when absent.
+    const existing = await vault.readNote(path);
+    if (existing === null) return `Note not found: ${path}`;
+    if (!(await vault.deleteNote(path))) return `Failed to delete: ${path}`;
+    searchIndex.remove(path);
+    return null;
+}
+
+/** move_note's write path, shared with plugins. Returns null when moved, else the answer to give. */
+export async function moveNoteChecked(vault: VaultBackend, searchIndex: SearchIndex, writeFolders: WriteScope, from: string, to: string): Promise<string | null> {
+    // A move deletes at the source and creates at the destination.
+    const denied = checkWrite(from, "delete", writeFolders) ?? checkWrite(to, "create", writeFolders);
+    if (denied) return denied;
+    const content = await vault.readNote(from);
+    let ok: boolean;
+    try {
+        ok = await vault.moveNote(from, to);
+    } catch (err) {
+        if (err instanceof NoteExistsError) return `A note already exists at ${to}. Choose another path.`;
+        throw err;
+    }
+    if (!ok) return `Failed to move: ${from} → ${to}`;
+    searchIndex.remove(from);
+    // content === "" is an empty-but-present note: keep it indexed at the new path.
+    if (content !== null) searchIndex.update(to, content, Date.now());
+    return null;
 }
 
 function describeMismatch(err: RevisionMismatchError): string {
@@ -215,30 +330,9 @@ export function registerTools(
                     throw err;
                 }
             }
-            const choice = chooseWriteMode(path, writeFolders);
-            if ("denied" in choice) return choice.denied;
-            const { mode } = choice;
-            let ok: boolean;
-            try {
-                // CouchDB mode replaces an existing note with a revision-checked put,
-                // retried within edit_note's budget.
-                ok = await vault.writeNote(path, content, { mode, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS });
-            } catch (err) {
-                if (err instanceof NoteExistsError) {
-                    return `${checkWrite(path, "update", writeFolders)} The note already exists; choose a new path.`;
-                }
-                if (err instanceof NoteNotFoundError) return checkWrite(path, "create", writeFolders)!;
-                if (err instanceof UpdateRetriesExhaustedError) {
-                    return `Failed to write note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
-                }
-                throw err;
-            }
-            if (!ok) {
-                return `Failed to write note: ${path}`;
-            }
-            searchIndex.update(path, content, Date.now());
-            const deepLink = makeDeepLink(vaultName, path);
-            return `Note saved: ${path}\n[Open in Obsidian](${deepLink})`;
+            const refused = await writeNoteChecked(vault, searchIndex, writeFolders, path, content);
+            if (refused !== null) return refused;
+            return `Note saved: ${path}\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
         },
     });
 
@@ -463,62 +557,11 @@ export function registerTools(
             expected_revision: expectedRevisionParam,
         }),
         execute: async ({ path, content: newContent, operation, old_text, expected_revision }) => {
-            const denied = checkWrite(path, "update", writeFolders);
-            if (denied) return denied;
             const op = operation ?? "append";
-
-            if (vault.updateNote) {
-                // CouchDB mode: the edit is applied to the text it was read with and
-                // written only if the note is still at that revision. When another
-                // writer got in between, the edit is re-applied to the new text
-                // (a replace re-checks old_text each time), so nobody's edit is lost.
-                try {
-                    const { content: updated, revision, attempts } = await vault.updateNote(
-                        path,
-                        (existing) => applyEdit(existing, op, newContent, old_text),
-                        { expectedRevision: expected_revision, maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS },
-                    );
-                    if (debugLogging && attempts > 1) console.log(`[tool] edit_note applied after ${attempts} attempts`);
-                    searchIndex.update(path, updated, Date.now());
-                    return `Note edited (${op}): ${path}\nRevision: ${revision}\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
-                } catch (err) {
-                    if (err instanceof EditRefused) return err.message;
-                    if (err instanceof NoteNotFoundError) return `Note not found: ${path}`;
-                    if (err instanceof RevisionMismatchError) return describeMismatch(err);
-                    if (err instanceof UpdateRetriesExhaustedError) {
-                        return `Failed to edit note: ${path} kept changing during ${err.attempts} attempts. Nothing was written; try again.`;
-                    }
-                    throw err;
-                }
-            }
-            if (expected_revision !== undefined) return NO_REVISIONS_MESSAGE;
-
-            const existing = await vault.readNote(path);
-            if (existing === null) {
-                return `Note not found: ${path}`;
-            }
-            let updated: string;
-            try {
-                updated = applyEdit(existing, op, newContent, old_text);
-            } catch (err) {
-                if (err instanceof EditRefused) return err.message;
-                throw err;
-            }
-
-            let ok: boolean;
-            try {
-                // "update": a note deleted since it was read isn't recreated.
-                ok = await vault.writeNote(path, updated, { mode: "update" });
-            } catch (err) {
-                if (err instanceof NoteNotFoundError) return `Note not found: ${path}`;
-                throw err;
-            }
-            if (!ok) {
-                return `Failed to edit note: ${path}`;
-            }
-            searchIndex.update(path, updated, Date.now());
-            const deepLink = makeDeepLink(vaultName, path);
-            return `Note edited (${op}): ${path}\n[Open in Obsidian](${deepLink})`;
+            const result = await editNoteChecked(vault, searchIndex, writeFolders, path, (existing) => applyEdit(existing, op, newContent, old_text), expected_revision);
+            if ("refused" in result) return result.refused;
+            const revisionLine = result.revision ? `\nRevision: ${result.revision}` : "";
+            return `Note edited (${op}): ${path}${revisionLine}\n[Open in Obsidian](${makeDeepLink(vaultName, path)})`;
         },
     });
 
@@ -529,16 +572,7 @@ export function registerTools(
             path: z.string().describe("Vault-relative path to the note to delete"),
         }),
         execute: async ({ path }) => {
-            const denied = checkWrite(path, "delete", writeFolders);
-            if (denied) return denied;
-            // The sync layer reports success even when nothing existed at the
-            // path, so "Deleted" would claim a cleanup that never happened.
-            // readNote returns "" for an empty note and null only when absent.
-            const existing = await vault.readNote(path);
-            if (existing === null) return `Note not found: ${path}`;
-            const ok = await vault.deleteNote(path);
-            if (ok) searchIndex.remove(path);
-            return ok ? `Deleted: ${path}` : `Failed to delete: ${path}`;
+            return (await deleteNoteChecked(vault, searchIndex, writeFolders, path)) ?? `Deleted: ${path}`;
         },
     });
 
@@ -551,25 +585,9 @@ export function registerTools(
             to: z.string().describe("New path, e.g. 'projects/new-name.md'"),
         }),
         execute: async ({ from, to }) => {
-            // A move deletes at the source and creates at the destination.
-            const denied = checkWrite(from, "delete", writeFolders) ?? checkWrite(to, "create", writeFolders);
-            if (denied) return denied;
-            const content = await vault.readNote(from);
-            let ok: boolean;
-            try {
-                ok = await vault.moveNote(from, to);
-            } catch (err) {
-                if (err instanceof NoteExistsError) return `A note already exists at ${to}. Choose another path.`;
-                throw err;
-            }
-            if (!ok) {
-                return `Failed to move: ${from} → ${to}`;
-            }
-            searchIndex.remove(from);
-            // content === "" is an empty-but-present note: keep it indexed at the new path.
-            if (content !== null) searchIndex.update(to, content, Date.now());
-            const deepLink = makeDeepLink(vaultName, to);
-            return `Moved: ${from} → ${to}\n[Open in Obsidian](${deepLink})`;
+            const refused = await moveNoteChecked(vault, searchIndex, writeFolders, from, to);
+            if (refused !== null) return refused;
+            return `Moved: ${from} → ${to}\n[Open in Obsidian](${makeDeepLink(vaultName, to)})`;
         },
     });
 

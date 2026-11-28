@@ -10,11 +10,10 @@
  * stat'ed or imported. Selected plugins are imported in name order, and each
  * default export is called once with a PluginContext. A plugin adds tools
  * with `ctx.addTool` (same shape as a built-in FastMCP tool) and reaches the
- * vault only through `ctx.vault`, which applies the same checks as the
- * built-in tools: READ_ONLY, WRITE_FOLDERS with its create / update / delete
- * permissions, and the same write calls (so a plugin's writes get the same
- * create-only and edit semantics as write_note and edit_note), and keeps the
- * search index current.
+ * vault only through `ctx.vault`, whose writes go through the built-in
+ * tools' own write paths in tools.ts (READ_ONLY, WRITE_FOLDERS with its
+ * create / update / delete permissions, the same answers, the search index
+ * kept current).
  *
  * Trust: a plugin runs in this process with this process's rights. The
  * context gives it no way around the checks above, but nothing stops a
@@ -28,10 +27,10 @@ import { readdir, stat } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { NoteExistsError, NoteNotFoundError, type NoteInfo, type VaultBackend } from "./vault-backend.js";
+import type { NoteInfo, VaultBackend } from "./vault-backend.js";
 import type { SearchIndex } from "./search.js";
-import { checkWrite, type WriteScope } from "./write-scope.js";
-import { chooseWriteMode, editNoteText } from "./tools.js";
+import type { WriteScope } from "./write-scope.js";
+import { deleteNoteChecked, editNoteChecked, moveNoteChecked, writeNoteChecked } from "./tools.js";
 import { READ_ONLY_MESSAGE } from "./vault-readonly.js";
 
 /** A write a plugin asked for was refused; the message is meant for the agent. */
@@ -48,7 +47,11 @@ export interface PluginVault {
     listNotes(folder?: string): Promise<string[]>;
     /** Create or replace a note, as write_note does; `createOnly` never replaces. */
     writeNote(path: string, content: string, options?: { createOnly?: boolean }): Promise<void>;
-    /** Change a note's text as edit_note does; returns the new text. */
+    /**
+     * Change a note's text as edit_note does; returns the new text. `apply`
+     * must return a string and may run more than once (CouchDB retries), so it
+     * must have no side effects.
+     */
     editNote(path: string, apply: (content: string) => string): Promise<string>;
     deleteNote(path: string): Promise<void>;
     /** Never replaces a note at `to`. */
@@ -76,6 +79,17 @@ export type Plugin = (ctx: PluginContext) => void | Promise<void>;
 
 const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
+/** What a value is, for a refusal message. */
+function kindOf(value: unknown): string {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    if (value instanceof String) return "a String object";
+    if (typeof (value as { then?: unknown }).then === "function") return "a Promise";
+    if (Array.isArray(value)) return "an array";
+    const type = typeof value;
+    return type === "object" ? "an object" : `a ${type}`;
+}
+
 interface ToolServer {
     addTool(tool: any): void;
 }
@@ -91,59 +105,61 @@ export function trackToolNames(server: ToolServer): Set<string> {
     return names;
 }
 
-/** The vault as a plugin sees it: every write passes the same checks as the built-in tools. */
+/**
+ * The vault as a plugin sees it, frozen: every write goes through the
+ * built-in tools' write paths (tools.ts), so it passes the same checks and is
+ * refused with the same answer. Values that aren't strings are refused first:
+ * the folder check would call a String subclass's own methods, and a note
+ * can't be saved as "undefined".
+ */
 export function guardedVault(vault: VaultBackend, searchIndex: SearchIndex, writeFolders: WriteScope, readOnly: boolean): PluginVault {
-    const deny = (message: string | null) => {
-        if (message) throw new PluginWriteError(message);
+    const refuse = (message: string | null) => {
+        if (message !== null) throw new PluginWriteError(message);
     };
-    const writable = () => deny(readOnly ? READ_ONLY_MESSAGE : null);
-    return {
+    const text = (method: string, field: string, value: unknown) => {
+        if (typeof value !== "string") refuse(`${method}: ${field} must be a string, got ${kindOf(value)}. Nothing was written.`);
+    };
+    const writable = () => refuse(readOnly ? READ_ONLY_MESSAGE : null);
+    return Object.freeze<PluginVault>({
         readNote: (path) => vault.readNote(path),
         getMetadata: (path) => vault.getMetadata(path),
         listNotes: (folder) => vault.listNotes(folder),
-        async writeNote(path, content, { createOnly = false } = {}) {
+        async writeNote(path, content, options) {
+            text("writeNote", "path", path);
+            text("writeNote", "content", content);
+            const createOnly = options?.createOnly ?? false;
+            if (typeof createOnly !== "boolean") refuse(`writeNote: createOnly must be true or false, got ${kindOf(createOnly)}. Nothing was written.`);
             writable();
-            const choice = createOnly ? { mode: "create" as const } : chooseWriteMode(path, writeFolders);
-            if ("denied" in choice) throw new PluginWriteError(choice.denied);
-            if (createOnly) deny(checkWrite(path, "create", writeFolders));
-            try {
-                if (!(await vault.writeNote(path, content, { mode: choice.mode }))) throw new PluginWriteError(`Failed to write note: ${path}`);
-            } catch (err) {
-                if (err instanceof NoteExistsError) throw new PluginWriteError(`Note already exists: ${path}`);
-                if (err instanceof NoteNotFoundError) throw new PluginWriteError(checkWrite(path, "create", writeFolders) ?? `Note not found: ${path}`);
-                throw err;
-            }
-            searchIndex.update(path, content, Date.now());
+            refuse(await writeNoteChecked(vault, searchIndex, writeFolders, path, content, createOnly));
         },
         async editNote(path, apply) {
+            text("editNote", "path", path);
+            if (typeof apply !== "function") refuse(`editNote: the callback must be a function, got ${kindOf(apply)}. Nothing was written.`);
             writable();
-            deny(checkWrite(path, "update", writeFolders));
-            const updated = await editNoteText(vault, path, apply);
-            if (updated === null) throw new PluginWriteError(`Note not found: ${path}`);
-            searchIndex.update(path, updated, Date.now());
-            return updated;
+            const checked = (current: string) => {
+                const next: unknown = apply(current);
+                if (typeof next !== "string") {
+                    const hint = kindOf(next) === "a Promise" ? " (the callback must not be async)" : "";
+                    refuse(`editNote: the callback must return the new text as a string, got ${kindOf(next)}${hint}. Nothing was written.`);
+                }
+                return next as string;
+            };
+            const result = await editNoteChecked(vault, searchIndex, writeFolders, path, checked);
+            if ("refused" in result) refuse(result.refused);
+            return (result as { content: string }).content;
         },
         async deleteNote(path) {
+            text("deleteNote", "path", path);
             writable();
-            deny(checkWrite(path, "delete", writeFolders));
-            if ((await vault.readNote(path)) === null) throw new PluginWriteError(`Note not found: ${path}`);
-            if (!(await vault.deleteNote(path))) throw new PluginWriteError(`Failed to delete: ${path}`);
-            searchIndex.remove(path);
+            refuse(await deleteNoteChecked(vault, searchIndex, writeFolders, path));
         },
         async moveNote(from, to) {
+            text("moveNote", "from", from);
+            text("moveNote", "to", to);
             writable();
-            deny(checkWrite(from, "delete", writeFolders) ?? checkWrite(to, "create", writeFolders));
-            const content = await vault.readNote(from);
-            try {
-                if (!(await vault.moveNote(from, to))) throw new PluginWriteError(`Failed to move: ${from} → ${to}`);
-            } catch (err) {
-                if (err instanceof NoteExistsError) throw new PluginWriteError(`A note already exists at ${to}.`);
-                throw err;
-            }
-            searchIndex.remove(from);
-            if (content !== null) searchIndex.update(to, content, Date.now());
+            refuse(await moveNoteChecked(vault, searchIndex, writeFolders, from, to));
         },
-    };
+    });
 }
 
 /** Which plugins to load, from PLUGINS. */
