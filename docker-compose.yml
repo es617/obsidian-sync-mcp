@@ -60,6 +60,8 @@ services:
       VAULT_NAME: ${VAULT_NAME:-MyVault}
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN in .env}
       BASE_URL: ${BASE_URL:-http://localhost:8787}
+      # The image prepares /data for the node user; see the README for PLUGIN_DIR.
+      DATA_DIR: /data
     depends_on:
       db-init:
         condition: service_completed_successfully

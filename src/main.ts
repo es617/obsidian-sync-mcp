@@ -17,6 +17,7 @@ import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
 import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 import { parsePathNormalization, type PathNormalizationSetting } from "./path-identity-config.js";
 import { declareUtf8Charset } from "./http-charset.js";
+import { loadPlugins, parsePluginPolicy, pluginDirectory, trackToolNames, type PluginPolicy } from "./plugins.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -47,6 +48,14 @@ const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const READ_ONLY = process.env.READ_ONLY === "true";
+// Plugins (see plugins.ts): off unless PLUGINS names some, or is `all`.
+let PLUGINS: PluginPolicy;
+try {
+    PLUGINS = parsePluginPolicy(process.env.PLUGINS);
+} catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+}
 let WRITE_FOLDERS: WriteScope;
 try {
     WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
@@ -157,7 +166,8 @@ console.log("Vault ready.");
 if (READ_ONLY) vault = readOnlyVault(vault);
 
 // --- Per-vault data directory ---
-const baseDataDir = process.env.DATA_DIR ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "/tmp", ".obsidian-mcp");
+const homeDir = process.env.HOME ?? process.env.USERPROFILE;
+const baseDataDir = process.env.DATA_DIR ?? join(homeDir ?? "/tmp", ".obsidian-mcp");
 const vaultId = createHash("sha256").update(VAULT_NAME).digest("hex").slice(0, 12);
 const dataDir = join(baseDataDir, vaultId);
 
@@ -475,6 +485,7 @@ if (AUTH_TOKEN) {
 }
 
 const server = new FastMCP(serverOptions);
+const toolNames = trackToolNames(server);
 
 if (AUTH_TOKEN) {
     const tokenPath = join(dataDir, "auth-tokens.json");
@@ -520,6 +531,25 @@ if (ATTACHMENTS_ENABLED) {
     );
 }
 
+// Prevent unhandled rejections from crashing the server (e.g. decryption failures
+// in watcher). Installed before plugins load, so a rejection in a plugin's
+// background code during startup is logged rather than ending the process.
+process.on("unhandledRejection", (err) => {
+    console.error(`Unhandled rejection: ${describeError(err, debugLogging)}`);
+});
+
+if (PLUGINS.kind !== "off") {
+    try {
+        // No plugins from the /tmp fallback data directory (pluginDirectory refuses it).
+        const pluginDir = pluginDirectory(process.env.PLUGIN_DIR, process.env.DATA_DIR !== undefined || homeDir !== undefined ? baseDataDir : null);
+        const loaded = await loadPlugins(pluginDir, PLUGINS, { server, toolNames, vault, searchIndex, vaultName: VAULT_NAME, readOnly: READ_ONLY, writeFolders: WRITE_FOLDERS, vaultPath: VAULT_PATH });
+        if (loaded.length === 0) console.log(`Plugins: none found in ${pluginDir}.`);
+    } catch (err) {
+        console.error(`Plugins: ${(err as Error).message}`);
+        process.exit(1);
+    }
+}
+
 // --- Graceful shutdown ---
 async function shutdown() {
     console.log("Shutting down...");
@@ -549,8 +579,3 @@ server.start({
     httpStream: { port: PORT, endpoint: "/mcp", host: process.env.HOST ?? "0.0.0.0" },
 });
 console.log(`obsidian-sync-mcp v${process.env.npm_package_version ?? "unknown"} listening on port ${PORT}`);
-
-// Prevent unhandled rejections from crashing the server (e.g. decryption failures in watcher)
-process.on("unhandledRejection", (err) => {
-    console.error(`Unhandled rejection: ${describeError(err, debugLogging)}`);
-});
