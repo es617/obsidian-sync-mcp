@@ -21,15 +21,19 @@ const { describe, it } = createRequire(import.meta.url)("node:test") as typeof i
 
 type Doc = { path: string; data: string[]; ctime: number; mtime: number; size: number; _rev: string };
 
-/** What happens just before a revision-checked put lands: another writer gets in, the note is deleted, or CouchDB fails without a 409. */
-type BeforePut = "other" | "delete" | "fail";
+/**
+ * What happens just before a revision-checked put lands: another writer gets
+ * in, the note is deleted, CouchDB fails without a 409 (answering false, or
+ * throwing), or the put is stored and the answer is lost (it throws anyway).
+ */
+type BeforePut = "other" | "delete" | "fail" | "throw" | "storedThenThrow";
 
 /**
  * Enough of DirectFileManipulator for the note methods. Ids are lowercased like
  * LiveSync's default (case-insensitive) vaults, and every call yields so
  * unlocked check-then-write sequences would interleave.
  */
-function stubVault({ caseSensitive = false } = {}) {
+function stubVault({ caseSensitive = false, maxBytes = Infinity, oversized = "false" as "false" | "throw" } = {}) {
     const docs = new Map<string, Doc>();
     const calls: string[] = [];
     /** Consumed one per revision-checked put, in order. */
@@ -64,15 +68,22 @@ function stubVault({ caseSensitive = false } = {}) {
                 calls.push(`put@rev ${doc.path}`);
                 const text = await doc.data.text();
                 await tick();
+                // Like a body over CouchDB's max_http_request_size: refused whatever the revision.
+                if (text.length > maxBytes) {
+                    if (oversized === "throw") throw Object.assign(new Error("request entity too large"), { status: 413 });
+                    return false;
+                }
                 const event = beforePut.shift();
                 const current = docs.get(doc._id);
                 if (event === "other" && current) docs.set(doc._id, { ...current, data: [current.data.join("") + "+other"], _rev: nextRev(current._rev) });
                 if (event === "delete") docs.delete(doc._id);
                 if (event === "fail") return false;
+                if (event === "throw") throw new Error("socket hang up");
                 const now = docs.get(doc._id);
                 if (!now || now._rev !== baseRevision) return false;
                 const rev = nextRev(now._rev);
                 docs.set(doc._id, { path: doc.path, data: [text], ctime: doc.ctime, mtime: doc.mtime, size: doc.size, _rev: rev });
+                if (event === "storedThenThrow") throw new Error("socket hang up");
                 return { ok: true, id: doc._id, rev };
             },
         },
@@ -390,5 +401,52 @@ describe("Vault.updateNote group commit (stubbed manipulator)", () => {
             assert.equal(r.content, textOf("a.md"));
             assert.equal(r.revision, revOf("a.md"));
         }
+    });
+
+    for (const oversized of ["false", "throw"] as const) {
+        it(`a group write CouchDB won't store (${oversized === "false" ? "answers false" : "throws"}) is retried one member at a time: only the edit too big on its own fails`, async () => {
+            const { vault, calls, seed, textOf } = stubVault({ maxBytes: 100, oversized });
+            seed("a.md", "base");
+            const release = holdLock(vault, "a.md");
+            const edits = ["+s1", "+s2", "+s3", "+" + "B".repeat(200), "+s4", "+s5", "+s6", "+s7"];
+            const pending = edits.map((e) => vault.updateNote("a.md", (c) => c + e, { maxAttempts: 10 }));
+            await tick();
+            await release();
+            const results = await Promise.allSettled(pending);
+            assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled", "rejected", "fulfilled", "fulfilled", "fulfilled", "fulfilled"]);
+            assert.equal(textOf("a.md"), "base+s1+s2+s3+s4+s5+s6+s7");
+            const big = (results[3] as PromiseRejectedResult).reason;
+            assert.match(String(big?.message), oversized === "false" ? /CouchDB did not store the write to a\.md/ : /request entity too large/);
+            // The last small edit's answer is the stored text and revision.
+            assert.equal((results[7] as PromiseFulfilledResult<any>).value.content, textOf("a.md"));
+            assert.equal(puts(calls), 1 + edits.length, calls.join(", "));
+        });
+    }
+
+    it("a group put that threw after it was stored is not re-applied: the group is told, nothing is written twice", async () => {
+        const { vault, calls, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("storedThenThrow");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["rejected", "rejected", "rejected"]);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
+        assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it("a put that threw before anything was stored falls back too", async () => {
+        const { vault, seed, beforePut, textOf } = stubVault();
+        seed("a.md", "base");
+        beforePut.push("throw");
+        const release = holdLock(vault, "a.md");
+        const pending = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.allSettled(pending);
+        assert.deepEqual(results.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled"]);
+        assert.equal(textOf("a.md"), "base+e1+e2+e3");
     });
 });

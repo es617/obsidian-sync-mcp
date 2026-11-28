@@ -502,15 +502,7 @@ export class Vault implements VaultBackend {
             await this.docLock.run([id], async () => {
                 const group = this.pendingUpdates.get(id) ?? [];
                 this.pendingUpdates.set(id, []);
-                if (group.length === 0) return;
-                let results: GroupResult[];
-                try {
-                    results = await this.applyGroup(path, id, group);
-                } catch (err) {
-                    for (const member of group) member.reject(err);
-                    return;
-                }
-                group.forEach((member, i) => (results[i].error ? member.reject(results[i].error) : member.resolve(results[i].value!)));
+                if (group.length > 0) await this.writeGroup(path, id, group);
             });
             const queue = this.pendingUpdates.get(id);
             if (!queue || queue.length === 0) {
@@ -521,13 +513,56 @@ export class Vault implements VaultBackend {
     }
 
     /**
+     * Write one group and answer its members, under the document's lock. When
+     * the group's write fails for a reason other than a revision conflict (too
+     * large for CouchDB, say) and the note is provably still where it was, the
+     * failure can't be pinned on one member, so each member is written on its
+     * own instead, in arrival order: only the edits that fail by themselves are
+     * refused, as when every edit was its own write. A missing note and an
+     * exhausted retry budget are facts about the note, not about one member,
+     * and are answered to the whole group.
+     */
+    private async writeGroup(path: string, id: DocumentID, group: PendingUpdate[]): Promise<void> {
+        const attempt: { base?: string } = {};
+        let results: GroupResult[];
+        try {
+            results = await this.applyGroup(path, id, group, undefined, attempt);
+        } catch (err) {
+            if (group.length > 1 && !(err instanceof NoteNotFoundError || err instanceof UpdateRetriesExhaustedError) && (await this.stillAt(path, attempt.base))) {
+                if (debugLog) console.log(`[vault] group write of ${group.length} edits failed (${err instanceof Error ? err.message : String(err)}), writing them one at a time`);
+                // Each member is answered as its own write lands.
+                for (const member of group) await this.writeGroup(path, id, [member]);
+                return;
+            }
+            for (const member of group) member.reject(err);
+            return;
+        }
+        group.forEach((member, i) => (results[i].error ? member.reject(results[i].error) : member.resolve(results[i].value!)));
+    }
+
+    /**
+     * Whether the note is still at `base`, the revision a failed write was based
+     * on: then nothing of that write was stored. A put that threw may still have
+     * landed, and re-applying its edits on top would write them twice.
+     */
+    private async stillAt(path: string, base: string | undefined): Promise<boolean> {
+        if (base === undefined) return false;
+        try {
+            const now = await this.manipulator.get(path as FilePathWithPrefix, true);
+            return !!now && now._rev === base;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
      * One read-apply-write loop for a group of edits on one document, under its
      * lock. Each round re-reads the note and re-applies every member in order; a
      * member whose apply throws (old_text no longer found, say) is left out of
      * that round's write and answered with its error, the others still land. A
      * revision conflict repeats the round; the budget is the largest member's.
      */
-    private async applyGroup(path: string, id: DocumentID, group: GroupMember[], expectedRevision?: string): Promise<GroupResult[]> {
+    private async applyGroup(path: string, id: DocumentID, group: GroupMember[], expectedRevision?: string, progress: { base?: string } = {}): Promise<GroupResult[]> {
         const allowed = Math.max(...group.map((m) => m.maxAttempts));
         const minRetryMs = Math.max(...group.map((m) => m.minRetryMs));
         const started = performance.now();
@@ -551,6 +586,8 @@ export class Vault implements VaultBackend {
                 }
             });
             if (outcomes.every((o) => o.error !== undefined)) return outcomes.map((o) => ({ error: o.error }));
+            // The base of the last put tried, for writeGroup's "nothing was stored" check.
+            progress.base = entry._rev;
             const revision = await this.putAtRevision(path, id, content, entry.ctime, entry._rev);
             if (revision) {
                 if (debugLog && group.length > 1) console.log(`[vault] group write of ${group.length} edits on attempt ${attempt}`);
