@@ -11,7 +11,8 @@
  *   docker run -d --name couchdb-conc-test -p 127.0.0.1:5985:5984 \
  *     -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=test couchdb:3
  *
- * Override with TEST_COUCHDB_URL / TEST_COUCHDB_USER / TEST_COUCHDB_PASSWORD;
+ * Override with TEST_COUCHDB_URL / TEST_COUCHDB_USER / TEST_COUCHDB_PASSWORD /
+ * TEST_COUCHDB_DATABASE (default concurrencyvault);
  * CONCURRENCY_INSTANCES (default 2) sets how many server instances share the database.
  *
  * Scenarios (each prints PASS or FAIL; the run exits 1 on any FAIL):
@@ -54,7 +55,7 @@ import { join } from "node:path";
 const COUCH = (process.env.TEST_COUCHDB_URL ?? "http://localhost:5985").replace(/\/+$/, "");
 const COUCH_USER = process.env.TEST_COUCHDB_USER ?? "admin";
 const COUCH_PASSWORD = process.env.TEST_COUCHDB_PASSWORD ?? "test";
-const DB = "concurrencyvault";
+const DB = process.env.TEST_COUCHDB_DATABASE ?? "concurrencyvault";
 const AUTH = "concurrency-test-token";
 /** CONCURRENCY_INSTANCES=1 runs every worker against a single instance. */
 const INSTANCES = Number(process.env.CONCURRENCY_INSTANCES ?? 2);
