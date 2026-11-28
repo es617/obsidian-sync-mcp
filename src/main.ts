@@ -17,6 +17,7 @@ import { UploadRegistry, mountAttachmentUpload } from "./uploads.js";
 import { redactCredentials, describeError, describeLogMessage } from "./redact.js";
 import { parsePathNormalization, type PathNormalizationSetting } from "./path-identity-config.js";
 import { declareUtf8Charset } from "./http-charset.js";
+import { loadPlugins, parsePluginPolicy, pluginDirectory, trackToolNames, type PluginPolicy } from "./plugins.js";
 
 // Suppress livesync-commonlib logs that expose vault file paths in production.
 // Set LOG_LEVEL=debug to see all library logs during development.
@@ -47,6 +48,14 @@ const PORT = parseInt(process.env.PORT ?? "8787");
 const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 const READ_ONLY = process.env.READ_ONLY === "true";
+// Plugins (see plugins.ts): off unless PLUGINS names some, or is `all`.
+let PLUGINS: PluginPolicy;
+try {
+    PLUGINS = parsePluginPolicy(process.env.PLUGINS);
+} catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+}
 let WRITE_FOLDERS: WriteScope;
 try {
     WRITE_FOLDERS = parseWriteFolders(process.env.WRITE_FOLDERS);
@@ -475,6 +484,7 @@ if (AUTH_TOKEN) {
 }
 
 const server = new FastMCP(serverOptions);
+const toolNames = trackToolNames(server);
 
 if (AUTH_TOKEN) {
     const tokenPath = join(dataDir, "auth-tokens.json");
@@ -518,6 +528,17 @@ if (ATTACHMENTS_ENABLED) {
             ? "Attachments enabled (read-only: get_attachment_metadata only)."
             : `Attachments enabled: ${ATTACHMENT_WRITE_TOOLS.join(", ")}; uploads up to ${formatBytes(ATTACHMENT_MAX_BYTES)} via ${BASE_URL}/attachments/upload/<token>.`,
     );
+}
+
+{
+    const pluginDir = pluginDirectory(process.env.PLUGIN_DIR, baseDataDir);
+    try {
+        const loaded = await loadPlugins(pluginDir, PLUGINS, { server, toolNames, vault, searchIndex, vaultName: VAULT_NAME, readOnly: READ_ONLY, writeFolders: WRITE_FOLDERS });
+        if (PLUGINS.kind !== "off") console.log(`Plugins from ${pluginDir}: ${loaded.length ? loaded.join(", ") : "none found"}.`);
+    } catch (err) {
+        console.error(`Plugins: ${(err as Error).message}`);
+        process.exit(1);
+    }
 }
 
 // --- Graceful shutdown ---

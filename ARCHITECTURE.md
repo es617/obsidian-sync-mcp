@@ -158,6 +158,8 @@ Agent connects → /oauth/authorize → password page → /oauth/approve
 | `move_note` | vault | vault + index |
 | `delete_note` | — | vault + index |
 
+Plugins (`src/plugins.ts`, off unless `PLUGINS` is set) add more tools at startup, after the built-in ones. Their vault access goes through a guarded wrapper that applies the same `READ_ONLY` / `WRITE_FOLDERS` checks and shares `write_note`'s and `edit_note`'s write path (`chooseWriteMode`, `editNoteText`).
+
 ## Build (`tsup.config.ts`)
 
 livesync-commonlib is a Deno-style TypeScript library compiled for Node via tsup/esbuild:

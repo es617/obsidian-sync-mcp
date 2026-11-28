@@ -72,6 +72,51 @@ export function applyEdit(existing: string, op: "append" | "prepend" | "replace"
     return existing.endsWith("\n") ? existing + newContent : existing + "\n" + newContent;
 }
 
+export type WriteMode = "upsert" | "create" | "update";
+
+/**
+ * The write mode WRITE_FOLDERS allows for a whole-note write at `path`, or the
+ * refusal to show. Whether it creates or updates depends on the note existing,
+ * so the backend decides in the same step as the write.
+ */
+export function chooseWriteMode(path: string, writeFolders: WriteScope): { mode: WriteMode } | { denied: string } {
+    const allow = allowedActions(path, writeFolders);
+    const canCreate = allow.has("create");
+    const canUpdate = allow.has("update");
+    if (!canCreate && !canUpdate) return { denied: checkWrite(path, "create", writeFolders)! };
+    return { mode: canCreate && canUpdate ? "upsert" : canCreate ? "create" : "update" };
+}
+
+/**
+ * Change a note's text with `apply` the way edit_note does: in CouchDB mode
+ * revision-checked and re-applied when another writer got in first, else read
+ * then written back without recreating a note deleted in between. Returns the
+ * new text, or null when the note doesn't exist. The caller checks
+ * WRITE_FOLDERS ("update") first. Shared with plugins.
+ */
+export async function editNoteText(vault: VaultBackend, path: string, apply: (content: string) => string): Promise<string | null> {
+    if (vault.updateNote) {
+        try {
+            return (await vault.updateNote(path, apply, { maxAttempts: EDIT_MAX_ATTEMPTS, minRetryMs: EDIT_MIN_RETRY_MS })).content;
+        } catch (err) {
+            if (err instanceof NoteNotFoundError) return null;
+            throw err;
+        }
+    }
+    const existing = await vault.readNote(path);
+    if (existing === null) return null;
+    const updated = apply(existing);
+    let ok: boolean;
+    try {
+        ok = await vault.writeNote(path, updated, { mode: "update" });
+    } catch (err) {
+        if (err instanceof NoteNotFoundError) return null;
+        throw err;
+    }
+    if (!ok) throw new Error(`Failed to edit note: ${path}`);
+    return updated;
+}
+
 function describeMismatch(err: RevisionMismatchError): string {
     return `Revision mismatch: ${err.path} is at revision ${err.current}, not ${err.expected}. Nothing was written; read the note again and reapply your change.`;
 }
@@ -170,14 +215,9 @@ export function registerTools(
                     throw err;
                 }
             }
-            // Whether this is a create or an update depends on the note existing,
-            // so pass what's allowed down and let the backend decide in the same
-            // step as the write.
-            const allow = allowedActions(path, writeFolders);
-            const canCreate = allow.has("create");
-            const canUpdate = allow.has("update");
-            if (!canCreate && !canUpdate) return checkWrite(path, "create", writeFolders)!;
-            const mode = canCreate && canUpdate ? "upsert" : canCreate ? "create" : "update";
+            const choice = chooseWriteMode(path, writeFolders);
+            if ("denied" in choice) return choice.denied;
+            const { mode } = choice;
             let ok: boolean;
             try {
                 // CouchDB mode replaces an existing note with a revision-checked put,

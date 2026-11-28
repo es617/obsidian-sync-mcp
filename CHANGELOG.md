@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **Plugins (opt-in, `PLUGINS`).** Add your own tools without forking: `PLUGINS=a,b` loads `a` and `b` from `plugins/` in `DATA_DIR` (or `PLUGIN_DIR`), `PLUGINS=all` loads every plugin there; unset, nothing loads. Each plugin registers tools at startup through a small context whose vault calls apply the same `READ_ONLY` and `WRITE_FOLDERS` checks as the built-in tools. A listed name with no plugin file, a plugin that fails to load, or a reused tool name stops startup with a message naming it. Symlinked plugin files are followed, so a Kubernetes ConfigMap can be mounted as the directory. Writing and reloading plugins from the agent is a planned follow-up.
+
 ## 0.14.0
 
 ### Features

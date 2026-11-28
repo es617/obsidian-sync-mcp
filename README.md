@@ -223,6 +223,36 @@ Several agents, or several server instances on one database, can edit the same n
 
 Local mode has no revisions: reads show none, and `expected_revision` is refused rather than ignored. `delete_note` and `move_note` do not check revisions yet (except a case-only rename on a case-insensitive vault, which rewrites the one note like `write_note`). Edits made in Obsidian reach CouchDB through LiveSync replication, which has no revision check; an Obsidian edit racing an agent edit is still left to LiveSync's conflict handling.
 
+### Plugins (opt-in)
+
+Plugins add your own tools without forking. They are off by default: nothing loads unless `PLUGINS` is set.
+
+- `PLUGINS=tasks,daily-note` loads only those plugins. A name with no plugin file stops startup.
+- `PLUGINS=all` loads every plugin in the directory, including any added later. That's risky: whoever can put a file there can run code in the server. Prefer a list of names.
+
+A plugin is a `.js` or `.mjs` file (not starting with a dot) in `plugins/` in `DATA_DIR` (set `PLUGIN_DIR` to use another directory), named by its file name without the extension. A symlink to a file counts, so a read-only Kubernetes ConfigMap can be mounted as the whole directory. Plugins live outside the vault, so they never sync to your devices. Each default-exports a function that receives a context:
+
+```js
+// plugins/tasks.mjs, loaded with PLUGINS=tasks
+export default function register(ctx) {
+    ctx.addTool({
+        name: "add_task",
+        description: "Append a task to a note.",
+        parameters: ctx.z.object({ path: ctx.z.string(), task: ctx.z.string() }),
+        execute: async ({ path, task }) => {
+            await ctx.vault.editNote(path, (text) => `${text}\n- [ ] ${task}`);
+            return `Added to ${path}`;
+        },
+    });
+}
+```
+
+The context has `addTool` (same shape as a built-in tool; a name that is already taken stops startup), `z` (the server's zod, for parameters), `vault`, `vaultName`, `readOnly` and `log`. `ctx.vault` offers `readNote`, `getMetadata`, `listNotes`, `writeNote` (with `createOnly`), `editNote`, `deleteNote` and `moveNote`. Its writes pass the same checks as the built-in tools (`READ_ONLY`, `WRITE_FOLDERS` with its create/update/delete permissions), use the same write path, and keep the search index current; a refused write is returned to the agent as the tool's answer. Startup fails if a selected plugin doesn't load, throws, or adds a tool whose name is taken; files not selected by `PLUGINS` are never read.
+
+**A plugin runs inside the server process with the server's rights.** The context gives no way around the checks above, but a plugin's own code can import anything, read the server's environment (CouchDB credentials included) and reach the network. Enable only code you trust as much as the server itself, and keep the plugin directory writable only by whoever deploys the server.
+
+Plugins load once, at startup: changing one means a restart. Agents can't write or reload plugins; that may come later as a separate opt-in.
+
 ### Attachments (opt-in)
 
 With `ATTACHMENTS_ENABLED=true`, agents can also store images, PDFs, audio and video in the vault. In CouchDB mode they are written through livesync-commonlib, chunked and encrypted the same way as a file added in Obsidian, so they sync to every device.
@@ -297,6 +327,8 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `DISPLAY_TIMEZONE` | Optional | server's zone | IANA time zone for the human-readable half of the server time in `search_notes` status lines (UTC is always printed beside it), e.g. `Europe/Berlin`. An invalid zone falls back to UTC with a warning at startup |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
 | `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP, and the vault backend rejects writes as well. Useful when sharing the server with multiple AI clients and write access should be opt-in. This protects the vault from MCP clients; it is not a database-level guarantee. To make CouchDB itself refuse writes, use CouchDB-side controls, such as a `validate_doc_update` function that rejects the server's CouchDB user. |
+| `PLUGINS` | Optional | — | Plugins to load: a comma-separated list of names, or `all` (risky: anything put in the directory runs). Unset or empty: none. See [Plugins](#plugins-opt-in). |
+| `PLUGIN_DIR` | Optional | `DATA_DIR/plugins` | Directory the plugins are loaded from. |
 | `WRITE_FOLDERS` | Optional | — | Comma-separated list of vault-relative folders where agents may write (e.g. `MCP,Inbox`). The whole vault stays readable; paths outside the listed folders are read-only. Add permissions after a colon to limit a folder: `create` (add new files), `update` (change existing files) and `delete` (delete files or move them away), joined with `+`. A folder without permissions gets all three. For example `MCP,Raw:create,Notes:create+update`: anything goes in `MCP`, agents can add to `Raw` but never overwrite, edit, move or delete what is there, and can add and edit in `Notes` but not delete. `move_note` and `move_attachment` need `delete` at the source and `create` at the destination, and never replace an existing note. An attachment is replaced only with `overwrite=true`, which needs both `create` and `update`, so attachments can't be replaced in an `update`-only folder. The most specific folder applies, so `Raw:create,Raw/scratch` makes `Raw/scratch` fully writable; `/` stands for the vault root (`/,Raw:create` makes everything writable except `Raw`). Matching is folder-boundary-aware (`MCP` matches `MCP/note.md` but not `MCP-private/note.md`). Paths are compared the way the vault resolves them: `\` counts as `/`, and a case variant of a folder (`raw/`) gets only what both spellings allow, since LiveSync, macOS and Windows treat them as one folder. The server refuses to start on an unknown permission, a folder listed twice (case variants included) or a folder that can never match. Enforced server-side, unlike `MCP_INSTRUCTIONS`; in local mode, writes, deletes and moves through a symlink (to a file or a folder) are refused while it is set, since the check sees the requested path; reads still follow symlinks. Ignored when `READ_ONLY=true`; unset or empty means the whole vault is writable. |
 | `ATTACHMENTS_ENABLED` | Optional | `false` | Set to `true` to enable the [attachment tools](#attachments-opt-in) and the upload endpoint. Under `READ_ONLY=true` only `get_attachment_metadata` and `list_attachments` are exposed and the endpoint is not mounted. With CouchDB, startup then always reads the change feed from the beginning to learn existing attachments (it already does so whenever notes are indexed, to rebuild the search text) |
 | `ATTACHMENT_MAX_BYTES` | Optional | `20971520` (20 MB) | Largest file accepted by an upload URL. The whole file is held in memory while it is written |
