@@ -227,10 +227,10 @@ Local mode has no revisions: reads show none, and `expected_revision` is refused
 
 Plugins add your own tools without forking. They are off by default: nothing loads unless `PLUGINS` is set.
 
-- `PLUGINS=tasks,daily-note` loads only those plugins. A name with no plugin file stops startup.
+- `PLUGINS=tasks,daily-note` loads only those plugins. A name with no plugin file stops startup. List names without the extension (`tasks`, not `tasks.mjs`).
 - `PLUGINS=all` loads every plugin in the directory, including any added later. That's risky: whoever can put a file there can run code in the server. Prefer a list of names.
 
-A plugin is a `.js` or `.mjs` file (not starting with a dot) in `plugins/` in `DATA_DIR` (set `PLUGIN_DIR` to use another directory), named by its file name without the extension. A symlink to a file counts, so a read-only Kubernetes ConfigMap can be mounted as the whole directory. Plugins live outside the vault, so they never sync to your devices. Each default-exports a function that receives a context:
+A plugin is a `.mjs` file (`.js` also works, see below) in `plugins/` in `DATA_DIR`, or in `PLUGIN_DIR` when set, named by its file name without the extension; files starting with a dot are skipped. A symlink to a file counts, so a read-only Kubernetes ConfigMap can be mounted as the whole directory. Startup refuses a plugin directory inside `VAULT_PATH`, and a plugin whose symlink resolves into it: plugins never live where synced devices or agents can write. Without `DATA_DIR`, `HOME` and `USERPROFILE` the data directory falls back to `/tmp`, so plugins then need `PLUGIN_DIR`. Each plugin default-exports a function that receives a context:
 
 ```js
 // plugins/tasks.mjs, loaded with PLUGINS=tasks
@@ -247,9 +247,32 @@ export default function register(ctx) {
 }
 ```
 
-The context has `addTool` (same shape as a built-in tool; a name that is already taken stops startup), `z` (the server's zod, for parameters), `vault`, `vaultName`, `readOnly` and `log`. `ctx.vault` offers `readNote`, `getMetadata`, `listNotes`, `writeNote` (with `createOnly`), `editNote`, `deleteNote` and `moveNote`. Its writes pass the same checks as the built-in tools (`READ_ONLY`, `WRITE_FOLDERS` with its create/update/delete permissions), use the same write path, and keep the search index current; a refused write is returned to the agent as the tool's answer. Startup fails if a selected plugin doesn't load, throws, or adds a tool whose name is taken; files not selected by `PLUGINS` are never read.
+The context has `addTool` (same shape as a built-in tool), `z` (the server's zod, for parameters), `vault`, `vaultName`, `readOnly` and `log`; it is frozen, and each plugin gets its own. `ctx.vault` offers `readNote`, `getMetadata`, `listNotes`, `writeNote` (with `createOnly`), `editNote`, `deleteNote` and `moveNote`. Its writes go through the built-in tools' own write path, so they pass the same checks (`READ_ONLY`, `WRITE_FOLDERS` with its create/update/delete permissions), give the same answers and keep the search index current; a refused write is returned to the agent as the tool's answer. Paths and content must be strings, and an `editNote` callback must return the new text as a string, or the write is refused. In CouchDB mode the callback runs again when another writer changed the note in between, so it must have no side effects: compute the new text from the text it is given, and nothing else.
 
-**A plugin runs inside the server process with the server's rights.** The context gives no way around the checks above, but a plugin's own code can import anything, read the server's environment (CouchDB credentials included) and reach the network. Enable only code you trust as much as the server itself, and keep the plugin directory writable only by whoever deploys the server.
+`addTool` works only while the plugin's function runs (or until its promise resolves); a later call throws. Tool names of built-in tools are reserved even when the tool is switched off (`READ_ONLY`, attachments off), and a name that is already taken stops startup, as does a selected plugin that doesn't load or throws. Files not selected by `PLUGINS` are never read. Each loaded plugin is logged with its file and the file it resolves to, which is the code that runs:
+
+```
+Plugin loaded: tasks (tasks.mjs -> /plugins/..2026_11_28_10_00_00.000000001/tasks.mjs)
+```
+
+Under `READ_ONLY=true` plugin tools stay listed and every write they try is refused with the `READ_ONLY` message. A plugin that only makes sense with writes can skip registering its write tools when `ctx.readOnly` is true.
+
+Writing plugins:
+
+- Prefer `.mjs`. A `.js` file with `export default` loads only on Node 22.7 or later (which detects the module syntax; 22.0 to 22.6 fail with "Unexpected token 'export'"), or when a `package.json` with `"type": "module"` sits in or above the plugin directory.
+- A plugin can't `import` the server's packages by name (`zod`, `fastmcp` and so on): Node looks for them next to the plugin file, not in the server's `node_modules`. Use what `ctx` gives you (`ctx.z` for parameters). Node's built-in modules (`node:fs` and so on) work.
+
+With Docker, mount your plugins read-only and point `PLUGIN_DIR` at them:
+
+```bash
+docker run ... \
+  -v ./plugins:/plugins:ro -e PLUGIN_DIR=/plugins -e PLUGINS=tasks \
+  ghcr.io/es617/obsidian-sync-mcp:latest
+```
+
+On Fly.io, build your own image from the published one with the plugins copied in (`COPY plugins/ /plugins/`) and set `PLUGIN_DIR=/plugins` and `PLUGINS`. With the default directory, `deploy/mcp-with-db` would look in `/opt/couchdb/data/.mcp/plugins` on the CouchDB volume.
+
+**A plugin runs inside the server process with the server's rights.** The context gives no way around the checks above, but a plugin's own code can import Node's modules, read the server's environment (CouchDB credentials included) and reach the network. Enable only code you trust as much as the server itself, and keep the plugin directory writable only by whoever deploys the server.
 
 Plugins load once, at startup: changing one means a restart. Agents can't write or reload plugins; that may come later as a separate opt-in.
 
@@ -326,9 +349,9 @@ Without `MCP_AUTH_TOKEN`, the server runs without authentication — suitable fo
 | `LOG_LEVEL` | Optional | — | Set to `debug` for verbose logging (library logs, change feed, index sync) |
 | `DISPLAY_TIMEZONE` | Optional | server's zone | IANA time zone for the human-readable half of the server time in `search_notes` status lines (UTC is always printed beside it), e.g. `Europe/Berlin`. An invalid zone falls back to UTC with a warning at startup |
 | `MCP_REFRESH_DAYS` | Optional | `14` | Days before auth session expires |
-| `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP, and the vault backend rejects writes as well. Useful when sharing the server with multiple AI clients and write access should be opt-in. This protects the vault from MCP clients; it is not a database-level guarantee. To make CouchDB itself refuse writes, use CouchDB-side controls, such as a `validate_doc_update` function that rejects the server's CouchDB user. |
+| `READ_ONLY` | Optional | `false` | Set to `true` to disable all write tools (`write_note`, `edit_note`, `delete_note`, `move_note`). Only read tools are exposed via MCP (plugin tools stay listed, but their writes are refused), and the vault backend rejects writes as well. Useful when sharing the server with multiple AI clients and write access should be opt-in. This protects the vault from MCP clients; it is not a database-level guarantee. To make CouchDB itself refuse writes, use CouchDB-side controls, such as a `validate_doc_update` function that rejects the server's CouchDB user. |
 | `PLUGINS` | Optional | — | Plugins to load: a comma-separated list of names, or `all` (risky: anything put in the directory runs). Unset or empty: none. See [Plugins](#plugins-opt-in). |
-| `PLUGIN_DIR` | Optional | `DATA_DIR/plugins` | Directory the plugins are loaded from. |
+| `PLUGIN_DIR` | Optional | `DATA_DIR/plugins` | Directory the plugins are loaded from; must be outside `VAULT_PATH`. Required for plugins when `DATA_DIR`, `HOME` and `USERPROFILE` are all unset. In Docker, mount the plugins read-only and set this (see [Plugins](#plugins-opt-in)). |
 | `WRITE_FOLDERS` | Optional | — | Comma-separated list of vault-relative folders where agents may write (e.g. `MCP,Inbox`). The whole vault stays readable; paths outside the listed folders are read-only. Add permissions after a colon to limit a folder: `create` (add new files), `update` (change existing files) and `delete` (delete files or move them away), joined with `+`. A folder without permissions gets all three. For example `MCP,Raw:create,Notes:create+update`: anything goes in `MCP`, agents can add to `Raw` but never overwrite, edit, move or delete what is there, and can add and edit in `Notes` but not delete. `move_note` and `move_attachment` need `delete` at the source and `create` at the destination, and never replace an existing note. An attachment is replaced only with `overwrite=true`, which needs both `create` and `update`, so attachments can't be replaced in an `update`-only folder. The most specific folder applies, so `Raw:create,Raw/scratch` makes `Raw/scratch` fully writable; `/` stands for the vault root (`/,Raw:create` makes everything writable except `Raw`). Matching is folder-boundary-aware (`MCP` matches `MCP/note.md` but not `MCP-private/note.md`). Paths are compared the way the vault resolves them: `\` counts as `/`, and a case variant of a folder (`raw/`) gets only what both spellings allow, since LiveSync, macOS and Windows treat them as one folder. The server refuses to start on an unknown permission, a folder listed twice (case variants included) or a folder that can never match. Enforced server-side, unlike `MCP_INSTRUCTIONS`; in local mode, writes, deletes and moves through a symlink (to a file or a folder) are refused while it is set, since the check sees the requested path; reads still follow symlinks. Ignored when `READ_ONLY=true`; unset or empty means the whole vault is writable. |
 | `ATTACHMENTS_ENABLED` | Optional | `false` | Set to `true` to enable the [attachment tools](#attachments-opt-in) and the upload endpoint. Under `READ_ONLY=true` only `get_attachment_metadata` and `list_attachments` are exposed and the endpoint is not mounted. With CouchDB, startup then always reads the change feed from the beginning to learn existing attachments (it already does so whenever notes are indexed, to rebuild the search text) |
 | `ATTACHMENT_MAX_BYTES` | Optional | `20971520` (20 MB) | Largest file accepted by an upload URL. The whole file is held in memory while it is written |
