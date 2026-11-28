@@ -12,7 +12,7 @@
  */
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
-import { Vault } from "../src/vault.js";
+import { MAX_GROUP, Vault } from "../src/vault.js";
 import { NoteExistsError, NoteNotFoundError, RevisionMismatchError, UpdateRetriesExhaustedError } from "../src/vault-backend.js";
 
 // tsup strips the "node:" prefix from imports, and node:test only exists under
@@ -473,6 +473,45 @@ describe("Vault.updateNote group commit (stubbed manipulator)", () => {
         assert.deepEqual(new Set([g1.revision, g2.revision, g3.revision]), new Set([revOf("a.md")]));
         assert.equal(textOf("a.md"), "base+e1+e2+e3");
         assert.equal(puts(calls), 1, calls.join(", "));
+    });
+
+    it(`a queue longer than MAX_GROUP (${MAX_GROUP}) is written in groups of at most that many, in order`, async () => {
+        const { vault, calls, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const n = 2 * MAX_GROUP + 5;
+        const release = holdLock(vault, "a.md");
+        const pending = Array.from({ length: n }, (_, i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        const results = await Promise.all(pending);
+        assert.equal(textOf("a.md"), "base" + Array.from({ length: n }, (_, i) => `+e${i}`).join(""));
+        assert.equal(puts(calls), 3, calls.join(", "));
+        const sizes = [...results.reduce((m, r) => m.set(r.revision, (m.get(r.revision) ?? 0) + 1), new Map<string, number>()).values()];
+        assert.deepEqual(sizes, [MAX_GROUP, MAX_GROUP, 5]);
+    });
+
+    it("if the drain itself throws, the group in flight and the queued edits are rejected, and the note's next edit works", async () => {
+        const { vault, seed, textOf } = stubVault();
+        seed("a.md", "base");
+        const boom = new Error("boom");
+        (vault as any).writeGroup = async () => {
+            await tick();
+            throw boom;
+        };
+        const release = holdLock(vault, "a.md");
+        const inFlight = [1, 2, 3].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        await tick();
+        await release();
+        // These queue while the failing group is in flight.
+        const queued = [4, 5].map((i) => vault.updateNote("a.md", (c) => c + `+e${i}`, { maxAttempts: 10 }));
+        const settled = await Promise.race([Promise.allSettled([...inFlight, ...queued]), tick(500).then(() => "hung" as const)]);
+        assert.notEqual(settled, "hung", "a member was left waiting");
+        for (const r of settled as PromiseSettledResult<unknown>[]) assert.ok(r.status === "rejected" && r.reason === boom);
+        assert.equal((vault as any).pendingUpdates.size, 0);
+        delete (vault as any).writeGroup;
+        const next = await vault.updateNote("a.md", (c) => c + "+after", { maxAttempts: 10 });
+        assert.equal(next.content, "base+after");
+        assert.equal(textOf("a.md"), "base+after");
     });
 
     it("every member of a group gets the text that was written with the revision", async () => {

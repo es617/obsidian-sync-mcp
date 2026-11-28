@@ -34,9 +34,11 @@ const WRITE_TOOLS = ["write_note", "edit_note", "delete_note", "move_note"] as c
  * EDIT_MIN_RETRY_MS has passed or 5 x this many rounds have run, whichever
  * comes first (on a fast database usually the round cap). write_note uses the
  * same budget to replace an existing note. Edits queued on one server are
- * written together (see CouchVault.updateNote), so rounds are lost only to
- * other instances. A refused edit answers "Failed to edit note" and writes
- * nothing; it is never silently dropped.
+ * written together (see Vault.updateNote) and don't spend rounds on each
+ * other; rounds are lost to other instances, and to a write_note, move_note
+ * or delete_note of the note on this one, which takes the note's lock ahead
+ * of edits still queued. A refused edit answers "Failed to edit note" and
+ * writes nothing; it is never silently dropped.
  */
 export const EDIT_MAX_ATTEMPTS = 10;
 /** edit_note keeps retrying past EDIT_MAX_ATTEMPTS until this much time has passed or 5 x the attempts have run. */
